@@ -101,3 +101,8 @@ if __name__ == "__main__":
         sys.exit(main(sys.argv[1:]))
     except KeyboardInterrupt:
         pass
+    except urllib.error.URLError as e:
+        # Almost always "nothing is listening": the app is not running, was built without the
+        # `remote` feature, or is serving on the other port.
+        print(f"brp: cannot reach 127.0.0.1: {e.reason}", file=sys.stderr)
+        sys.exit(1)

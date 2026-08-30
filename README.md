@@ -264,6 +264,38 @@ tools/brp watch <entity> <type>...          # stream every change until interrup
 tools/brp --port 15712 list                 # the server instead
 ```
 
+### An inspector window
+
+`--features inspector` adds `bevy-inspector-egui`, an egui panel listing every entity and component
+with editable values. It is a separate mechanism from BRP: it runs *inside* the process, so it
+cannot see the server, and it draws over the game.
+
+```bash
+cargo run -p noob_tube_client --features inspector   # F1 toggles the panel
+```
+
+It starts hidden because egui takes the pointer while it is up, which fights the locked cursor mouse
+look needs. It shows the same set of types BRP does — whatever derives `Reflect` and is registered.
+
+Its `bevy_egui` and `egui` versions are pinned to this exact release, so it moves in lockstep with
+Bevy the way `bevy_remote` does.
+
+### Driving the game from an agent
+
+`--features remote` also pulls in `bevy_brp_extras`, which adds BRP methods for screenshots and
+synthetic keyboard and mouse input. It owns the HTTP transport in the client, on the same port
+`RemoteInspectPlugin` would have used, which is why `RemoteTypesPlugin` exists: two plugins adding
+`RemoteHttpPlugin` is a warning at best.
+
+Paired with the `bevy_brp_mcp` server in `.mcp.json`, that makes the running game reachable from a
+coding agent — 47 tools covering queries, mutation, watches, launching and shutting the app down,
+reading its logs, and injecting input. Install it with `cargo install bevy_brp_mcp`; Claude Code
+reads `.mcp.json` at startup, so it takes a restart to appear.
+
+This overlaps with `harness.rs`, which does scripted input and screenshots from the inside. The
+harness stays for now: it runs in CI without an agent, and BRP samples at the frame rate, which is
+not enough for the tick-exact checks M4 will need.
+
 ### Recording what the ECS does
 
 The `+watch` methods hold the connection open and emit one JSON line per change, so redirecting

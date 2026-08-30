@@ -16,13 +16,35 @@ use bevy_remote::http::RemoteHttpPlugin;
 
 use crate::player::{PlayerInput, PlayerState};
 
-/// BRP port for the client. This is the protocol's default, so external tools find it unprompted.
+/// BRP port for the client. This is the protocol's default, so external tools find it unprompted,
+/// and it is also what `BrpExtrasPlugin` binds when the client leaves the transport to it.
 pub const CLIENT_REMOTE_PORT: u16 = 15702;
 
-/// BRP port for the server, clear of the client's two so both can run on one machine.
+/// BRP port for the server, clear of the client's, so both can run on one machine.
 pub const SERVER_REMOTE_PORT: u16 = 15712;
 
-/// Serves BRP on `port`, bound to localhost only.
+/// Puts the shared types into the registry, without opening a port.
+///
+/// Split out from [`RemoteInspectPlugin`] because the transport can come from elsewhere: the client
+/// lets `BrpExtrasPlugin` own it, and two plugins adding `RemoteHttpPlugin` is a warning at best.
+pub struct RemoteTypesPlugin;
+
+impl Plugin for RemoteTypesPlugin {
+    fn build(&self, app: &mut App) {
+        app
+            // A headless server built on MinimalPlugins has almost nothing in its type registry —
+            // not even `Name`, which is what makes a listing of entities readable at all.
+            .register_type::<Name>()
+            // Field types have to be in the registry too, or a component that reflects fine still
+            // fails to serialise.
+            .register_type::<Vec2>()
+            .register_type::<Vec3>()
+            .register_type::<PlayerInput>()
+            .register_type::<PlayerState>();
+    }
+}
+
+/// Serves BRP on `port`, bound to localhost only, and registers the shared types.
 pub struct RemoteInspectPlugin {
     pub port: u16,
 }
@@ -34,14 +56,6 @@ impl Plugin for RemoteInspectPlugin {
             // separate plugin, so BRP could later be served over something other than HTTP.
             .add_plugins(RemotePlugin::default())
             .add_plugins(RemoteHttpPlugin::default().with_port(self.port))
-            // A headless server built on MinimalPlugins has almost nothing in its type registry —
-            // not even `Name`, which is what makes a listing of entities readable at all.
-            .register_type::<Name>()
-            // Field types have to be in the registry too, or a component that reflects fine still
-            // fails to serialise.
-            .register_type::<Vec2>()
-            .register_type::<Vec3>()
-            .register_type::<PlayerInput>()
-            .register_type::<PlayerState>();
+            .add_plugins(RemoteTypesPlugin);
     }
 }

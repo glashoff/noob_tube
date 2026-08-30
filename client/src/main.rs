@@ -30,20 +30,54 @@ fn main() {
         .add_systems(Startup, connect)
         .add_observer(on_connected)
         .add_plugins(remote_inspection())
+        .add_plugins(world_inspector())
         .run();
 }
 
 /// Live ECS inspection over BRP, compiled in only with `--features remote`.
+///
+/// `BrpExtrasPlugin` owns the transport here rather than `RemoteInspectPlugin`. It adds
+/// `RemotePlugin` and the HTTP server itself — on `CLIENT_REMOTE_PORT`, which is its default too —
+/// and extends BRP with methods for screenshots and synthetic keyboard and mouse input. Those are
+/// what let an agent drive the running game the way `harness.rs` does, but from outside and without
+/// a scripted path compiled in.
 #[cfg(feature = "remote")]
 fn remote_inspection() -> impl Plugin {
-    noob_tube_shared::remote::RemoteInspectPlugin {
-        port: noob_tube_shared::remote::CLIENT_REMOTE_PORT,
+    |app: &mut App| {
+        app.add_plugins(noob_tube_shared::remote::RemoteTypesPlugin)
+            .add_plugins(bevy_brp_extras::BrpExtrasPlugin::new());
     }
 }
 
 /// Without the feature there is nothing to add, and `()` is a valid empty plugin group.
 #[cfg(not(feature = "remote"))]
 fn remote_inspection() -> impl Plugin {
+    |_: &mut App| {}
+}
+
+/// An egui window listing every entity and component, compiled in with `--features inspector`.
+///
+/// Unlike BRP this runs inside the process, so it cannot see the server and it draws over the game.
+/// It starts hidden and toggles with F1 — while it is up, egui takes the pointer, which fights the
+/// locked cursor that mouse look needs.
+///
+/// It shows only what derives `Reflect` and is registered, the same requirement BRP has.
+#[cfg(feature = "inspector")]
+fn world_inspector() -> impl Plugin {
+    use bevy::input::common_conditions::input_toggle_active;
+    use bevy_inspector_egui::bevy_egui::EguiPlugin;
+    use bevy_inspector_egui::quick::WorldInspectorPlugin;
+
+    |app: &mut App| {
+        // WorldInspectorPlugin warns rather than adds this itself, so it has to come first.
+        app.add_plugins(EguiPlugin::default()).add_plugins(
+            WorldInspectorPlugin::new().run_if(input_toggle_active(false, KeyCode::F1)),
+        );
+    }
+}
+
+#[cfg(not(feature = "inspector"))]
+fn world_inspector() -> impl Plugin {
     |_: &mut App| {}
 }
 

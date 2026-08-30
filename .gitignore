@@ -3,3 +3,6 @@
 # Character assets are licensed for use but not redistribution — see README,
 # "Character assets: an open question". Each developer downloads their own copy.
 /assets/
+
+# Byte-code from running the Python helpers in tools/
+__pycache__/

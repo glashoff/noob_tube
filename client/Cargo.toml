@@ -8,6 +8,13 @@ license.workspace = true
 noob_tube_shared = { workspace = true }
 bevy = { workspace = true, features = ["default"] }
 lightyear = { workspace = true }
+# In-process inspector window. Its egui and bevy_egui versions are tied to this exact release,
+# so it moves in lockstep with Bevy just as bevy_remote does.
+bevy-inspector-egui = { version = "0.37", optional = true }
+# Adds BRP methods for screenshots and synthetic input, which is what lets an agent drive the
+# running game the way the harness does.
+bevy_brp_extras = { version = "0.22.5", optional = true }
 
 [features]
-remote = ["noob_tube_shared/remote"]
+remote = ["noob_tube_shared/remote", "dep:bevy_brp_extras"]
+inspector = ["dep:bevy-inspector-egui"]
