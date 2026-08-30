@@ -15,6 +15,7 @@ fn main() {
         // lightyear registers states; MinimalPlugins does not include StatesPlugin.
         .add_plugins(bevy::state::app::StatesPlugin)
         .add_plugins(bevy::log::LogPlugin::default())
+        .add_plugins(noob_tube_shared::types::SharedTypesPlugin)
         .add_plugins(server::ServerPlugins {
             tick_duration: tick_duration(),
         })
@@ -47,6 +48,7 @@ fn start_listening(mut commands: Commands) {
     let server = commands
         .spawn((
             Name::from("Server"),
+            noob_tube_shared::types::Authored,
             server::NetcodeServer::new(server::NetcodeConfig {
                 protocol_id: PROTOCOL_ID,
                 private_key: PLACEHOLDER_PRIVATE_KEY,
@@ -68,6 +70,10 @@ fn on_client_connected(trigger: On<Add, LinkOf>, mut commands: Commands) {
     // ReplicationSender is what lets us replicate local entities to this client.
     commands
         .entity(entity)
-        .insert((ReplicationSender, Name::from("Connection")));
+        .insert((
+            ReplicationSender,
+            Name::from("Connection"),
+            noob_tube_shared::types::Authored,
+        ));
     info!("client connected: {entity}");
 }

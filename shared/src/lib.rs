@@ -8,6 +8,7 @@ use core::time::Duration;
 pub mod collision;
 pub mod movement;
 pub mod player;
+pub mod types;
 #[cfg(feature = "remote")]
 pub mod remote;
 

@@ -22,6 +22,7 @@ fn main() {
         .insert_resource(Time::<Fixed>::from_hz(noob_tube_shared::TICK_RATE))
         .add_plugins((
             world::WorldPlugin,
+            noob_tube_shared::types::SharedTypesPlugin,
             local_player::LocalPlayerPlugin,
             debug_draw::DebugDrawPlugin,
             harness::HarnessPlugin,
@@ -46,8 +47,7 @@ fn main() {
 #[cfg(feature = "remote")]
 fn remote_inspection() -> impl Plugin {
     |app: &mut App| {
-        app.add_plugins(noob_tube_shared::remote::RemoteTypesPlugin)
-            .add_plugins(bevy_brp_extras::BrpExtrasPlugin::new());
+        app.add_plugins(bevy_brp_extras::BrpExtrasPlugin::new());
     }
 }
 
@@ -86,7 +86,7 @@ fn world_inspector() -> impl Plugin {
                 WorldInspectorPlugin::new().run_if(input_toggle_active(false, KeyCode::F1)),
             )
             .add_plugins(
-                FilterQueryInspectorPlugin::<With<Name>>::default()
+                FilterQueryInspectorPlugin::<With<noob_tube_shared::types::Authored>>::default()
                     .run_if(input_toggle_active(false, KeyCode::F2)),
             );
     }
@@ -115,6 +115,7 @@ fn connect(mut commands: Commands) {
     let client = commands
         .spawn((
             Name::from("Client"),
+            noob_tube_shared::types::Authored,
             Client,
             ReplicationReceiver,
             Link::default(),

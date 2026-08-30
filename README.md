@@ -280,8 +280,15 @@ the top level is `Client`, `Level`, `LocalPlayer`, the pointer and the monitors,
 once. The panel already hides observers and the entities Bevy 0.19 uses to store resources, so the
 563 entities a BRP query reports are never all on screen.
 
-**F2** filters on `With<Name>`: a flat list of what this crate spawns. Good for reaching one known
-entity, but it ignores the hierarchy and shows parents beside their own children.
+**F2** filters on `With<Authored>`: a flat list of exactly what this crate spawns. Good for reaching
+one known entity, but it ignores the hierarchy and shows parents beside their own children.
+
+`Authored` is a marker we add at every spawn site, because the ECS draws no line between our
+entities and the engine's — `DefaultPlugins` is some forty plugins writing into the same world we
+do. Filtering on `Name` came close, since we name what we spawn, but that is a coincidence rather
+than a rule: `bevy_gizmos_render` names its three draw-phase placeholders too, and they appeared in
+the list looking like ours. The marker has to be remembered at each `spawn`, which is the price of
+Bevy not tracking who created an entity.
 
 Both start hidden because egui takes the pointer while one is up, which fights the locked cursor
 mouse look needs. Both show the same set of types BRP does — whatever derives `Reflect` and is

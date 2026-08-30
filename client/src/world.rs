@@ -2,6 +2,7 @@
 
 use bevy::prelude::*;
 use noob_tube_shared::collision::CollisionWorld;
+use noob_tube_shared::types::Authored;
 
 /// Half-extent of the ground plane, in metres.
 const HALF_EXTENT: f32 = 250.0;
@@ -42,6 +43,7 @@ fn spawn_ground(
         .spawn((
             Name::from("Level"),
             Level,
+            Authored,
             Transform::IDENTITY,
             Visibility::default(),
         ))
@@ -49,6 +51,7 @@ fn spawn_ground(
     let props = commands
         .spawn((
             Name::from("Props"),
+            Authored,
             Transform::IDENTITY,
             Visibility::default(),
             ChildOf(level),
@@ -57,6 +60,7 @@ fn spawn_ground(
 
     commands.spawn((
         Name::from("Ground"),
+        Authored,
         Mesh3d(meshes.add(
             Plane3d::default()
                 .mesh()
@@ -94,6 +98,7 @@ fn spawn_ground(
     {
         commands.spawn((
             Name::from(format!("Crate {i}")),
+            Authored,
             Mesh3d(box_mesh.clone()),
             MeshMaterial3d(box_material.clone()),
             Transform::from_translation(offset),
@@ -108,6 +113,7 @@ fn spawn_ground(
 
     commands.spawn((
         Name::from("Sun"),
+        Authored,
         DirectionalLight {
             illuminance: 10_000.0,
             shadow_maps_enabled: true,

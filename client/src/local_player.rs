@@ -9,6 +9,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use noob_tube_shared::collision::CollisionWorld;
 use noob_tube_shared::player::{PlayerInput, PlayerState};
+use noob_tube_shared::types::Authored;
 
 /// Radians of look per pixel of mouse movement.
 const MOUSE_SENSITIVITY: f32 = 0.0022;
@@ -100,6 +101,7 @@ pub struct MovementTicks(pub u64);
 fn spawn_player(mut commands: Commands) {
     commands.spawn((
         Name::from("LocalPlayer"),
+        Authored,
         LocalPlayer {
             state: PlayerState::default(),
             yaw: 0.0,
