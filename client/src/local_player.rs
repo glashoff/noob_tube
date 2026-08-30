@@ -20,7 +20,8 @@ pub struct LocalPlayerPlugin;
 
 impl Plugin for LocalPlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.register_type::<LocalPlayer>()
+        app.init_resource::<PointerOverUi>()
+            .register_type::<LocalPlayer>()
             .register_type::<CurrentInput>()
             .register_type::<ScriptedInput>()
             .register_type::<MovementTicks>()
@@ -28,7 +29,7 @@ impl Plugin for LocalPlayerPlugin {
             .init_resource::<ScriptedInput>()
             .init_resource::<MovementTicks>()
             .add_systems(Startup, spawn_player)
-            .add_systems(Update, (grab_cursor, look, sample_input).chain())
+            .add_systems(Update, (note_pointer_over_ui, grab_cursor, look, sample_input).chain())
             // Movement runs on the fixed timestep so it ticks at the same rate the server will.
             .add_systems(FixedUpdate, step_movement)
             .add_systems(PostUpdate, place_camera.before(TransformSystems::Propagate));
@@ -56,6 +57,30 @@ struct CurrentInput(PlayerInput);
 #[derive(Resource, Default, Reflect)]
 #[reflect(Resource)]
 pub struct ScriptedInput(pub Option<PlayerInput>);
+
+/// Set while an inspector panel wants the pointer, so click-to-grab can stand aside.
+///
+/// Always false without the `inspector` feature — there is no UI to click on.
+#[derive(Resource, Default)]
+struct PointerOverUi(bool);
+
+/// Update: records whether egui is under the pointer, ahead of [`grab_cursor`].
+///
+/// A resource rather than querying egui inside `grab_cursor`, so that system needs no `cfg` on its
+/// parameters and reads the same either way.
+#[cfg(feature = "inspector")]
+fn note_pointer_over_ui(
+    mut contexts: bevy_inspector_egui::bevy_egui::EguiContexts,
+    mut over: ResMut<PointerOverUi>,
+) {
+    over.0 = contexts
+        .ctx_mut()
+        .map(|ctx| ctx.egui_wants_pointer_input())
+        .unwrap_or(false);
+}
+
+#[cfg(not(feature = "inspector"))]
+fn note_pointer_over_ui() {}
 
 /// Diagnostics: how many times the fixed movement step has actually run.
 ///
@@ -94,16 +119,32 @@ fn spawn_player(mut commands: Commands) {
 /// Mouse look reads relative motion, which the OS only keeps delivering once the pointer is locked;
 /// unlocked, it stops at the screen edge. Escape has to give it back, or the window cannot be left.
 ///
+/// Three clicks must *not* grab, or the window becomes impossible to work with:
+///
+/// - one landing outside the client area, which is how a window edge is dragged to resize it;
+/// - one on an unfocused window, which is how a window is raised;
+/// - one on an inspector panel, which is how its values are edited.
+///
+/// The first two are what made resizing the window impossible: the grab confined the pointer before
+/// it ever reached the edge.
+///
 /// In Bevy 0.19 this lives on `CursorOptions`, a component beside `Window`, not a field inside it.
 fn grab_cursor(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
+    over_ui: Res<PointerOverUi>,
+    window: Single<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
-    let mut cursor = cursor.into_inner();
-    if mouse.just_pressed(MouseButton::Left) {
+    let (window, mut cursor) = window.into_inner();
+    let inside = window.cursor_position().is_some();
+    if mouse.just_pressed(MouseButton::Left) && inside && window.focused && !over_ui.0 {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
+    }
+    // Losing focus has to release the pointer too, or alt-tabbing away leaves it captured.
+    if !window.focused {
+        cursor.grab_mode = CursorGrabMode::None;
+        cursor.visible = true;
     }
     if keys.just_pressed(KeyCode::Escape) {
         cursor.grab_mode = CursorGrabMode::None;
