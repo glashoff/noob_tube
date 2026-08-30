@@ -235,6 +235,42 @@ mod tests {
         assert_eq!(state.eye_height(), CROUCH_EYE_HEIGHT);
     }
 
+    /// Standing still must not sink. The capsule settles a fraction of a tick's gravity into the
+    /// floor on the first step — the cast finds no overlap when it starts exactly on the surface —
+    /// but that must be a one-off, not a slow descent through the level.
+    #[test]
+    fn standing_does_not_drift_downward() {
+        let world = floor_world();
+        let mut state = PlayerState::default();
+
+        run(&mut state, &PlayerInput::default(), &world, 64);
+        let after_one_second = state.position.y;
+
+        run(&mut state, &PlayerInput::default(), &world, 64 * 60);
+        let after_a_minute = state.position.y;
+
+        assert!(
+            (after_a_minute - after_one_second).abs() < 1e-6,
+            "sank from {after_one_second} to {after_a_minute} over a minute"
+        );
+        assert!(after_a_minute > -0.01, "settled too deep: {after_a_minute}");
+    }
+
+    /// Walking across the floor must not sink either — the sweep runs a longer path each tick.
+    #[test]
+    fn walking_does_not_drift_downward() {
+        let world = floor_world();
+        let mut state = PlayerState::default();
+        let input = PlayerInput { forward: true, ..default_input() };
+
+        run(&mut state, &input, &world, 64);
+        let early = state.position.y;
+        run(&mut state, &input, &world, 64 * 30);
+        let late = state.position.y;
+
+        assert!((late - early).abs() < 1e-6, "sank from {early} to {late} while walking");
+    }
+
     /// The whole point of keeping this deterministic.
     #[test]
     fn identical_runs_produce_identical_state() {

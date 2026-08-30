@@ -242,13 +242,33 @@ The client entity therefore carries: `Client`, `ReplicationReceiver`, `Link`, `P
 `NetcodeClient`, `UdpIo`, `LocalAddr`, `PeerAddr`, plus a `PredictionManager` resource. The server
 attaches `ReplicationSender` to each incoming connection in its `Add<LinkOf>` observer.
 
-### M1 — Local movement
-A large ground plane, a first-person camera with mouse look, WASD plus jump and crouch. The
-movement code lives in `shared/` and uses the constants above.
+### M1 — Local movement ✔
+A 500 m ground plane with a few crates, a first-person camera, mouse look with cursor grab, and
+WASD plus jump and crouch. Movement lives in `shared/` and runs on a 64 Hz fixed timestep.
 
-The plane is built as a collision trimesh from the start, and movement goes through the
-collide-and-slide sweep rather than a simple floor clamp. Adding real level geometry later then
-needs no rewrite. This is also where the constants get validated by feel.
+The ground is a collision trimesh from the start and movement goes through the collide-and-slide
+sweep, so adding real level geometry later needs no rewrite.
+
+Mouse look is applied in `PostUpdate`, not on the fixed timestep — the view follows the frame rate
+while movement ticks at 64 Hz. Looking around at 64 Hz feels noticeably worse than moving at it.
+
+Two bugs the tests caught, both of which would have been confusing to diagnose by feel:
+
+- The yaw rotation had the wrong handedness, so the player walked backwards.
+- The ground probe reaches 0.12 m below the feet, so one tick into a jump the player is still
+  inside it. Counting that as grounded let a held jump key re-trigger every tick, pinning the
+  player just above the floor.
+
+Standing on the floor settles the capsule about 5 mm in — one tick of gravity, because the first
+cast finds no overlap when the capsule starts exactly on the surface. Tests assert this is a
+one-off and not a slow descent through the level.
+
+#### Verifying visually
+
+Tests say the movement maths is right; they say nothing about whether the camera is where it
+should be. Setting `NOOB_TUBE_HARNESS=<path>` makes the client walk a scripted route, log its
+foot position, save a screenshot and exit. Without the variable the harness is inert. `webgame`
+solves the same problem with its `client/scenarios/` directory.
 
 ### M2 — Character and animation
 Convert `Swat.fbx` to GLB with `fbx2gltf` (`webgame` already uses it), load the model, build an

@@ -1,5 +1,9 @@
 //! Game client: renders the world, samples input, predicts the local player.
 
+mod harness;
+mod local_player;
+mod world;
+
 use bevy::prelude::*;
 use lightyear::prelude::*;
 use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, PROTOCOL_ID, SERVER_PORT, tick_duration};
@@ -7,7 +11,19 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Noob Tube".into(),
+                ..default()
+            }),
+            ..default()
+        }))
+        .insert_resource(Time::<Fixed>::from_hz(noob_tube_shared::TICK_RATE))
+        .add_plugins((
+            world::WorldPlugin,
+            local_player::LocalPlayerPlugin,
+            harness::HarnessPlugin,
+        ))
         .add_plugins(client::ClientPlugins {
             tick_duration: tick_duration(),
         })

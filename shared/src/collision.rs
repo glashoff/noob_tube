@@ -6,6 +6,7 @@
 //!
 //! The sweep is a port of `sweepShape` in `webgame/shared/game/physics.ts`.
 
+use bevy::ecs::resource::Resource;
 use bevy::math::Vec3;
 use rapier3d::parry::query::{DefaultQueryDispatcher, ShapeCastOptions};
 use rapier3d::prelude::*;
@@ -20,6 +21,7 @@ use crate::movement::{
 const MAX_SLIDE_ITERATIONS: usize = 3;
 
 /// Static level geometry, queryable but never simulated.
+#[derive(Resource)]
 pub struct CollisionWorld {
     bodies: RigidBodySet,
     colliders: ColliderSet,
@@ -53,6 +55,14 @@ impl CollisionWorld {
     pub fn add_trimesh(&mut self, vertices: Vec<Vec3>, indices: Vec<[u32; 3]>) {
         let collider = ColliderBuilder::trimesh(vertices, indices)
             .expect("invalid collision mesh")
+            .build();
+        self.pending.push(self.colliders.insert(collider));
+    }
+
+    /// Adds a box collider, centred on `centre`, with the given half-extents.
+    pub fn add_cuboid(&mut self, centre: Vec3, half_extents: Vec3) {
+        let collider = ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
+            .position(Pose::from_translation(centre))
             .build();
         self.pending.push(self.colliders.insert(collider));
     }
