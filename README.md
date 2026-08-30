@@ -344,34 +344,59 @@ This overlaps with `harness.rs`, which does scripted input and screenshots from 
 harness stays for now: it runs in CI without an agent, and BRP samples at the frame rate, which is
 not enough for the tick-exact checks M4 will need.
 
-### Simulating a bad network
+### Tuning the network
 
-On localhost there is no latency, no jitter and no loss, so every netcode behaviour worth having is
-invisible and every measurement is meaningless. Three environment variables put a conditioner on the
-link, read by both binaries:
+Every network setting is an environment variable, read at startup. They are settings and not
+constants on purpose: what a shooter feels like at 30 ms and at 150 ms are different games, and
+finding out which trade is right means changing a number and playing, not changing a number and
+waiting for a link step. They all live in `shared/src/tuning.rs`.
 
 ```bash
-NOOB_TUBE_LATENCY_MS=60 NOOB_TUBE_JITTER_MS=8 NOOB_TUBE_LOSS=0.02 \
-  cargo run -p noob_tube_server
+NOOB_TUBE_PING_MS=100      simulated round trip; each end delays half of it
+NOOB_TUBE_JITTER_MS=10     random variation on each leg, ± this
+NOOB_TUBE_LOSS=0.02        packet loss probability, 0.0 to 1.0
+NOOB_TUBE_SEND_HZ=32       how often the server replicates       (server only)
+NOOB_TUBE_INTERP_RATIO=1.7 interpolation delay, in send intervals (client only)
+NOOB_TUBE_INTERP_MIN_MS=5  floor under that delay                (client only)
 ```
 
-The conditioner delays incoming payloads only, so the same values on both ends give a symmetric link
-with a round trip of twice the latency.
+**The conditioner has to be set on every process.** It delays only what a process *receives* — the
+server's copy delays inputs coming in, each client's copy delays snapshots coming in — so setting it
+on the server alone gives a half-duplex link that behaves like nothing real:
 
-What it makes visible: at 120 ms round trip the client's own capsule trails its camera by about
-1.1 m while walking, and catches up when it stops. Measured server against local simulation, both
-read from the running client:
-
-```
-moving   server z =  1.97   local z =  3.09   1.12 m apart
-         server z =  9.71   local z = 10.82   1.12 m apart
-stopped  server z = 13.84   local z = 13.84   0.00 m apart
+```bash
+export NOOB_TUBE_PING_MS=100 NOOB_TUBE_JITTER_MS=10
+cargo run -p noob_tube_server &
+cargo run -p noob_tube_client
 ```
 
-That gap is the latency itself — the client simulates ahead, and the server state it reads is
-another half round trip old. It is exactly the artefact prediction and reconciliation exist to hide,
-and it cannot be seen without a conditioner. The 0.000000 agreement measured earlier says only that
-two identical computations with nothing disturbing them produce the same answer.
+Both binaries log what is actually in effect, including "link untouched". That line exists because a
+run that was meant to be lagged and silently was not looks exactly like a netcode success.
+
+#### The three delays, and which knob moves which
+
+They are separate, and confusing them is how netcode gets tuned in the wrong direction.
+
+| what you feel | how long | knob |
+|---|---|---|
+| your own movement reacting | **zero** — the client predicts it | none; this is what prediction buys |
+| the server learning what you did | half the ping | `NOOB_TUBE_PING_MS` |
+| seeing another player's move | half the ping + interpolation delay | ping, `SEND_HZ`, `INTERP_RATIO` |
+
+Only the third is adjustable without changing the simulated link, and it is the one worth spending
+time on. At the defaults it is `1.7 / 32 Hz ≈ 53 ms` on top of the network. Raising `SEND_HZ`
+shortens it and costs bandwidth; lowering `INTERP_RATIO` shortens it and starts letting remote
+players freeze between updates, because the next one has not arrived yet.
+
+Lightyear **clamps rather than extrapolates** when it does run dry, so a too-short delay shows up as
+players stuttering to a halt and jumping, not as them sliding through walls.
+
+#### What it makes visible
+
+At a 100 ms ping the client runs about half a metre ahead of the server while walking, and rolls
+back when a lost input makes the server diverge. Both numbers are meaningless without a conditioner:
+on localhost the client and server agree to 0.000000, which says only that two identical
+computations with nothing disturbing them produce the same answer.
 
 ### Recording what the ECS does
 

@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 use lightyear::prelude::*;
 use lightyear::prelude::input::native::ActionState;
-use noob_tube_shared::{level, simulation};
+use noob_tube_shared::{level, simulation, tuning};
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
 use noob_tube_shared::protocol::ProtocolPlugin;
 use noob_tube_shared::types::Authored;
@@ -28,7 +28,7 @@ fn main() {
         .insert_resource(Time::<Fixed>::from_hz(noob_tube_shared::TICK_RATE))
         // How often replication updates go out. Without this lightyear sends every frame, and
         // interpolation then has nothing to interpolate across — see `SEND_RATE`.
-        .insert_resource(ReplicationMetadata::new(noob_tube_shared::send_interval()))
+        .insert_resource(ReplicationMetadata::new(tuning::send_interval()))
         // The same geometry the client collides against, built from the same numbers. If the two
         // disagreed, every step near the difference would produce a correction the player sees.
         .insert_resource(level::collision_world())
@@ -76,6 +76,11 @@ fn start_listening(mut commands: Commands) {
 
     commands.trigger(server::Start { entity: server });
     info!("listening on {addr}");
+    info!(
+        "replicating at {:?} intervals, {}",
+        tuning::send_interval(),
+        tuning::describe()
+    );
 }
 
 /// Fires once per incoming connection. Lightyear spawns a child entity carrying `LinkOf` for each
@@ -87,7 +92,7 @@ fn on_client_connected(trigger: On<Add, LinkOf>, mut commands: Commands) {
     connection.insert((ReplicationSender, Name::from("Connection"), Authored));
     // Both ends delay only what they receive, so setting the same values on each gives a symmetric
     // link with a round trip of twice the configured latency.
-    if let Some(conditioner) = noob_tube_shared::conditioner::from_env() {
+    if let Some(conditioner) = tuning::conditioner() {
         connection.insert(Link::default().with_conditioner(conditioner));
     }
     info!("client connected: {entity}");

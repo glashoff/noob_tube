@@ -21,6 +21,9 @@ fn main() {
             ..default()
         }))
         .insert_resource(Time::<Fixed>::from_hz(noob_tube_shared::TICK_RATE))
+        // How far in the past other players are drawn. Inserted before the plugin group, which
+        // only fills this in if it is missing.
+        .insert_resource(noob_tube_shared::tuning::interpolation())
         .add_plugins((
             world::WorldPlugin,
             noob_tube_shared::types::SharedTypesPlugin,
@@ -122,7 +125,7 @@ fn connect(mut commands: Commands) {
             noob_tube_shared::types::Authored,
             Client,
             ReplicationReceiver,
-            Link::default().with_conditioner(noob_tube_shared::conditioner::from_env()),
+            Link::default().with_conditioner(noob_tube_shared::tuning::conditioner()),
             // Only server-side `ClientOf` entities get a PingManager registered automatically,
             // so the client adds its own. Without it the server's pings arrive but nothing
             // answers them, and the timelines never synchronise.
@@ -143,10 +146,7 @@ fn connect(mut commands: Commands) {
         .id();
 
     commands.trigger(client::Connect { entity: client });
-    info!("connecting to {server_addr}");
-    if let Some(what) = noob_tube_shared::conditioner::describe() {
-        info!("simulating a link with {what}");
-    }
+    info!("connecting to {server_addr}, {}", noob_tube_shared::tuning::describe());
 }
 
 fn on_connected(trigger: On<Add, Connected>) {
