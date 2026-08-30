@@ -26,9 +26,20 @@ use crate::player::{PlayerInput, PlayerState};
 pub struct Authored;
 
 /// Registers the shared types for reflection.
+///
+/// Deliberately not unique. Several plugins want these registrations and none of them can know
+/// whether another already added it — the protocol needs them, so does the remote endpoint, and
+/// either can be present without the other. Bevy panics on a duplicate plugin by default, which
+/// turned a working server into a crash the moment both were enabled. Since every statement here is
+/// an idempotent `register_type`, running twice is harmless, and saying so is better than guarding
+/// at every call site and missing one.
 pub struct SharedTypesPlugin;
 
 impl Plugin for SharedTypesPlugin {
+    fn is_unique(&self) -> bool {
+        false
+    }
+
     fn build(&self, app: &mut App) {
         app
             // A headless server built on MinimalPlugins has almost nothing in its registry — not

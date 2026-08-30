@@ -3,6 +3,7 @@
 mod debug_draw;
 mod harness;
 mod local_player;
+mod remote_players;
 mod world;
 
 use bevy::prelude::*;
@@ -25,11 +26,14 @@ fn main() {
             noob_tube_shared::types::SharedTypesPlugin,
             local_player::LocalPlayerPlugin,
             debug_draw::DebugDrawPlugin,
+            remote_players::RemotePlayersPlugin,
             harness::HarnessPlugin,
         ))
         .add_plugins(client::ClientPlugins {
             tick_duration: tick_duration(),
         })
+        // After the plugin group, before the Client entity is spawned.
+        .add_plugins(noob_tube_shared::protocol::ProtocolPlugin)
         .add_systems(Startup, connect)
         .add_observer(on_connected)
         .add_plugins(remote_inspection())

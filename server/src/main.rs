@@ -6,6 +6,9 @@
 
 use bevy::prelude::*;
 use lightyear::prelude::*;
+use noob_tube_shared::player::{Aim, Player, PlayerState};
+use noob_tube_shared::protocol::ProtocolPlugin;
+use noob_tube_shared::types::Authored;
 use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, PROTOCOL_ID, SERVER_PORT, tick_duration};
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -15,12 +18,14 @@ fn main() {
         // lightyear registers states; MinimalPlugins does not include StatesPlugin.
         .add_plugins(bevy::state::app::StatesPlugin)
         .add_plugins(bevy::log::LogPlugin::default())
-        .add_plugins(noob_tube_shared::types::SharedTypesPlugin)
         .add_plugins(server::ServerPlugins {
             tick_duration: tick_duration(),
         })
+        // The protocol must be registered after the plugin group and before any Server entity.
+        .add_plugins(ProtocolPlugin)
         .add_systems(Startup, start_listening)
         .add_observer(on_client_connected)
+        .add_observer(on_peer_connected)
         .add_plugins(remote_inspection())
         .run();
 }
@@ -48,7 +53,7 @@ fn start_listening(mut commands: Commands) {
     let server = commands
         .spawn((
             Name::from("Server"),
-            noob_tube_shared::types::Authored,
+            Authored,
             server::NetcodeServer::new(server::NetcodeConfig {
                 protocol_id: PROTOCOL_ID,
                 private_key: PLACEHOLDER_PRIVATE_KEY,
@@ -70,10 +75,42 @@ fn on_client_connected(trigger: On<Add, LinkOf>, mut commands: Commands) {
     // ReplicationSender is what lets us replicate local entities to this client.
     commands
         .entity(entity)
-        .insert((
-            ReplicationSender,
-            Name::from("Connection"),
-            noob_tube_shared::types::Authored,
-        ));
+        .insert((ReplicationSender, Name::from("Connection"), Authored));
     info!("client connected: {entity}");
+}
+
+/// Fires once the handshake finishes and the peer has an identity.
+///
+/// The player entity is spawned here rather than on `LinkOf`, because only now is there a `PeerId`
+/// to put in [`Player`] — and without it a client cannot tell its own player from anyone else's.
+fn on_peer_connected(
+    trigger: On<Add, Connected>,
+    peers: Query<&RemoteId>,
+    players: Query<&Player>,
+    mut commands: Commands,
+) {
+    let Ok(remote) = peers.get(trigger.entity) else {
+        return;
+    };
+    let PeerId::Netcode(peer) = remote.0 else {
+        return;
+    };
+
+    // Spread players out so they do not spawn inside one another. Nothing clever: the nth player
+    // stands n metres along X, which is enough to tell capsules apart while there are a handful.
+    let index = players.iter().count() as f32;
+    let mut state = PlayerState::default();
+    state.position = Vec3::new(index * 2.0, 0.0, 0.0);
+
+    commands.spawn((
+        Name::from(format!("Player {peer}")),
+        Authored,
+        Player { peer },
+        state,
+        Aim::default(),
+        // Replicate is the other half of ReplicationSender: that says the channel may send, this
+        // says the entity should be sent.
+        Replicate::to_clients(NetworkTarget::All),
+    ));
+    info!("player spawned for peer {peer}");
 }

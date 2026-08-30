@@ -432,6 +432,36 @@ per-bone hit detection builds on the same data.
 The server simulates authoritatively at 64 Hz and replicates player entities. Clients send input
 and interpolate remote players.
 
+Replication is in place: the server spawns a player entity per connected peer and replicates it to
+everyone, and clients draw each one as a capsule. Still missing before players can move — client
+input sent to the server, and the level geometry available to the server, which today only the
+client builds.
+
+Lightyear replicates *components*, not snapshots, which is worth stating because it is the opposite
+of how `webgame` worked. There is no per-tick blob of the whole world: each component is registered
+on its own and gets its own treatment.
+
+| component | mode | why |
+|---|---|---|
+| `PlayerState` | `replicate` | position and velocity, changing every tick |
+| `Aim` | `replicate` | where the player looks, changing every tick |
+| `Player` | `replicate_once` | which peer owns this entity, never changes |
+
+`Aim` is separate from `PlayerState` rather than a field in it, and that separation is the point of
+the component-wise model. The two need opposite treatment: the server is the authority on position,
+but for the local player's own aim the client is, and rolling it back would make the view snap on
+every packet. Keeping them apart is also what lets `PlayerState` be predicted while `Aim` is
+interpolated — one struct would have forced them to share a strategy.
+
+Recoil will complicate this: once a weapon pulls the crosshair, the simulation changes where the
+player looks, and that part does belong in the rollback snapshot. The way out is to keep the
+simulated part as its own field in `PlayerState` and add it to `Aim` when drawing, so the mouse
+component stays out.
+
+Instead of a separate entity for prediction, lightyear marks entities that arrived over the network
+with `client::Remote`. That is what the client filters on to avoid ever drawing a capsule on the
+local player.
+
 Shooting is hitscan: the client reports where it aimed, the server raycasts against player capsules
 (not per bone yet), applies damage, and handles death and respawn.
 

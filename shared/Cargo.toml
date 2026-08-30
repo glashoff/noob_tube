@@ -8,6 +8,7 @@ license.workspace = true
 bevy = { workspace = true }
 lightyear = { workspace = true }
 rapier3d = { workspace = true }
+serde = { workspace = true }
 bevy_remote = { workspace = true, optional = true }
 
 [features]

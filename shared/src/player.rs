@@ -4,8 +4,8 @@
 //! client's prediction replay call [`PlayerState::apply_input`], so it must stay deterministic:
 //! same state plus same input yields the same result, or prediction and authority drift apart.
 
-use bevy::math::{Vec2, Vec3};
-use bevy::reflect::Reflect;
+use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::collision::CollisionWorld;
 use crate::movement::*;
@@ -14,7 +14,7 @@ use crate::movement::*;
 ///
 /// Only the fields here may influence movement. Anything read from elsewhere — wall-clock time,
 /// frame rate, randomness — would break replay.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
 pub struct PlayerInput {
     pub forward: bool,
     pub backward: bool,
@@ -44,7 +44,15 @@ impl PlayerInput {
 ///
 /// This is the complete rollback snapshot — four fields. Keeping it this small is the point of
 /// having no solver state anywhere.
-#[derive(Clone, Copy, Debug, PartialEq, Reflect)]
+///
+/// It is deliberately *not* everything that gets replicated about a player. Where the player is
+/// looking is replicated too, but as a separate [`Aim`] component, because the two need opposite
+/// treatment: the server is the authority on position, while for the local player's own aim the
+/// client is. Rolling `Aim` back on the local player would make the view snap every time a server
+/// packet arrived. Lightyear configures prediction and interpolation per component, so keeping them
+/// apart is what makes that possible at all.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
+#[reflect(Component)]
 pub struct PlayerState {
     /// Position of the feet, not the capsule centre.
     pub position: Vec3,
@@ -62,6 +70,26 @@ impl Default for PlayerState {
             crouching: false,
         }
     }
+}
+
+/// Where a player is looking.
+///
+/// Separate from [`PlayerState`] on purpose — see the note there. The server learns it from
+/// [`PlayerInput`] and replicates it so other clients can aim a body and a head.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
+#[reflect(Component)]
+pub struct Aim {
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+/// Identifies which connected peer a player entity belongs to.
+///
+/// Replicated, so a client can tell its own player from everyone else's.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Reflect, Serialize, Deserialize)]
+#[reflect(Component)]
+pub struct Player {
+    pub peer: u64,
 }
 
 impl PlayerState {
