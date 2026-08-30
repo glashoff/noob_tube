@@ -362,15 +362,17 @@ The file is for the settings you keep, the environment for the one you are chang
 stay local.
 
 ```toml
-ping_ms = 100             # simulated round trip; each end delays half of it
-jitter_ms = 10            # random variation on each leg, ± this
-loss = 0.02               # packet loss probability, 0.0 to 1.0
-send_hz = 32.0            # how often the server replicates            (server only)
-interp_ratio = 1.7        # interpolation delay, in send intervals     (client only)
-interp_min_ms = 5         # floor under that delay                     (client only)
-input_delay_min_ticks = 0 # soonest the server may act on an input     (client only)
-input_delay_max_ticks = 0 # ping covered by delay before predicting    (client only)
-max_predicted_ticks = 100 # how far ahead the client may simulate      (client only)
+ping_ms = 100              # simulated round trip; each end delays half of it
+jitter_ms = 10             # random variation on each leg, ± this
+loss = 0.02                # packet loss probability, 0.0 to 1.0
+send_hz = 32.0             # how often the server replicates           (server only)
+interp_ratio = 1.7         # interpolation delay, in send intervals    (client only)
+interp_min_ms = 5          # floor under that delay                    (client only)
+min_client_lead_ticks = 1  # guaranteed lead of the client's clock     (client only)
+jitter_safety_multiple = 4 # multiples of measured jitter added to it  (client only)
+input_delay_min_ticks = 0  # postpone the tick an input counts for     (client only)
+input_delay_max_ticks = 0  # ping covered by delay before predicting   (client only)
+max_predicted_ticks = 100  # how far ahead the client may simulate     (client only)
 ```
 
 ```bash
@@ -414,7 +416,7 @@ They are separate, and confusing them is how netcode gets tuned in the wrong dir
 | what you feel | how long | knob |
 |---|---|---|
 | your own movement reacting | **zero** — the client predicts it | none; this is what prediction buys |
-| the server learning what you did | half the ping | `NOOB_TUBE_PING_MS` |
+| the server learning what you did | half the ping, plus the client's lead | `ping_ms`, `min_client_lead_ticks` |
 | seeing another player's move | half the ping + interpolation delay | ping, `SEND_HZ`, `INTERP_RATIO` |
 
 The third is the one worth spending time on. At the defaults it is `1.7 / 32 Hz ≈ 53 ms` on top of
@@ -424,15 +426,39 @@ and starts letting remote players freeze between updates, because the next one h
 Lightyear **clamps rather than extrapolates** when it does run dry, so a too-short delay shows up as
 players stuttering to a halt and jumping, not as them sliding through walls.
 
-#### Input delay: buying stability with responsiveness
+#### When does the server act on my input?
 
-The second row is not fixed either, and this is where the genre decision lives. The client stamps
-each input with the tick it is *meant for*, and the server acts on that tick. Stamp it for `now`
-and your movement is instant but the server may not have the packet in time, so it guesses and the
-client rolls back. Stamp it for `now + 4` and the packet has 62 ms to arrive, the server never
-guesses, nothing ever rewinds — and every keypress starts 62 ms late.
+Two different answers, and only one of them costs the player anything. Both are decided entirely on
+the client: it stamps each input with the tick it is *meant for*, and the server simply acts on that
+tick. Rollback, throughout, means **client-side** rollback — the server never rewinds.
 
-Three knobs, all on the client:
+**The cheap answer: hold the client's clock further ahead.** It already runs ahead of the server by
+roughly half the ping, exactly so that an input stamped for tick `T` arrives before the server
+simulates `T`. `min_client_lead_ticks` is the guaranteed floor under that lead, on top of what ping
+and jitter already demand. Local movement is untouched — the client applies your input the moment
+you press it either way; only the whole timeline moves further into the future, so inputs land with
+more slack. Measured at a 100 ms ping, leads of 1, 6 and 12 ticks all leave the input delay at 0.
+
+Below 1.0 is refused: the server would sometimes simulate a tick before its input arrived.
+
+**The expensive answer: postpone the tick the input counts for.** This is `input_delay_*`, the
+fighting-game knob, and it is *not* what Source does. The catch is that the client also waits for
+that tick before applying the input to itself — written into the buffer at `T + d`, read back out at
+`T`:
+
+```rust
+// buffer_action_state                     // get_action_state
+let tick = current_tick                    let tick = local_timeline.tick();
+    + timeline.input_delay();              if let Some(s) = input_buffer.get(tick)
+input_buffer.set(tick, snapshot);
+```
+
+It has to. The whole point is that both simulations use the input at the *same* tick; applying it
+locally at `T` and on the server at `T + d` is a disagreement by construction, which is a rollback
+on every keypress. So the trade is real and one-directional: fewer rollbacks, at the price of your
+own movement starting that late every time, even on a perfect link.
+
+Three knobs for it, all on the client:
 
 - `input_delay_min_ticks` — never act on an input sooner than this, however good the link is.
 - `input_delay_max_ticks` — how much ping to cover with delay before prediction takes over.

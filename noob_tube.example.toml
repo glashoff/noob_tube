@@ -42,15 +42,26 @@ interp_ratio = 1.7
 # send rates, where 1.7 send intervals would be shorter than a frame.
 interp_min_ms = 5
 
-# --- Input delay. Client only: the client stamps each input with the tick it is meant for, and
-# --- the server simply acts on that tick. The server has no say in this.
+# --- When does the server act on my input? Two different answers. Both client-side: the client
+# --- stamps each input with the tick it is meant for, and the server simply acts on that tick.
+# ---
+# --- The cheap answer is min_client_lead_ticks, at the bottom of this section: hold the client's
+# --- clock further ahead, so inputs land with more slack. Local movement is untouched.
+# ---
+# --- The expensive answer is input_delay_*, immediately below: postpone the tick the input counts
+# --- for. This one DOES delay your own movement — see why there.
 
-# The soonest, in ticks, that the server may act on an input — no matter how good the connection.
+# Never act on an input sooner than this many ticks, however good the connection.
 #
-# The client stamps each input for `now + delay` instead of `now`, so the packet has that long to
-# arrive before the server needs it. What it buys is fewer rollbacks; what it costs is that your own
-# movement starts this late every time, even on a perfect link. Fighting games and RTSs spend it
-# gladly for a simulation that never rewinds. Shooters generally do not, which is why this is 0.
+# This is the fighting-game/GGPO knob, and it is not what Source does. The client stamps the input
+# for `now + delay` — and then waits until `now + delay` to apply it locally too. It has to: the
+# whole point is that both simulations use the input at the SAME tick. Apply it locally at `now`
+# and on the server at `now + delay` and the two disagree by construction, which is a client
+# rollback on every keypress.
+#
+# So the trade is real and one-directional: fewer rollbacks, at the price of your own movement
+# starting this late every time, even on a perfect link. Fighting games and RTSs pay it gladly for
+# a simulation that never rewinds. Shooters do not, which is why this is 0.
 #
 # One tick is 15.6 ms at the 64 Hz tick rate.
 input_delay_min_ticks = 0
@@ -71,3 +82,25 @@ input_delay_max_ticks = 0
 # Latency beyond what it covers turns into more input delay instead, up to input_delay_max_ticks.
 # 0 is lockstep: no prediction at all, every input waits for the round trip.
 max_predicted_ticks = 100
+
+# The guaranteed minimum lead, in ticks, of the client's clock over the server's.
+#
+# This is the other answer, and the one that costs the player nothing. The client's clock already
+# runs ahead of the server's by about half the ping, exactly so that an input stamped for tick T
+# reaches the server before it simulates T. This is the floor under that lead, on top of whatever
+# ping and jitter already demand.
+#
+# Unlike input_delay_min_ticks it does NOT delay local movement — the client applies your input the
+# moment you press it either way. It only moves the whole client timeline further into the future,
+# so inputs arrive with more slack. Raise it if inputs are landing late; the cost is that the client
+# predicts further ahead, so each rollback replays more ticks when one does happen.
+#
+# Fractional ticks are allowed. Below 1.0 is refused: the server would sometimes simulate a tick
+# before the input for it arrived.
+min_client_lead_ticks = 1.0
+
+# How many multiples of the measured jitter to add to that lead.
+#
+# The margin covers `jitter × this`, so it is a bet on what fraction of packets arrive in time:
+# 1 covers about 65%, 2 about 95%, 3 about 99.7%.
+jitter_safety_multiple = 4

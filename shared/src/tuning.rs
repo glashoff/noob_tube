@@ -94,6 +94,26 @@ pub struct NetConfig {
     /// Latency beyond what this covers turns into more input delay instead, up to
     /// `input_delay_max_ticks`. Zero is lockstep: no prediction at all.
     pub max_predicted_ticks: u16,
+    /// How far ahead of the server the client's clock is held, in ticks, at minimum.
+    ///
+    /// This is the other, quieter answer to "when does the server act on my input", and the one
+    /// that costs the player nothing. The client's clock already runs ahead of the server's by
+    /// about half the ping, precisely so that an input stamped for tick `T` arrives before the
+    /// server simulates `T`. This is the guaranteed floor under that lead, on top of what ping and
+    /// jitter demand.
+    ///
+    /// Unlike `input_delay_min_ticks` it does **not** delay local movement: the client applies its
+    /// input the moment it is pressed either way. It only moves the whole client timeline further
+    /// into the future, so inputs land at the server with more slack.
+    ///
+    /// Lightyear's default is 1.0 — exactly one tick, the least that can work: below it the server
+    /// would sometimes simulate tick `T` before the input for `T` arrived.
+    pub min_client_lead_ticks: f32,
+    /// How many multiples of the measured jitter to add to the client's lead.
+    ///
+    /// The margin covers `jitter × this`, so it is a bet on how many packets arrive in time: 1
+    /// covers about 65%, 2 about 95%, 3 about 99.7%. Lightyear defaults to 4.
+    pub jitter_safety_multiple: u8,
 }
 
 impl Default for NetConfig {
@@ -109,6 +129,9 @@ impl Default for NetConfig {
             input_delay_min_ticks: 0,
             input_delay_max_ticks: 0,
             max_predicted_ticks: 100,
+            // Lightyear's `SyncConfig` defaults.
+            min_client_lead_ticks: 1.0,
+            jitter_safety_multiple: 4,
         }
     }
 }
@@ -132,6 +155,12 @@ impl NetConfig {
     /// Rejects combinations that cannot mean anything, before lightyear asserts on them from
     /// inside a system where the message is far less useful.
     fn validate(&self) {
+        assert!(
+            self.min_client_lead_ticks >= 1.0,
+            "min_client_lead_ticks is {}, below one tick: the server would sometimes simulate a \
+             tick before the input for it had arrived.",
+            self.min_client_lead_ticks,
+        );
         assert!(
             self.input_delay_min_ticks <= self.input_delay_max_ticks,
             "input_delay_min_ticks ({}) exceeds input_delay_max_ticks ({}): a floor above the \
@@ -158,6 +187,8 @@ impl NetConfig {
         env_parse("NOOB_TUBE_INPUT_DELAY_MIN_TICKS", &mut self.input_delay_min_ticks);
         env_parse("NOOB_TUBE_INPUT_DELAY_MAX_TICKS", &mut self.input_delay_max_ticks);
         env_parse("NOOB_TUBE_MAX_PREDICTED_TICKS", &mut self.max_predicted_ticks);
+        env_parse("NOOB_TUBE_MIN_CLIENT_LEAD_TICKS", &mut self.min_client_lead_ticks);
+        env_parse("NOOB_TUBE_JITTER_SAFETY_MULTIPLE", &mut self.jitter_safety_multiple);
     }
 
     /// The link conditioner for this process, or `None` when nothing is being simulated.
@@ -193,11 +224,17 @@ impl NetConfig {
     /// Client-side only: the server acts on whatever tick an input is stamped for, and has no say
     /// in the choice.
     pub fn input_timeline(&self) -> InputTimelineConfig {
-        InputTimelineConfig::default().with_input_delay(client::InputDelayConfig {
-            minimum_input_delay_ticks: self.input_delay_min_ticks,
-            maximum_input_delay_before_prediction: self.input_delay_max_ticks,
-            maximum_predicted_ticks: self.max_predicted_ticks,
-        })
+        InputTimelineConfig::default()
+            .with_input_delay(client::InputDelayConfig {
+                minimum_input_delay_ticks: self.input_delay_min_ticks,
+                maximum_input_delay_before_prediction: self.input_delay_max_ticks,
+                maximum_predicted_ticks: self.max_predicted_ticks,
+            })
+            .with_sync_config(SyncConfig {
+                jitter_margin: self.min_client_lead_ticks,
+                jitter_multiple: self.jitter_safety_multiple,
+                ..SyncConfig::default()
+            })
     }
 
     /// One line describing what is actually in effect, for the log.
@@ -225,12 +262,13 @@ impl NetConfig {
         };
         format!(
             "{link}, sending at {:.0} Hz, interpolating at {}×, input delay {}..{} ticks, \
-             predicting up to {} [{source}]{stale}",
+             predicting up to {}, client lead ≥{} ticks [{source}]{stale}",
             self.send_hz,
             self.interp_ratio,
             self.input_delay_min_ticks,
             self.input_delay_max_ticks,
             self.max_predicted_ticks,
+            self.min_client_lead_ticks,
         )
     }
 }
@@ -346,6 +384,21 @@ mod tests {
             ..default_config()
         }
         .validate();
+    }
+
+    /// The two answers to "when does the server act on my input" are independent, and only one of
+    /// them costs the player anything.
+    #[test]
+    fn the_client_lead_is_not_input_delay() {
+        let lead = NetConfig { min_client_lead_ticks: 6.0, ..default_config() };
+        lead.validate();
+        assert_eq!(lead.input_delay_min_ticks, 0, "raising the lead must not delay local input");
+    }
+
+    #[test]
+    #[should_panic(expected = "min_client_lead_ticks")]
+    fn a_lead_below_one_tick_is_refused() {
+        NetConfig { min_client_lead_ticks: 0.5, ..default_config() }.validate();
     }
 
     fn default_config() -> NetConfig {
