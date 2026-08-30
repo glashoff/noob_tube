@@ -150,3 +150,32 @@ min_client_lead_ticks = 1.0
 # The margin covers `jitter × this`, so it is a bet on what fraction of packets arrive in time:
 # 1 covers about 65%, 2 about 95%, 3 about 99.7%.
 jitter_safety_multiple = 4
+
+# --- Shooting ---------------------------------------------------------------------------------
+
+# Whether a shot is tested against the world the shooter saw, rather than the present one.
+#
+# Read by both binaries, meaning something different on each. On the client it makes every input
+# message carry the client's current interpolation delay. On the server it makes each player's
+# recent positions be kept, and each shot rewind its targets to the shooter's moment before the ray
+# is cast.
+#
+# Off, the server tests against where targets are NOW, while the aim came from where they were on
+# the shooter's screen — older by the round trip plus interp_ratio's delay. At ping_ms = 100 that
+# is about 110 ms, and a player crossing at 6 m/s has moved 0.65 m in it: you must lead a running
+# target by most of its own width, at every range.
+#
+# On, that goes away, and in exchange you can be shot just after stepping behind a wall — because
+# on the shooter's screen you had not stepped behind it yet. Every shooter makes this trade. The
+# clean way to see both halves is to set ping_ms = 200 and flip this.
+lag_compensation = true
+
+# How many ticks of player positions the server keeps to rewind into. Server only.
+#
+# The ceiling on how far back a shot may reach, so it must cover the worst connection the server
+# means to serve: round trip plus interpolation delay. 35 ticks is about 550 ms at 64 Hz, which is
+# generous; the memory is a few hundred bytes per player.
+#
+# Too short is not silent — the server logs the rewind it could not satisfy and falls back to the
+# present for that shot, rather than quietly testing against a position nobody was ever in.
+lag_comp_history_ticks = 35

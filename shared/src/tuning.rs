@@ -26,6 +26,8 @@
 //! input_delay_min_ticks = 0 # never process an input sooner than this  (client only)
 //! input_delay_max_ticks = 0 # latency covered by delay before predicting (client only)
 //! max_predicted_ticks = 100 # how far the client may predict ahead     (client only)
+//! lag_compensation = true   # rewind targets to what the shooter saw      (both)
+//! lag_comp_history_ticks = 35 # how far back the server can rewind       (server only)
 //! ```
 //!
 //! Both binaries read the same file and each takes the fields it needs, so one file describes a
@@ -153,6 +155,26 @@ pub struct NetConfig {
     /// The margin covers `jitter × this`, so it is a bet on how many packets arrive in time: 1
     /// covers about 65%, 2 about 95%, 3 about 99.7%. Lightyear defaults to 4.
     pub jitter_safety_multiple: u8,
+    /// Whether a shot is tested against where the shooter saw its target.
+    ///
+    /// On, the client reports its interpolation delay with every input message and the server
+    /// rewinds each target into the past before casting the ray — see [`crate::lag_compensation`].
+    /// Off, the server tests against the present, and hitting anything moving means leading it by
+    /// the whole round trip.
+    ///
+    /// Both ends read this, and it means something slightly different on each: the server's history
+    /// is useless if no client reports a delay, and a reported delay is ignored if the server keeps
+    /// no history.
+    pub lag_compensation: bool,
+    /// How many ticks of player positions the server keeps to rewind into.
+    ///
+    /// This is the ceiling on how far a shot may reach back, so it must cover the worst connection
+    /// the server means to serve: round trip plus interpolation delay. 35 ticks is about 550 ms at
+    /// 64 Hz, which is generous — the memory is a few hundred bytes per player.
+    ///
+    /// Too short is not silent: the server logs a rewind it could not satisfy rather than quietly
+    /// testing against a position the shooter never saw.
+    pub lag_comp_history_ticks: u16,
 }
 
 impl Default for NetConfig {
@@ -176,6 +198,9 @@ impl Default for NetConfig {
             // Lightyear's `SyncConfig` defaults.
             min_client_lead_ticks: 1.0,
             jitter_safety_multiple: 4,
+            lag_compensation: true,
+            // ~550 ms at 64 Hz: past any playable connection, and cheap.
+            lag_comp_history_ticks: 35,
             // Beside SERVER_PORT, which is UDP; the two do not collide.
             meta_port: crate::SERVER_PORT + 1,
         }
@@ -219,6 +244,11 @@ impl NetConfig {
             self.input_delay_min_ticks,
             self.input_delay_max_ticks,
         );
+        assert!(
+            !self.lag_compensation || self.lag_comp_history_ticks > 0,
+            "lag_compensation is on with lag_comp_history_ticks = 0: there would be no past to \
+             rewind into. Set a history length, or turn lag compensation off.",
+        );
     }
 
     fn from_file(path: &Path) -> Self {
@@ -244,6 +274,8 @@ impl NetConfig {
         env_parse("NOOB_TUBE_MIN_CLIENT_LEAD_TICKS", &mut self.min_client_lead_ticks);
         env_parse("NOOB_TUBE_JITTER_SAFETY_MULTIPLE", &mut self.jitter_safety_multiple);
         env_parse("NOOB_TUBE_META_PORT", &mut self.meta_port);
+        env_parse("NOOB_TUBE_LAG_COMPENSATION", &mut self.lag_compensation);
+        env_parse("NOOB_TUBE_LAG_COMP_HISTORY_TICKS", &mut self.lag_comp_history_ticks);
     }
 
     /// The link conditioner for this process, or `None` when nothing is being simulated.
@@ -304,6 +336,10 @@ impl NetConfig {
                 Duration::default()
             },
             packet_redundancy: self.input_redundancy,
+            // Makes the client report its interpolation delay with every input message. Without it
+            // the server has no way to know how far into the past to rewind, and lag compensation
+            // is off whatever the server does.
+            lag_compensation: self.lag_compensation,
             ..Default::default()
         }
     }
@@ -351,6 +387,11 @@ impl NetConfig {
             Some(path) => path.display().to_string(),
             None => "defaults".to_string(),
         };
+        let lag = if self.lag_compensation {
+            format!("lag compensation over {} ticks", self.lag_comp_history_ticks)
+        } else {
+            "no lag compensation".to_string()
+        };
         let stale = if std::env::var("NOOB_TUBE_LATENCY_MS").is_ok() {
             " (ignoring NOOB_TUBE_LATENCY_MS, renamed to NOOB_TUBE_PING_MS)"
         } else {
@@ -359,7 +400,8 @@ impl NetConfig {
         format!(
             "{link}, ticking at {:.0} Hz, sending at {:.0} Hz, inputs at {:.0} Hz ×{}, \
              interpolating at {}×, \
-             input delay {}..{} ticks, predicting up to {}, client lead ≥{} ticks [{source}]{stale}",
+             input delay {}..{} ticks, predicting up to {}, client lead ≥{} ticks, \
+             {lag} [{source}]{stale}",
             self.tick_hz,
             self.send_hz,
             self.cmd_hz,
@@ -484,6 +526,40 @@ mod tests {
             ..default_config()
         }
         .validate();
+    }
+
+    /// Lag compensation with nothing to rewind into would look enabled and do nothing, which is
+    /// the failure mode this whole file is arranged against.
+    #[test]
+    #[should_panic(expected = "no past")]
+    fn lag_compensation_without_a_history_is_refused() {
+        NetConfig {
+            lag_compensation: true,
+            lag_comp_history_ticks: 0,
+            ..default_config()
+        }
+        .validate();
+    }
+
+    /// Turning it off is allowed to zero the history — there is then nothing to keep.
+    #[test]
+    fn no_lag_compensation_needs_no_history() {
+        NetConfig {
+            lag_compensation: false,
+            lag_comp_history_ticks: 0,
+            ..default_config()
+        }
+        .validate();
+    }
+
+    /// The server's history is worthless unless the client reports its delay, and that report is
+    /// switched on here and nowhere else.
+    #[test]
+    fn lag_compensation_reaches_the_input_plugin() {
+        let on = NetConfig { lag_compensation: true, ..default_config() };
+        let off = NetConfig { lag_compensation: false, ..default_config() };
+        assert!(on.input_config().lag_compensation);
+        assert!(!off.input_config().lag_compensation);
     }
 
     /// The two answers to "when does the server act on my input" are independent, and only one of

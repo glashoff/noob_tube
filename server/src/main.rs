@@ -12,6 +12,7 @@ use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::level;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
 use noob_tube_shared::collision::CollisionWorld;
+use noob_tube_shared::lag_compensation::{PositionHistory, Snapshot};
 use noob_tube_shared::shooting::{self, Health};
 use noob_tube_shared::protocol::ProtocolPlugin;
 use noob_tube_shared::types::Authored;
@@ -49,6 +50,10 @@ fn main() {
             // looking at, not the ones a tick of movement later.
             (resolve_shots, simulation::step_players::<()>).chain(),
         )
+        // After the step, and in its own schedule so there is no doubt about the order: the
+        // history has to hold the position at the *end* of a tick, because that is the one
+        // replication sends and therefore the one a client interpolates towards.
+        .add_systems(FixedPostUpdate, record_positions)
         .add_observer(on_client_connected)
         .add_observer(on_peer_connected)
         .add_plugins(remote_inspection())
@@ -59,40 +64,140 @@ fn main() {
 #[derive(Component, Clone, Copy)]
 struct SpawnIndex(usize);
 
+/// What a shot is fired from: where the shooter is, where they are looking, whether the trigger is
+/// down, and which connection to ask how far behind their view was.
+type Shooter = (
+    Entity,
+    &'static PlayerState,
+    &'static Aim,
+    &'static ActionState<PlayerInput>,
+    &'static Player,
+    &'static ControlledBy,
+);
+
+/// What damage is applied to.
+type Wounded = (
+    &'static mut Health,
+    &'static mut PlayerState,
+    &'static Player,
+    &'static SpawnIndex,
+);
+
 /// FixedUpdate: fires every trigger that is down and ready, and applies the damage.
 ///
 /// Server only. The client predicts its own cooldown, so the weapon answers the trigger without
 /// waiting for a round trip, but whether anyone was *hit* is decided here and only here.
 ///
+/// Each shot is tested against the world the shooter was looking at, not the present one — see
+/// [`noob_tube_shared::lag_compensation`] for why that is worth the machinery.
+///
 /// Two passes, because a shooter cannot hold everyone else's health mutably while looking for a
 /// target. The first reads; the second writes.
 fn resolve_shots(
     world: Res<CollisionWorld>,
+    net: Res<NetConfig>,
+    timeline: Res<LocalTimeline>,
+    histories: Query<&PositionHistory>,
+    // How far behind the present each client's view of everyone else is. Lightyear puts this on the
+    // connection entity when an input message reports it, which is what `ControlledBy::owner`
+    // points at. It is absent until the first message arrives, and absent forever if the client
+    // has lag compensation switched off — in both cases the shot falls back to the present.
+    delays: Query<&InterpolationDelay>,
     // A ParamSet because the two halves both want `PlayerState` — the first to aim at, the second
     // to respawn. Bevy refuses two queries with overlapping mutable access held at once, and it is
     // right to: the reads below finish before any write starts, but nothing in the signature says
     // so. The set makes that ordering explicit instead of asserted.
-    mut players: ParamSet<(
-        Query<(Entity, &PlayerState, &Aim, &ActionState<PlayerInput>, &Player)>,
-        Query<(&mut Health, &mut PlayerState, &Player, &SpawnIndex)>,
-    )>,
+    mut players: ParamSet<(Query<Shooter>, Query<Wounded>)>,
+    // Latches the one line below that says whether any of this is actually happening.
+    mut reported: Local<bool>,
 ) {
-    // Everyone who could be hit, gathered once rather than once per shooter.
-    let targets: Vec<(Entity, Vec3, bool)> = players
+    let tick = timeline.tick();
+    // Everyone who could be hit, gathered once rather than once per shooter. This is the present;
+    // each shooter rewinds it to its own moment below.
+    let present: Vec<(Entity, Vec3, bool)> = players
         .p0()
         .iter()
         .map(|(entity, state, ..)| (entity, state.position, state.crouching))
         .collect();
 
     let mut hits: Vec<(Entity, u64)> = Vec::new();
-    for (shooter, state, aim, action, player) in players.p0().iter() {
+    for (shooter, state, aim, action, player, controlled) in players.p0().iter() {
         if !state.is_firing(&action.0) {
             continue;
         }
-        let (origin, direction) = shooting::aim_ray(state.eye_position(), aim.yaw, aim.pitch);
+        // The moment this shooter's screen was showing when the trigger went down. `tick` is the
+        // tick the input was *stamped for*, not the one the packet arrived on, so this is the same
+        // answer however late the packet was.
+        let rewind = net
+            .lag_compensation
+            .then(|| delays.get(controlled.owner).ok())
+            .flatten()
+            .map(|delay| delay.tick_and_overstep(tick));
+
+        // Once, on the first shot anyone fires. The server can be configured for lag compensation,
+        // keep every position it needs and still rewind nothing, because the other half — the
+        // client reporting how far behind its view is — is a separate setting in a separate
+        // process. Knowing a setting was read is not knowing it is doing anything, and a first
+        // report taken at connect would be measuring clocks that have not settled yet. The first
+        // shot is the first moment the number means something.
+        if !*reported && net.lag_compensation {
+            *reported = true;
+            match rewind {
+                Some((rewind_tick, _)) => {
+                    let back = (tick - rewind_tick).max(0) as u32;
+                    info!(
+                        "lag compensation live: first shot rewound {back} ticks ({:?})",
+                        net.tick_duration() * back,
+                    );
+                }
+                None => warn!(
+                    "lag compensation is on, but peer {} reports no view delay: its shots resolve \
+                     against the present. Is lag_compensation off on that client?",
+                    player.peer,
+                ),
+            }
+        }
+
         // Everyone but the shooter. Left in, they would hit themselves at zero distance.
-        let others = targets.iter().copied().filter(|(entity, ..)| *entity != shooter);
-        if let Some((hit, distance)) = shooting::resolve(&world, origin, direction, others) {
+        let targets: Vec<(Entity, Vec3, bool)> = present
+            .iter()
+            .copied()
+            .filter(|(entity, ..)| *entity != shooter)
+            .map(|(entity, now, crouching)| {
+                let Some((rewind_tick, overstep)) = rewind else {
+                    return (entity, now, crouching);
+                };
+                let Ok(history) = histories.get(entity) else {
+                    return (entity, now, crouching);
+                };
+                let Some(past) = history.sample(rewind_tick, overstep) else {
+                    // A player who joined moments ago simply has no such past, which is normal and
+                    // passes. A *full* history that still cannot reach back this far is a
+                    // configuration that cannot serve this connection, and says so.
+                    if history.is_full() {
+                        warn!(
+                            "lag_comp_history_ticks is too short: peer {} asked to rewind to \
+                             tick {}, oldest kept is {:?}",
+                            player.peer,
+                            rewind_tick.0,
+                            history.oldest().map(|tick| tick.0),
+                        );
+                    }
+                    return (entity, now, crouching);
+                };
+                trace!(
+                    "peer {} rewound a target {} ticks to {}: it moved {:.2} m since",
+                    player.peer,
+                    tick - rewind_tick,
+                    rewind_tick.0,
+                    (now - past.position).length(),
+                );
+                (entity, past.position, past.crouching)
+            })
+            .collect();
+
+        let (origin, direction) = shooting::aim_ray(state.eye_position(), aim.yaw, aim.pitch);
+        if let Some((hit, distance)) = shooting::resolve(&world, origin, direction, targets) {
             debug!("peer {} hit at {distance:.1} m", player.peer);
             hits.push((hit, player.peer));
         }
@@ -115,6 +220,27 @@ fn resolve_shots(
             position: level::spawn_point(spawn.0),
             ..PlayerState::default()
         };
+    }
+}
+
+/// FixedPostUpdate: writes this tick's finished position into each player's history.
+///
+/// The tick recorded is the server's own, which is also the tick a client's inputs are stamped for
+/// and the tick replication labels this state with. All three agreeing is what makes a rewind
+/// land on the position the shooter actually saw rather than near it.
+fn record_positions(
+    timeline: Res<LocalTimeline>,
+    mut players: Query<(&PlayerState, &mut PositionHistory)>,
+) {
+    let tick = timeline.tick();
+    for (state, mut history) in players.iter_mut() {
+        history.record(
+            tick,
+            Snapshot {
+                position: state.position,
+                crouching: state.crouching,
+            },
+        );
     }
 }
 
@@ -191,6 +317,7 @@ fn on_peer_connected(
     trigger: On<Add, Connected>,
     peers: Query<&RemoteId>,
     players: Query<&Player>,
+    net: Res<NetConfig>,
     mut commands: Commands,
 ) {
     let Ok(remote) = peers.get(trigger.entity) else {
@@ -214,6 +341,8 @@ fn on_peer_connected(
         state,
         Aim::default(),
         Health::default(),
+        // The past this player can be shot in. Server-side only, like the spawn index.
+        PositionHistory::with_capacity(net.lag_comp_history_ticks.into()),
         // Where this client's inputs are written once they arrive.
         ActionState::<PlayerInput>::default(),
         // Replicate is the other half of ReplicationSender: that says the channel may send, this

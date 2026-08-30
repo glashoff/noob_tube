@@ -4,10 +4,10 @@
 //! so what stops you walking is what stops a bullet. Per-bone hitboxes arrive with the real models
 //! in M2; until then a head shot and a shin shot are the same shot.
 //!
-//! **This is not lag compensated.** The server tests against where a target is *now*, not where the
-//! shooter saw them, so at any real ping you must lead a moving target. Fixing it needs a position
-//! history on the server to rewind into, plus the shooter's interpolation delay to know how far
-//! back — lightyear has `InputConfig::lag_compensation` for the second half.
+//! Nothing here knows what time it is. The caller passes in the positions to test against, and on
+//! the server those come from [`crate::lag_compensation`] — the moment the shooter's screen was
+//! showing, not the present one. Keeping that out of here is what lets every rule below be checked
+//! by a test that needs no network at all.
 
 use bevy::prelude::*;
 use rapier3d::parry::query::RayCast;

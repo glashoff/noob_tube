@@ -5,6 +5,7 @@
 
 
 pub mod collision;
+pub mod lag_compensation;
 pub mod level;
 pub mod metadata;
 pub mod movement;

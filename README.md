@@ -377,6 +377,8 @@ jitter_safety_multiple = 4 # multiples of measured jitter added to it  (client o
 input_delay_min_ticks = 0  # postpone the tick an input counts for     (client only)
 input_delay_max_ticks = 0  # ping covered by delay before predicting   (client only)
 max_predicted_ticks = 100  # how far ahead the client may simulate     (client only)
+lag_compensation = true    # rewind targets to what the shooter saw           (both)
+lag_comp_history_ticks = 35 # how far back the server can rewind        (server only)
 ```
 
 ```bash
@@ -795,11 +797,61 @@ target health over 2.5 s:
 Three shots to kill, respawn at the player's own spawn point. Turned 90° away with the trigger still
 held, health stops moving.
 
-Hit detection here is *not* lag-compensated — the server tests against the position it currently
-holds, not against what the shooter saw. Against moving targets that means visibly needing to lead
-your shots. Fixing it needs a position history on the server to rewind into, plus the client
-reporting its interpolation delay — lightyear has `InputConfig::lag_compensation` for exactly this,
-currently off.
+#### Lag compensation
+
+Every shot is tested against the world the shooter was looking at, not the present one.
+
+Without that the server tests against where a target is *now*, while the aim came from where the
+target was on the shooter's screen — older by the round trip **plus** the interpolation delay. At
+100 ms of ping that is about 200 ms; a player crossing at 6 m/s has moved two thirds of a metre in
+it. You would have to lead a running target by most of its own width, at every range, which players
+experience as the game being broken rather than as a skill to learn.
+
+Two things make the shooter's moment knowable, and both were already in place before this step. The
+shot travels as a **tick-stamped input**, so the server knows which tick the trigger went down on
+rather than when the packet happened to arrive. And with `lag_compensation` on, lightyear has the
+client report its own interpolation delay with every input message — how far behind its view of
+everyone else was.
+
+The server keeps the rest: `PositionHistory`, a short ring buffer of each player's position and
+stance, written in `FixedPostUpdate` so it holds the value at the *end* of a tick — the one
+replication sends and therefore the one a client interpolates towards. `resolve_shots` then samples
+each target at `shot tick − reported delay`, blending between two recorded ticks by the overstep,
+because the shooter's screen showed a position *between* two updates rather than a recorded one.
+
+Per entity, not by world snapshot: a hitscan ray asks about each target separately anyway, and per
+entity means a player who joined a moment ago simply has a short history instead of a hole in a
+shared structure. The level is not rewound — geometry does not move, so a shot blocked by a crate
+now was blocked by it then.
+
+Measured with a single shot, at 300 ms of simulated ping. The shooter aims at a standing target;
+the target starts running perpendicular; a quarter of a second later the shooter fires, still aimed
+at the old spot:
+
+| | shot | server log |
+|---|---|---|
+| `lag_compensation = true` | **hit**, target 0.77 m past the aim point | rewound 20 ticks (313 ms) |
+| `lag_compensation = false` | **miss** | — |
+
+At 100 ms of ping the same rewind is 13 ticks, 203 ms.
+
+What it costs is what lag compensation always costs: **you can be shot after stepping behind a
+wall**, because on the shooter's screen you had not stepped behind it yet. Every shooter makes this
+trade, and the alternative — needing to lead every target — is worse.
+
+Both halves are settings, in separate processes, so either can be on while the other is off and the
+result looks like nothing happening. Both cases name themselves on the first shot:
+
+```
+lag compensation live: first shot rewound 20 ticks (312.5ms)
+lag compensation is on, but peer 178811… reports no view delay: its shots resolve against the
+  present. Is lag_compensation off on that client?
+lag_comp_history_ticks is too short: peer 178811… asked to rewind to tick 1241, oldest kept is 1257
+```
+
+The last one falls back to the present for that shot rather than testing against a position nobody
+was ever in. A history shorter than the buffer is *not* warned about: that is a player who joined
+moments ago, which is normal and passes.
 
 ### M4 — Prediction ✔
 The local player is simulated on the client without waiting for the round trip, and reconciled
@@ -907,5 +959,5 @@ This decision is deliberately deferred until M2. M0 and M1 use a capsule placeho
 ## Still to settle
 
 - **Character assets** — see above.
-- **Lag compensation** — M4 adds the position history; whether to rewind by full snapshot or per
-  entity is an open design question.
+- **Per-bone hitboxes** — the hitbox is the movement capsule, so a head shot and a shin shot are
+  the same shot. Waiting on the real models in M2.
