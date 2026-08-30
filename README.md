@@ -186,8 +186,15 @@ GLB → Bevy Mesh asset → ATTRIBUTE_POSITION + indices
     → QueryPipeline::update()        once, then immutable
 ```
 
-Note that rapier works in nalgebra types while Bevy uses glam, so small conversion helpers
-(`Vec3` ↔ `Point3`/`Vector3`) are needed at the boundary.
+**Use the `=0.35.0-glamx0.2` build of rapier.** rapier and parry are compiled against glam, but
+which glam matters: the plain 0.35.3 release uses glam 0.33 while Bevy 0.19 uses 0.32, so every
+vector would need translating at the boundary. The `-glamx0.2` build — the one `bevy_rapier3d`
+depends on — is compiled against glam 0.32, which makes `rapier3d::math::Vector` literally
+`bevy::math::Vec3`. A test in `shared/src/lib.rs` asserts this so a careless version bump fails
+loudly instead of silently costing conversions everywhere.
+
+The BVH is built by calling `BroadPhaseBvh::update` directly. rapier supports this explicitly —
+its documentation names the case of a broad-phase "driven without the physics pipeline".
 
 ---
 
