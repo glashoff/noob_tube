@@ -8,10 +8,13 @@ mod world;
 
 use bevy::prelude::*;
 use lightyear::prelude::*;
+use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, PROTOCOL_ID, SERVER_PORT, tick_duration};
 use std::net::{Ipv4Addr, SocketAddr};
 
 fn main() {
+    let net = noob_tube_shared::tuning::NetConfig::load();
+
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -23,7 +26,8 @@ fn main() {
         .insert_resource(Time::<Fixed>::from_hz(noob_tube_shared::TICK_RATE))
         // How far in the past other players are drawn. Inserted before the plugin group, which
         // only fills this in if it is missing.
-        .insert_resource(noob_tube_shared::tuning::interpolation())
+        .insert_resource(net.interpolation())
+        .insert_resource(net)
         .add_plugins((
             world::WorldPlugin,
             noob_tube_shared::types::SharedTypesPlugin,
@@ -104,7 +108,7 @@ fn world_inspector() -> impl Plugin {
     |_: &mut App| {}
 }
 
-fn connect(mut commands: Commands) {
+fn connect(net: Res<NetConfig>, mut commands: Commands) {
     let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
     // Port 0 lets the OS pick, so several clients can run on one machine.
     let local_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
@@ -125,7 +129,7 @@ fn connect(mut commands: Commands) {
             noob_tube_shared::types::Authored,
             Client,
             ReplicationReceiver,
-            Link::default().with_conditioner(noob_tube_shared::tuning::conditioner()),
+            Link::default().with_conditioner(net.conditioner()),
             // Only server-side `ClientOf` entities get a PingManager registered automatically,
             // so the client adds its own. Without it the server's pings arrive but nothing
             // answers them, and the timelines never synchronise.
@@ -146,7 +150,7 @@ fn connect(mut commands: Commands) {
         .id();
 
     commands.trigger(client::Connect { entity: client });
-    info!("connecting to {server_addr}, {}", noob_tube_shared::tuning::describe());
+    info!("connecting to {server_addr}, {}", net.describe());
 }
 
 fn on_connected(trigger: On<Add, Connected>) {

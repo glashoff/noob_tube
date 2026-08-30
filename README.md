@@ -346,32 +346,63 @@ not enough for the tick-exact checks M4 will need.
 
 ### Tuning the network
 
-Every network setting is an environment variable, read at startup. They are settings and not
-constants on purpose: what a shooter feels like at 30 ms and at 150 ms are different games, and
-finding out which trade is right means changing a number and playing, not changing a number and
-waiting for a link step. They all live in `shared/src/tuning.rs`.
+Every network setting is configurable without a rebuild. They are settings and not constants on
+purpose: what a shooter feels like at 30 ms and at 150 ms are different games, and finding out which
+trade is right means changing a number and playing, not changing a number and waiting for a link
+step. They all live in `shared/src/tuning.rs` as one `NetConfig`.
 
-```bash
-NOOB_TUBE_PING_MS=100      simulated round trip; each end delays half of it
-NOOB_TUBE_JITTER_MS=10     random variation on each leg, ± this
-NOOB_TUBE_LOSS=0.02        packet loss probability, 0.0 to 1.0
-NOOB_TUBE_SEND_HZ=32       how often the server replicates       (server only)
-NOOB_TUBE_INTERP_RATIO=1.7 interpolation delay, in send intervals (client only)
-NOOB_TUBE_INTERP_MIN_MS=5  floor under that delay                (client only)
+Three layers, each overriding the one before:
+
+1. the defaults in `NetConfig::default`,
+2. **`noob_tube.toml`** — or wherever `NOOB_TUBE_CONFIG` points,
+3. **environment variables**, one per field.
+
+The file is for the settings you keep, the environment for the one you are changing right now.
+`cp noob_tube.example.toml noob_tube.toml` to start; that name is gitignored, so local experiments
+stay local.
+
+```toml
+ping_ms = 100        # simulated round trip; each end delays half of it
+jitter_ms = 10       # random variation on each leg, ± this
+loss = 0.02          # packet loss probability, 0.0 to 1.0
+send_hz = 32.0       # how often the server replicates          (server only)
+interp_ratio = 1.7   # interpolation delay, in send intervals   (client only)
+interp_min_ms = 5    # floor under that delay                   (client only)
 ```
 
-**The conditioner has to be set on every process.** It delays only what a process *receives* — the
-server's copy delays inputs coming in, each client's copy delays snapshots coming in — so setting it
-on the server alone gives a half-duplex link that behaves like nothing real:
-
 ```bash
-export NOOB_TUBE_PING_MS=100 NOOB_TUBE_JITTER_MS=10
-cargo run -p noob_tube_server &
-cargo run -p noob_tube_client
+NOOB_TUBE_PING_MS=200 cargo run -p noob_tube_client    # try one value, edit nothing
 ```
 
-Both binaries log what is actually in effect, including "link untouched". That line exists because a
-run that was meant to be lagged and silently was not looks exactly like a netcode success.
+Both binaries read the same file and take the fields they need, so one file describes a whole
+session.
+
+**The conditioner has to be in effect on every process.** It delays only what a process *receives* —
+the server's copy delays inputs coming in, each client's copy delays snapshots coming in — so a file
+read by the server alone gives a half-duplex link that behaves like nothing real.
+
+Nothing here fails quietly, which is the point:
+
+```
+$ NOOB_TUBE_CONFIG=typo.toml cargo run -p noob_tube_server
+cannot parse typo.toml: TOML parse error at line 1, column 1
+  |
+1 | pign_ms = 100
+  | ^^^^^^^
+unknown field `pign_ms`, expected one of `ping_ms`, `jitter_ms`, `loss`, `send_hz`, ...
+```
+
+A misspelled key reads as "no latency", a `NOOB_TUBE_CONFIG` pointing at nothing reads as "no
+latency", and both make a run that tested nothing look like a netcode success. So a file that exists
+but will not parse, a named config that is missing, and an unparsable environment value all refuse
+to start. A *missing* `noob_tube.toml` is normal and silent — the defaults are playable.
+
+And every start logs what is actually in effect, including where it came from:
+
+```
+link untouched, sending at 32 Hz, interpolating at 1.7× [defaults]
+ping 100 ms, jitter ±10 ms per leg, loss 0, sending at 20 Hz, interpolating at 1.7× [noob_tube.toml]
+```
 
 #### The three delays, and which knob moves which
 

@@ -6,3 +6,6 @@
 
 # Byte-code from running the Python helpers in tools/
 __pycache__/
+
+# Local network settings; copy noob_tube.example.toml to get started.
+/noob_tube.toml

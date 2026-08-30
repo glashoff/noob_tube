@@ -1,0 +1,43 @@
+# Network settings. Copy to `noob_tube.toml` and edit; that name is gitignored, so local
+# experiments stay local.
+#
+# Read by both binaries — each takes the fields it needs, so one file describes a whole session.
+# Every field may be left out, in which case the default below applies. A misspelled key is refused
+# at startup rather than ignored: a typo that silently reads as "no latency" makes a run look like a
+# netcode success when nothing was being tested.
+#
+# Environment variables override the file, one per field, upper-cased and prefixed:
+#   NOOB_TUBE_PING_MS=200 cargo run -p noob_tube_client
+# which is the way to try one value without editing anything.
+#
+# The conditioner must be in effect on EVERY process. It delays only what a process receives — the
+# server's copy delays inputs coming in, each client's copy delays snapshots coming in — so a file
+# read by the server alone gives a half-duplex link that behaves like nothing real.
+
+# Simulated round trip, in milliseconds. Each end delays half of it. 0 leaves the link untouched.
+ping_ms = 0
+
+# Random variation added to each leg, ± this many milliseconds.
+jitter_ms = 0
+
+# Packet loss probability, 0.0 to 1.0. Lost inputs are what make the server diverge from the
+# client's prediction, so this is the knob that exercises rollback.
+loss = 0.0
+
+# How often the server sends replication updates, in Hz. Server only.
+#
+# Deliberately below the 64 Hz tick rate. Sending every tick is more bandwidth than a shooter needs
+# and leaves no gap between updates, so interpolation has nothing to interpolate across and remote
+# players look smooth for the wrong reason.
+send_hz = 32.0
+
+# How far in the past other players are drawn, as a multiple of the send interval. Client only.
+#
+# At the defaults this is 1.7 / 32 Hz ≈ 53 ms on top of the network. Lower it and remote players
+# start freezing between updates, because the next one has not arrived yet — lightyear clamps rather
+# than extrapolating, so that shows up as stuttering, not as players sliding through walls.
+interp_ratio = 1.7
+
+# Floor under the interpolation delay, in milliseconds. Client only. Matters only at very high
+# send rates, where 1.7 send intervals would be shorter than a frame.
+interp_min_ms = 5

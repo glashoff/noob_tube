@@ -7,7 +7,9 @@
 use bevy::prelude::*;
 use lightyear::prelude::*;
 use lightyear::prelude::input::native::ActionState;
-use noob_tube_shared::{level, simulation, tuning};
+use noob_tube_shared::simulation;
+use noob_tube_shared::tuning::NetConfig;
+use noob_tube_shared::level;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
 use noob_tube_shared::protocol::ProtocolPlugin;
 use noob_tube_shared::types::Authored;
@@ -15,6 +17,9 @@ use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, PROTOCOL_ID, SERVER_PORT, tick_d
 use std::net::{Ipv4Addr, SocketAddr};
 
 fn main() {
+    // Read once, at startup, before anything can ask for it.
+    let net = NetConfig::load();
+
     App::new()
         .add_plugins(MinimalPlugins)
         // lightyear registers states; MinimalPlugins does not include StatesPlugin.
@@ -28,7 +33,8 @@ fn main() {
         .insert_resource(Time::<Fixed>::from_hz(noob_tube_shared::TICK_RATE))
         // How often replication updates go out. Without this lightyear sends every frame, and
         // interpolation then has nothing to interpolate across — see `SEND_RATE`.
-        .insert_resource(ReplicationMetadata::new(tuning::send_interval()))
+        .insert_resource(ReplicationMetadata::new(net.send_interval()))
+        .insert_resource(net)
         // The same geometry the client collides against, built from the same numbers. If the two
         // disagreed, every step near the difference would produce a correction the player sees.
         .insert_resource(level::collision_world())
@@ -57,7 +63,7 @@ fn remote_inspection() -> impl Plugin {
 }
 
 /// Binds the UDP socket and starts accepting connections.
-fn start_listening(mut commands: Commands) {
+fn start_listening(net: Res<NetConfig>, mut commands: Commands) {
     let addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), SERVER_PORT);
 
     let server = commands
@@ -76,23 +82,19 @@ fn start_listening(mut commands: Commands) {
 
     commands.trigger(server::Start { entity: server });
     info!("listening on {addr}");
-    info!(
-        "replicating at {:?} intervals, {}",
-        tuning::send_interval(),
-        tuning::describe()
-    );
+    info!("{}", net.describe());
 }
 
 /// Fires once per incoming connection. Lightyear spawns a child entity carrying `LinkOf` for each
 /// client; this is where per-connection components get attached.
-fn on_client_connected(trigger: On<Add, LinkOf>, mut commands: Commands) {
+fn on_client_connected(trigger: On<Add, LinkOf>, net: Res<NetConfig>, mut commands: Commands) {
     let entity = trigger.entity;
     // ReplicationSender is what lets us replicate local entities to this client.
     let mut connection = commands.entity(entity);
     connection.insert((ReplicationSender, Name::from("Connection"), Authored));
     // Both ends delay only what they receive, so setting the same values on each gives a symmetric
     // link with a round trip of twice the configured latency.
-    if let Some(conditioner) = tuning::conditioner() {
+    if let Some(conditioner) = net.conditioner() {
         connection.insert(Link::default().with_conditioner(conditioner));
     }
     info!("client connected: {entity}");

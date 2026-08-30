@@ -11,6 +11,9 @@ license = "AGPL-3.0-or-later"
 noob_tube_shared = { path = "shared" }
 bevy = { version = "0.19.1", default-features = false, features = ["serialize"] }
 serde = { version = "1", features = ["derive"] }
+# Only for the network config file. Chosen over RON because the file is meant to be edited by
+# hand between rounds, and TOML is the format a Rust developer already has in front of them.
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
 lightyear = { version = "0.29", features = ["udp", "netcode", "input_native"] }
 # Taken as a subcrate rather than through `bevy/bevy_remote`, because that feature also switches on
 # `serialize` across bevy_internal: toggling `remote` would then invalidate the whole cached Bevy
