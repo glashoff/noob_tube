@@ -113,6 +113,8 @@ impl PlayerState {
         if input.jump && self.on_ground {
             self.velocity.y = JUMP_VELOCITY;
             self.on_ground = false;
+        } else if self.on_ground {
+            self.velocity.y = -GROUND_STICK_SPEED;
         } else {
             self.velocity.y += GRAVITY * dt;
         }
@@ -134,6 +136,20 @@ impl PlayerState {
         // player has not cleared that yet. Counting that as grounded would let a held jump key
         // re-trigger every tick, pinning the player just above the floor.
         self.on_ground = self.velocity.y <= 0.0 && world.is_grounded(self.position, self.crouching);
+
+        // Hold the capsule one skin above the surface while grounded, never on it and never in
+        // it. The sweep leaves it a fraction of a millimetre low each tick and never puts that
+        // back, which compounds into centimetres over a minute of walking; but resting it exactly
+        // on the surface is worse, because a shape cast that starts touching its target reports
+        // contact at distance zero and the slide loop makes no progress at all. A whole skin of
+        // clearance keeps every cast in the well-behaved regime.
+        if self.on_ground
+            && let Some(ground) = world.ground_height_below(self.position)
+            && (self.position.y - ground).abs() < GROUND_SNAP_DIST
+        {
+            self.position.y = ground + SKIN;
+        }
+
     }
 
     /// Crouching starts the moment the key is held; standing back up has to wait for headroom.
@@ -153,11 +169,13 @@ mod tests {
     fn floor_world() -> CollisionWorld {
         let mut world = CollisionWorld::new();
         world.add_trimesh(
+            // Big enough that a test can walk for a minute without reaching the edge — at
+            // 5.5 m/s that is 330 m, and falling off would look exactly like a physics bug.
             vec![
-                Vec3::new(-50.0, 0.0, -50.0),
-                Vec3::new(50.0, 0.0, -50.0),
-                Vec3::new(50.0, 0.0, 50.0),
-                Vec3::new(-50.0, 0.0, 50.0),
+                Vec3::new(-1000.0, 0.0, -1000.0),
+                Vec3::new(1000.0, 0.0, -1000.0),
+                Vec3::new(1000.0, 0.0, 1000.0),
+                Vec3::new(-1000.0, 0.0, 1000.0),
             ],
             vec![[0, 1, 2], [0, 2, 3]],
         );
@@ -269,6 +287,24 @@ mod tests {
         let late = state.position.y;
 
         assert!((late - early).abs() < 1e-6, "sank from {early} to {late} while walking");
+    }
+
+    /// Walking has to keep working, not just start working. The drift tests above only ever
+    /// checked height, which is how a total stall went unnoticed.
+    #[test]
+    fn walking_keeps_covering_ground() {
+        let world = floor_world();
+        let mut state = PlayerState::default();
+        let input = PlayerInput { forward: true, ..default_input() };
+
+        run(&mut state, &input, &world, 64 * 10);
+        let after_ten_seconds = -state.position.z;
+
+        // Ten seconds at 5.5 m/s, less the acceleration ramp, is comfortably over 50 m.
+        assert!(
+            after_ten_seconds > 50.0,
+            "only covered {after_ten_seconds} m in ten seconds"
+        );
     }
 
     /// The whole point of keeping this deterministic.

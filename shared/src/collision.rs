@@ -117,9 +117,11 @@ impl CollisionWorld {
         let mut centre = feet + Vec3::Y * y_offset;
         let mut remaining = delta;
         let mut moved = Vec3::ZERO;
-        // After a zero-distance touch we stop reporting the surface we are already against, so the
-        // next cast can find the *next* obstacle — a wall while standing on the floor, say.
+        // `stop_at_penetration` does NOT make the next cast skip a surface already touched — an
+        // assumption carried over from the webgame port that cost an afternoon. See the contact
+        // branch below for what actually keeps the loop moving.
         let mut stop_at_penetration = true;
+        let mut previous_contact: Option<Vec3> = None;
 
         for _ in 0..MAX_SLIDE_ITERATIONS {
             let length = remaining.length();
@@ -142,16 +144,36 @@ impl CollisionWorld {
 
             let normal = Vec3::from(hit.normal1);
 
-            if hit.time_of_impact < 1e-6 {
-                // Already touching. Only cancel the motion if it points *into* the surface —
-                // otherwise jumping off the floor would be impossible.
+            // A hit that would advance less than the skin counts as contact rather than travel.
+            // Advancing by it would push the capsule into the surface; advancing by zero and then
+            // projecting is the only safe move.
+            //
+            // The threshold has to be measured in distance, not in time of impact: at 5.5 m/s a
+            // tick covers 0.086 m, so the skin is 12% of the step, and a fixed `toi < 1e-6` test
+            // never fires. Walking along the floor then hit the surface every iteration with no
+            // progress, and since a horizontal motion is perpendicular to the floor normal the
+            // projection removed nothing either — the player froze in place.
+            if hit.time_of_impact * length < SKIN {
                 let into = remaining.dot(normal);
                 if into < 0.0 {
                     remaining -= into * normal;
                 }
+
+                // The capsule settles a fraction of a millimetre into the floor, so every cast
+                // from here reports that same contact at toi 0 — `stop_at_penetration` does not
+                // suppress it. Without this check all three iterations report the floor, none of
+                // them advances, and the player freezes mid-stride while velocity reads a healthy
+                // 5.5 m/s. Seeing the same normal twice means the motion is now tangential to it,
+                // and sliding along a surface we are already inside cannot go deeper.
+                if previous_contact.is_some_and(|p| p.dot(normal) > 0.999) {
+                    moved += remaining;
+                    break;
+                }
+                previous_contact = Some(normal);
                 stop_at_penetration = false;
                 continue;
             }
+            previous_contact = None;
 
             // Stop just short of contact so the capsule does not end up touching and sticking.
             let safe = (hit.time_of_impact - SKIN / length).max(0.0);
@@ -168,23 +190,36 @@ impl CollisionWorld {
     }
 
     /// True when solid ground sits within [`GROUND_SNAP_DIST`] below the feet.
-    pub fn is_grounded(&self, feet: Vec3, crouching: bool) -> bool {
-        let (half, y_offset) = Self::capsule_dims(crouching);
-        let shape = Capsule::new_y(half, CAPSULE_RADIUS);
-        let centre = feet + Vec3::Y * y_offset;
+    ///
+    /// Uses the same ray as [`ground_height_below`](Self::ground_height_below) rather than a
+    /// downward shape cast. A shape cast reported "airborne" on roughly one tick in seven while
+    /// walking on flat ground, which made the player oscillate between walking and air speed.
+    ///
+    /// The trade-off is the ray's blindness to the capsule's width: standing with the centre past
+    /// a ledge counts as airborne even though the capsule still rests on the edge. Sampling a few
+    /// rays around the capsule would fix that when it matters.
+    pub fn is_grounded(&self, feet: Vec3, _crouching: bool) -> bool {
+        self.ground_height_below(feet)
+            .is_some_and(|ground| feet.y - ground <= GROUND_SNAP_DIST)
+    }
 
-        self.query()
-            .cast_shape(
-                &Pose::from_translation(centre),
-                Vec3::NEG_Y * GROUND_SNAP_DIST,
-                &shape,
-                ShapeCastOptions {
-                    max_time_of_impact: 1.0,
-                    stop_at_penetration: true,
-                    ..ShapeCastOptions::default()
-                },
-            )
-            .is_some()
+    /// Height of the ground directly beneath `feet`, searched from a little above and a little
+    /// below.
+    ///
+    /// This is a ray, not a shape cast, and deliberately so: shape casts against a triangle mesh
+    /// are accurate to a few millimetres at best, and using one here produced errors of up to
+    /// 11 cm — worse than the drift it was meant to correct. A ray reports an exact intersection.
+    ///
+    /// The trade-off is that a single ray ignores the capsule's width, so on a ledge it reports
+    /// whatever is under the centre. That is fine for holding a standing player at surface level,
+    /// which is all it is used for.
+    pub fn ground_height_below(&self, feet: Vec3) -> Option<f32> {
+        let origin = feet + Vec3::Y * GROUND_SNAP_DIST;
+        let ray = Ray::new(origin.into(), Vec3::NEG_Y.into());
+        let (_, toi) = self
+            .query()
+            .cast_ray(&ray, GROUND_SNAP_DIST * 2.0, true)?;
+        Some(origin.y - toi)
     }
 
     /// True when there is room to stand up from a crouch.
@@ -222,11 +257,13 @@ mod tests {
     fn floor() -> CollisionWorld {
         let mut world = CollisionWorld::new();
         world.add_trimesh(
+            // Big enough that a test can walk for a minute without reaching the edge — at
+            // 5.5 m/s that is 330 m, and falling off would look exactly like a physics bug.
             vec![
-                Vec3::new(-50.0, 0.0, -50.0),
-                Vec3::new(50.0, 0.0, -50.0),
-                Vec3::new(50.0, 0.0, 50.0),
-                Vec3::new(-50.0, 0.0, 50.0),
+                Vec3::new(-1000.0, 0.0, -1000.0),
+                Vec3::new(1000.0, 0.0, -1000.0),
+                Vec3::new(1000.0, 0.0, 1000.0),
+                Vec3::new(-1000.0, 0.0, 1000.0),
             ],
             vec![[0, 1, 2], [0, 2, 3]],
         );
@@ -247,6 +284,29 @@ mod tests {
         );
         world.rebuild();
         world
+    }
+
+    /// A capsule resting on the floor must still walk. Getting this wrong froze the player
+    /// mid-stride while velocity read a healthy 5.5 m/s — the slide loop kept reporting the same
+    /// floor contact and never advanced.
+    ///
+    /// The heights checked here are the ones that actually occur: `PlayerState::apply_input` holds
+    /// a grounded capsule one skin above the surface. Deeper penetration degrades — at 5 mm inside
+    /// the floor the sweep achieves about half its step — which is precisely why the player is
+    /// kept clear of the surface rather than resting on it.
+    #[test]
+    fn a_capsule_resting_on_the_floor_can_walk() {
+        let world = floor();
+        let step = Vec3::new(0.0, -0.3125 / 64.0, -5.5 / 64.0);
+        for height in [SKIN * 2.0, SKIN, SKIN * 0.5, 0.0, -0.0001] {
+            let moved = world.sweep_capsule(Vec3::new(0.0, height, 0.0), step, false);
+            assert!(
+                moved.z < step.z * 0.9,
+                "at height {height} the sweep only moved {} of a wanted {}",
+                moved.z,
+                step.z
+            );
+        }
     }
 
     #[test]

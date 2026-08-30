@@ -22,6 +22,7 @@ impl Plugin for LocalPlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CurrentInput>()
             .init_resource::<ScriptedInput>()
+            .init_resource::<MovementTicks>()
             .add_systems(Startup, spawn_player)
             .add_systems(Update, (grab_cursor, look, sample_input).chain())
             // Movement runs on the fixed timestep so it ticks at the same rate the server will.
@@ -45,6 +46,10 @@ struct CurrentInput(PlayerInput);
 /// When set, replaces keyboard input. Used by the harness to drive the player without a human.
 #[derive(Resource, Default)]
 pub struct ScriptedInput(pub Option<PlayerInput>);
+
+/// Diagnostics: how many times the fixed movement step has actually run.
+#[derive(Resource, Default)]
+pub struct MovementTicks(pub u64);
 
 fn spawn_player(mut commands: Commands) {
     commands.spawn((
@@ -118,8 +123,10 @@ fn step_movement(
     input: Res<CurrentInput>,
     world: Option<Res<CollisionWorld>>,
     time: Res<Time<Fixed>>,
+    mut ticks: ResMut<MovementTicks>,
     mut player: Single<&mut LocalPlayer>,
 ) {
+    ticks.0 += 1;
     // The collision world appears in Startup, which can land after the first fixed tick.
     let Some(world) = world else { return };
     player

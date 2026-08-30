@@ -11,10 +11,13 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use noob_tube_shared::player::PlayerInput;
 
-use crate::local_player::{LocalPlayer, ScriptedInput};
+use crate::local_player::{LocalPlayer, MovementTicks, ScriptedInput};
 
 /// Frames to run before capturing. Enough for the ground to load and the walk to cover distance.
-const CAPTURE_FRAME: u32 = 180;
+const CAPTURE_FRAME: u32 = 500;
+
+/// Total frames before quitting — long enough to outlast the 3 s connection timeout.
+const TOTAL_FRAMES: u32 = 900;
 
 pub struct HarnessPlugin;
 
@@ -42,16 +45,33 @@ fn drive(
     mut harness: ResMut<Harness>,
     mut scripted: ResMut<ScriptedInput>,
     player: Single<&LocalPlayer>,
+    virtual_time: Res<Time<Virtual>>,
+    ticks: Res<MovementTicks>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
     harness.frame += 1;
 
-    // Walk toward the crates, which sit along -Z.
+    // Walk forward, veering right after a while so the route grazes the crate at (0, -18)
+    // instead of stopping dead against it. That exercises sliding as well as walking.
     scripted.0 = Some(PlayerInput {
         forward: true,
+        right: harness.frame > 150,
+        jump: harness.frame % 200 == 0,
         ..default()
     });
+
+    // Periodic trace so a stall shows up as a position that stops changing.
+    if harness.frame % 60 == 0 {
+        info!(
+            "harness: frame {} ticks={} feet={:?} vel={:?} speed={:.3}",
+            harness.frame,
+            ticks.0,
+            player.state.position,
+            player.state.velocity,
+            virtual_time.relative_speed()
+        );
+    }
 
     if harness.frame == CAPTURE_FRAME {
         let p = player.state.position;
@@ -61,7 +81,7 @@ fn drive(
             .observe(save_to_disk(harness.path.clone()));
     }
     // Give the capture a few frames to reach disk before quitting.
-    if harness.frame == CAPTURE_FRAME + 30 {
+    if harness.frame >= TOTAL_FRAMES {
         exit.write(AppExit::Success);
     }
 }

@@ -37,6 +37,15 @@ pub const SKIN: f32 = 0.01;
 /// How far below the feet to look for ground.
 pub const GROUND_SNAP_DIST: f32 = 0.12;
 
+/// Downward speed applied while grounded, instead of gravity.
+///
+/// Gravity accumulates: each tick it drives the capsule further into the floor for the sweep to
+/// cancel, and the fraction the sweep fails to cancel adds up until the player has sunk
+/// centimetres into the ground. A constant bias cannot accumulate, still holds the capsule against
+/// the floor, and pulls it down the last few centimetres after a landing — `is_grounded` reaches
+/// GROUND_SNAP_DIST, so without it the player would hover wherever the ground probe first caught.
+pub const GROUND_STICK_SPEED: f32 = 2.0;
+
 /// Camera height above the feet, standing and crouched. Derived from the posed model in `webgame`:
 /// the eyes sit about 40% up from the Head joint toward HeadTop.
 pub const EYE_HEIGHT: f32 = 1.59;
