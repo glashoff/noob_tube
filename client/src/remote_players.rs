@@ -13,7 +13,9 @@
 use bevy::prelude::*;
 use lightyear::prelude::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use noob_tube_shared::movement::{CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS, CAPSULE_Y_OFFSET};
+use noob_tube_shared::movement::{
+    BODY_HALF_HEIGHT, BODY_RADIUS, BODY_Y_OFFSET, HEAD_SIZE, HEAD_Y,
+};
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
 use noob_tube_shared::tuning::NetConfig;
 
@@ -89,7 +91,7 @@ fn give_bodies(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
 ) {
-    let head_mesh = meshes.add(Cuboid::new(0.34, 0.34, 0.34));
+    let head_mesh = meshes.add(Cuboid::from_length(HEAD_SIZE));
     let head_material = materials.add(Color::srgb(0.9, 0.75, 0.6));
     // A nose, so the direction is unmistakable. A cube alone looks the same from four sides.
     let nose_mesh = meshes.add(Cuboid::new(0.08, 0.08, 0.22));
@@ -100,7 +102,7 @@ fn give_bodies(
             .entity(entity)
             .insert((
                 Name::from(format!("Remote player {}", player.peer)),
-                Mesh3d(meshes.add(Capsule3d::new(CAPSULE_RADIUS, CAPSULE_HALF_HEIGHT * 2.0))),
+                Mesh3d(meshes.add(Capsule3d::new(BODY_RADIUS, BODY_HALF_HEIGHT * 2.0))),
                 MeshMaterial3d(materials.add(Color::srgb(0.8, 0.3, 0.25))),
                 Transform::default(),
             ))
@@ -110,15 +112,14 @@ fn give_bodies(
                     PlayerHead,
                     Mesh3d(head_mesh.clone()),
                     MeshMaterial3d(head_material.clone()),
-                    // Sits on top of the capsule rather than at eye height, which would put it
-                    // inside: the capsule reaches 1.7 m and the eyes are at 1.59 m, so an
-                    // anatomically placed head is almost entirely hidden.
+                    // Both the body and this are sized so the whole silhouette fits inside the
+                    // collision capsule, which is the hitbox — see `movement.rs`, where a test
+                    // holds that to account. The first version of this head sat from 1.70 m to
+                    // 2.04 m, entirely above the 1.70 m capsule: perfectly visible and impossible
+                    // to shoot.
                     //
-                    // The placeholder therefore stands taller than the shape it collides with. That
-                    // is fine while the head only says where someone is looking, and has to be
-                    // resolved before M3's hitscan, or players will aim at a head the raycast
-                    // cannot hit.
-                    Transform::from_xyz(0.0, CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS + 0.17, 0.0),
+                    // The transform is relative to the body capsule's centre, not the feet.
+                    Transform::from_xyz(0.0, HEAD_Y - BODY_Y_OFFSET, 0.0),
                 ))
                 .with_children(|head| {
                     // Forward is -Z, matching the convention movement uses.
@@ -126,7 +127,7 @@ fn give_bodies(
                         Name::from("Nose"),
                         Mesh3d(nose_mesh.clone()),
                         MeshMaterial3d(nose_material.clone()),
-                        Transform::from_xyz(0.0, 0.0, -0.22),
+                        Transform::from_xyz(0.0, 0.0, -HEAD_SIZE * 0.8),
                     ));
                 });
             });
@@ -145,7 +146,7 @@ fn place_bodies(
     mut bodies: Query<(&PlayerState, &Aim, &mut Transform), (With<client::Remote>, Without<Predicted>)>,
 ) {
     for (state, aim, mut transform) in bodies.iter_mut() {
-        transform.translation = state.position + Vec3::Y * CAPSULE_Y_OFFSET;
+        transform.translation = state.position + Vec3::Y * BODY_Y_OFFSET;
         transform.rotation = Quat::from_rotation_y(aim.yaw);
     }
 }

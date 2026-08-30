@@ -754,6 +754,15 @@ wrong way, on every crossing. The interpolation takes the short way around the c
 Shooting is hitscan: the client reports where it aimed, the server raycasts against player capsules
 (not per bone yet), applies damage, and handles death and respawn.
 
+**The hitbox is the movement capsule**, and the placeholder silhouette is drawn to fit inside it. It
+did not always: the first version of the heads sat from 1.70 m to 2.04 m, entirely above the 1.70 m
+capsule — perfectly visible and impossible to shoot. The conflict that produced it is real, though:
+a mesh capsule matching the collision shape exactly *encloses* a head and hides it. The fix is to
+draw the body shorter and give the head the room, not to move the head out of the hitbox.
+
+`silhouette_fits_inside_the_hitbox` in `shared/src/movement.rs` holds that to account, and caught a
+30 cm gap between body and head while the numbers were being chosen.
+
 Death drops a ragdoll: the animated model is swapped for the rigid-body skeleton described above,
 placed at the pose the death animation reached, seeded with the player's velocity plus the shot
 impulse. Bone transforms are then read back from the body poses each frame. This runs purely on
