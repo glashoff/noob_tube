@@ -271,11 +271,23 @@ with editable values. It is a separate mechanism from BRP: it runs *inside* the 
 cannot see the server, and it draws over the game.
 
 ```bash
-cargo run -p noob_tube_client --features inspector   # F1 toggles the panel
+cargo run -p noob_tube_client --features inspector   # F1 named entities, F2 everything
 ```
 
-It starts hidden because egui takes the pointer while it is up, which fights the locked cursor mouse
-look needs. It shows the same set of types BRP does — whatever derives `Reflect` and is registered.
+There are two panels because an unfiltered one is close to unreadable. An ECS world is flat by
+construction — no tree, just entities and their components — and a running client holds 563 of them,
+of which all but ten are engine internals: 141 observers, one entity per resource (Bevy 0.19 stores
+resources as entities carrying `IsResource`), and one per registered BRP method. **F1** filters on
+`With<Name>`, which leaves what this crate spawns, because that is what we bother to name. **F2** is
+the whole world, for when the answer is in the internals.
+
+Both start hidden because egui takes the pointer while one is up, which fights the locked cursor
+mouse look needs. Both show the same set of types BRP does — whatever derives `Reflect` and is
+registered.
+
+Names come from the `Name` component. Where there is none, the inspector guesses from a fixed table
+of well-known components — `PointerId` shows as "Pointer", `Observer` as "Observer" — so a name in
+the tree is not proof that anything set one.
 
 Its `bevy_egui` and `egui` versions are pinned to this exact release, so it moves in lockstep with
 Bevy the way `bevy_remote` does.

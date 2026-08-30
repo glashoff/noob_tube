@@ -55,24 +55,37 @@ fn remote_inspection() -> impl Plugin {
     |_: &mut App| {}
 }
 
-/// An egui window listing every entity and component, compiled in with `--features inspector`.
+/// Two egui inspector windows, compiled in with `--features inspector`.
 ///
-/// Unlike BRP this runs inside the process, so it cannot see the server and it draws over the game.
-/// It starts hidden and toggles with F1 — while it is up, egui takes the pointer, which fights the
-/// locked cursor that mouse look needs.
+/// Unlike BRP these run inside the process, so they cannot see the server and they draw over the
+/// game. Both start hidden — while one is up, egui takes the pointer, which fights the locked cursor
+/// that mouse look needs.
 ///
-/// It shows only what derives `Reflect` and is registered, the same requirement BRP has.
+/// **F1 shows only named entities.** An ECS world is flat by construction: there is no tree, and a
+/// full listing reads like a page of globals. Of the 563 entities in a running client, all but ten
+/// are engine internals — observers, resources (which are entities carrying `IsResource` in Bevy
+/// 0.19), and one BRP entity per registered method. Filtering on `Name` leaves exactly what this
+/// crate spawns, because that is what we bother to name.
+///
+/// **F2 shows everything**, for the times the answer is in the internals.
+///
+/// Both show only what derives `Reflect` and is registered, the same requirement BRP has.
 #[cfg(feature = "inspector")]
 fn world_inspector() -> impl Plugin {
     use bevy::input::common_conditions::input_toggle_active;
     use bevy_inspector_egui::bevy_egui::EguiPlugin;
-    use bevy_inspector_egui::quick::WorldInspectorPlugin;
+    use bevy_inspector_egui::quick::{FilterQueryInspectorPlugin, WorldInspectorPlugin};
 
     |app: &mut App| {
-        // WorldInspectorPlugin warns rather than adds this itself, so it has to come first.
-        app.add_plugins(EguiPlugin::default()).add_plugins(
-            WorldInspectorPlugin::new().run_if(input_toggle_active(false, KeyCode::F1)),
-        );
+        // The inspectors warn rather than add this themselves, so it has to come first.
+        app.add_plugins(EguiPlugin::default())
+            .add_plugins(
+                FilterQueryInspectorPlugin::<With<Name>>::default()
+                    .run_if(input_toggle_active(false, KeyCode::F1)),
+            )
+            .add_plugins(
+                WorldInspectorPlugin::new().run_if(input_toggle_active(false, KeyCode::F2)),
+            );
     }
 }
 
