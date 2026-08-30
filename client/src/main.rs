@@ -27,6 +27,9 @@ fn main() {
         // How far in the past other players are drawn. Inserted before the plugin group, which
         // only fills this in if it is missing.
         .insert_resource(net.interpolation())
+        // How far ahead of the present our inputs are stamped, and how far we may predict. The
+        // server has no say in this: it acts on whatever tick an input arrives labelled with.
+        .insert_resource(net.input_timeline())
         .insert_resource(net)
         .add_plugins((
             world::WorldPlugin,

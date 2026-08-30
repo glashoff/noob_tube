@@ -33,6 +33,7 @@ impl Plugin for RemotePlayersPlugin {
         )
             // Inputs must be written before lightyear packs them for sending, which is what this
             // system set marks.
+            .add_systems(Update, report_input_delay)
             .add_systems(
                 FixedPreUpdate,
                 send_input
@@ -42,6 +43,24 @@ impl Plugin for RemotePlayersPlugin {
                     .run_if(not(resource_exists::<Rollback>)),
             );
     }
+}
+
+/// Update: reports the input delay lightyear settled on, once, when the clocks agree.
+///
+/// The configured value is a floor and a ceiling, not the answer: between them lightyear picks a
+/// delay from the measured round trip, so what is actually in effect is only knowable at runtime.
+/// Printing it also closes the gap between "the setting was read" and "the setting is doing
+/// something", which is not the same thing and has twice not been today.
+fn report_input_delay(timeline: Res<client::LocalTimelineSync>, mut reported: Local<bool>) {
+    if *reported || !timeline.is_synced() {
+        return;
+    }
+    *reported = true;
+    let ticks = timeline.input_delay();
+    info!(
+        "clocks synced: input delay {ticks} ticks ({:?})",
+        noob_tube_shared::tick_duration() * u32::from(ticks)
+    );
 }
 
 /// A player's head, a child of the capsule. Carries the pitch the capsule cannot.

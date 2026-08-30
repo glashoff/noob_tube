@@ -362,12 +362,15 @@ The file is for the settings you keep, the environment for the one you are chang
 stay local.
 
 ```toml
-ping_ms = 100        # simulated round trip; each end delays half of it
-jitter_ms = 10       # random variation on each leg, ± this
-loss = 0.02          # packet loss probability, 0.0 to 1.0
-send_hz = 32.0       # how often the server replicates          (server only)
-interp_ratio = 1.7   # interpolation delay, in send intervals   (client only)
-interp_min_ms = 5    # floor under that delay                   (client only)
+ping_ms = 100             # simulated round trip; each end delays half of it
+jitter_ms = 10            # random variation on each leg, ± this
+loss = 0.02               # packet loss probability, 0.0 to 1.0
+send_hz = 32.0            # how often the server replicates            (server only)
+interp_ratio = 1.7        # interpolation delay, in send intervals     (client only)
+interp_min_ms = 5         # floor under that delay                     (client only)
+input_delay_min_ticks = 0 # soonest the server may act on an input     (client only)
+input_delay_max_ticks = 0 # ping covered by delay before predicting    (client only)
+max_predicted_ticks = 100 # how far ahead the client may simulate      (client only)
 ```
 
 ```bash
@@ -414,13 +417,50 @@ They are separate, and confusing them is how netcode gets tuned in the wrong dir
 | the server learning what you did | half the ping | `NOOB_TUBE_PING_MS` |
 | seeing another player's move | half the ping + interpolation delay | ping, `SEND_HZ`, `INTERP_RATIO` |
 
-Only the third is adjustable without changing the simulated link, and it is the one worth spending
-time on. At the defaults it is `1.7 / 32 Hz ≈ 53 ms` on top of the network. Raising `SEND_HZ`
-shortens it and costs bandwidth; lowering `INTERP_RATIO` shortens it and starts letting remote
-players freeze between updates, because the next one has not arrived yet.
+The third is the one worth spending time on. At the defaults it is `1.7 / 32 Hz ≈ 53 ms` on top of
+the network. Raising `send_hz` shortens it and costs bandwidth; lowering `interp_ratio` shortens it
+and starts letting remote players freeze between updates, because the next one has not arrived yet.
 
 Lightyear **clamps rather than extrapolates** when it does run dry, so a too-short delay shows up as
 players stuttering to a halt and jumping, not as them sliding through walls.
+
+#### Input delay: buying stability with responsiveness
+
+The second row is not fixed either, and this is where the genre decision lives. The client stamps
+each input with the tick it is *meant for*, and the server acts on that tick. Stamp it for `now`
+and your movement is instant but the server may not have the packet in time, so it guesses and the
+client rolls back. Stamp it for `now + 4` and the packet has 62 ms to arrive, the server never
+guesses, nothing ever rewinds — and every keypress starts 62 ms late.
+
+Three knobs, all on the client:
+
+- `input_delay_min_ticks` — never act on an input sooner than this, however good the link is.
+- `input_delay_max_ticks` — how much ping to cover with delay before prediction takes over.
+- `max_predicted_ticks` — the ceiling on how far ahead the client may run, and so on rollback depth.
+
+The defaults are `0 / 0 / 100`: cover every millisecond with prediction, delay nothing. That is the
+shooter answer, and it is why the earlier measurement found the client running 0.60 m ahead of the
+server. Fighting games and RTSs take the opposite end — `input_delay_max_ticks` high, or
+`max_predicted_ticks = 0` for full lockstep, where nothing is predicted and every input waits out
+the round trip.
+
+For a fixed delay regardless of ping, set the min and the max to the same number. A min above the
+max is refused at startup rather than asserted on from inside a lightyear system.
+
+The configured pair is a floor and a ceiling, not the answer: between them lightyear picks a delay
+from the round trip it measures. So the client logs what it actually settled on, once the clocks
+agree. Measured at a 100 ms ping:
+
+| setting | effective delay |
+|---|---|
+| `0 .. 0` — the shooter default | 0 ticks |
+| `4 .. 4` — fixed | 4 ticks, 62.5 ms |
+| `0 .. 20` — cover the ping | 15 ticks, 234 ms |
+| `0 .. 20`, `max_predicted_ticks = 0` — lockstep | 17 ticks, 266 ms |
+
+Note the third row: asked to cover a 100 ms ping, lightyear chose 234 ms. It is budgeting for jitter
+and sync error on top of the round trip, and it is generous about it. Tune against the number the
+client reports, not against the one you wrote down.
 
 #### What it makes visible
 

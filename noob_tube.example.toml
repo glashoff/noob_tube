@@ -41,3 +41,33 @@ interp_ratio = 1.7
 # Floor under the interpolation delay, in milliseconds. Client only. Matters only at very high
 # send rates, where 1.7 send intervals would be shorter than a frame.
 interp_min_ms = 5
+
+# --- Input delay. Client only: the client stamps each input with the tick it is meant for, and
+# --- the server simply acts on that tick. The server has no say in this.
+
+# The soonest, in ticks, that the server may act on an input — no matter how good the connection.
+#
+# The client stamps each input for `now + delay` instead of `now`, so the packet has that long to
+# arrive before the server needs it. What it buys is fewer rollbacks; what it costs is that your own
+# movement starts this late every time, even on a perfect link. Fighting games and RTSs spend it
+# gladly for a simulation that never rewinds. Shooters generally do not, which is why this is 0.
+#
+# One tick is 15.6 ms at the 64 Hz tick rate.
+input_delay_min_ticks = 0
+
+# How much latency is covered by input delay before prediction takes over.
+#
+# Below this much ping the delay grows to match the link and there is nothing to roll back; above
+# it the delay stops growing and the rest is predicted. 0 means never trade responsiveness for
+# stability.
+#
+# Must be at least `input_delay_min_ticks` — a floor above the ceiling is refused at startup. For a
+# fixed delay of n ticks regardless of ping, set both to n.
+input_delay_max_ticks = 0
+
+# How far ahead of the server the client may simulate, in ticks.
+#
+# This is the ceiling on rollback depth, and so on what a single correction can cost in CPU.
+# Latency beyond what it covers turns into more input delay instead, up to input_delay_max_ticks.
+# 0 is lockstep: no prediction at all, every input waits for the round trip.
+max_predicted_ticks = 100

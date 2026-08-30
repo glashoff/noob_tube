@@ -17,9 +17,12 @@
 //! ping_ms = 100        # simulated round trip; each end delays half of it
 //! jitter_ms = 10       # random variation on each leg, ± this
 //! loss = 0.02          # packet loss probability, 0.0 to 1.0
-//! send_hz = 32.0       # how often the server replicates          (server only)
-//! interp_ratio = 1.7   # interpolation delay, in send intervals   (client only)
-//! interp_min_ms = 5    # floor under that delay                   (client only)
+//! send_hz = 32.0            # how often the server replicates          (server only)
+//! interp_ratio = 1.7        # interpolation delay, in send intervals   (client only)
+//! interp_min_ms = 5         # floor under that delay                   (client only)
+//! input_delay_min_ticks = 0 # never process an input sooner than this  (client only)
+//! input_delay_max_ticks = 0 # latency covered by delay before predicting (client only)
+//! max_predicted_ticks = 100 # how far the client may predict ahead     (client only)
 //! ```
 //!
 //! Both binaries read the same file and each takes the fields it needs, so one file describes a
@@ -68,6 +71,29 @@ pub struct NetConfig {
     pub interp_ratio: f32,
     /// Floor under the interpolation delay, for when the send rate is very high.
     pub interp_min_ms: u64,
+    /// The soonest, in ticks, that the server may act on an input — regardless of how good the
+    /// connection is.
+    ///
+    /// The client stamps each input for tick `now + delay` instead of `now`, so the packet has that
+    /// long to arrive before the server needs it. What it buys is fewer rollbacks; what it costs is
+    /// that your own movement starts this late, every time, even on a perfect link. Fighting games
+    /// and RTSs spend it gladly for a simulation that never rewinds. Shooters generally do not,
+    /// which is why this is 0 by default.
+    ///
+    /// Must not exceed `input_delay_max_ticks`; the two together are a fixed delay.
+    pub input_delay_min_ticks: u16,
+    /// How much latency is covered by input delay before prediction takes over.
+    ///
+    /// Below this ping, the delay grows to match the link and there is nothing to roll back; above
+    /// it, the delay stops growing and the rest is predicted. Zero means never trade responsiveness
+    /// for stability — predict from the first millisecond.
+    pub input_delay_max_ticks: u16,
+    /// How far ahead of the server the client may simulate.
+    ///
+    /// This is the ceiling on rollback depth, and therefore on the CPU a correction can cost.
+    /// Latency beyond what this covers turns into more input delay instead, up to
+    /// `input_delay_max_ticks`. Zero is lockstep: no prediction at all.
+    pub max_predicted_ticks: u16,
 }
 
 impl Default for NetConfig {
@@ -79,6 +105,10 @@ impl Default for NetConfig {
             send_hz: 32.0,
             interp_ratio: 1.7,
             interp_min_ms: 5,
+            // Lightyear's `no_input_delay()`: cover every millisecond of latency with prediction.
+            input_delay_min_ticks: 0,
+            input_delay_max_ticks: 0,
+            max_predicted_ticks: 100,
         }
     }
 }
@@ -95,7 +125,20 @@ impl NetConfig {
             None => Self::default(),
         };
         config.apply_env();
+        config.validate();
         config
+    }
+
+    /// Rejects combinations that cannot mean anything, before lightyear asserts on them from
+    /// inside a system where the message is far less useful.
+    fn validate(&self) {
+        assert!(
+            self.input_delay_min_ticks <= self.input_delay_max_ticks,
+            "input_delay_min_ticks ({}) exceeds input_delay_max_ticks ({}): a floor above the \
+             ceiling is not a setting. For a fixed delay of n ticks, set both to n.",
+            self.input_delay_min_ticks,
+            self.input_delay_max_ticks,
+        );
     }
 
     fn from_file(path: &Path) -> Self {
@@ -112,6 +155,9 @@ impl NetConfig {
         env_parse("NOOB_TUBE_SEND_HZ", &mut self.send_hz);
         env_parse("NOOB_TUBE_INTERP_RATIO", &mut self.interp_ratio);
         env_parse("NOOB_TUBE_INTERP_MIN_MS", &mut self.interp_min_ms);
+        env_parse("NOOB_TUBE_INPUT_DELAY_MIN_TICKS", &mut self.input_delay_min_ticks);
+        env_parse("NOOB_TUBE_INPUT_DELAY_MAX_TICKS", &mut self.input_delay_max_ticks);
+        env_parse("NOOB_TUBE_MAX_PREDICTED_TICKS", &mut self.max_predicted_ticks);
     }
 
     /// The link conditioner for this process, or `None` when nothing is being simulated.
@@ -142,6 +188,18 @@ impl NetConfig {
             .with_min_delay(Duration::from_millis(self.interp_min_ms))
     }
 
+    /// How far ahead of the present a client stamps its inputs, and how far it may predict.
+    ///
+    /// Client-side only: the server acts on whatever tick an input is stamped for, and has no say
+    /// in the choice.
+    pub fn input_timeline(&self) -> InputTimelineConfig {
+        InputTimelineConfig::default().with_input_delay(client::InputDelayConfig {
+            minimum_input_delay_ticks: self.input_delay_min_ticks,
+            maximum_input_delay_before_prediction: self.input_delay_max_ticks,
+            maximum_predicted_ticks: self.max_predicted_ticks,
+        })
+    }
+
     /// One line describing what is actually in effect, for the log.
     ///
     /// Printed unconditionally rather than only when something is set, because "link untouched" is
@@ -166,8 +224,13 @@ impl NetConfig {
             ""
         };
         format!(
-            "{link}, sending at {:.0} Hz, interpolating at {}× [{source}]{stale}",
-            self.send_hz, self.interp_ratio
+            "{link}, sending at {:.0} Hz, interpolating at {}×, input delay {}..{} ticks, \
+             predicting up to {} [{source}]{stale}",
+            self.send_hz,
+            self.interp_ratio,
+            self.input_delay_min_ticks,
+            self.input_delay_max_ticks,
+            self.max_predicted_ticks,
         )
     }
 }
@@ -250,6 +313,39 @@ mod tests {
     #[test]
     fn a_misspelled_key_is_refused() {
         assert!(toml::from_str::<NetConfig>("pign_ms = 120").is_err());
+    }
+
+    #[test]
+    fn no_input_delay_by_default() {
+        let config = default_config();
+        assert_eq!(config.input_delay_min_ticks, 0);
+        assert_eq!(config.input_delay_max_ticks, 0);
+    }
+
+    #[test]
+    fn a_fixed_delay_sets_both_ends() {
+        let config = NetConfig {
+            input_delay_min_ticks: 3,
+            input_delay_max_ticks: 3,
+            ..default_config()
+        };
+        config.validate();
+        // `InputTimelineConfig` keeps its fields private, so this asserts that the pair we hand
+        // lightyear is the one that means "always three ticks, on any link".
+        assert_eq!(config.input_delay_min_ticks, config.input_delay_max_ticks);
+        let _ = config.input_timeline();
+    }
+
+    /// A floor above the ceiling would otherwise reach lightyear and assert from inside a system.
+    #[test]
+    #[should_panic(expected = "input_delay_min_ticks")]
+    fn a_floor_above_the_ceiling_is_refused() {
+        NetConfig {
+            input_delay_min_ticks: 5,
+            input_delay_max_ticks: 2,
+            ..default_config()
+        }
+        .validate();
     }
 
     fn default_config() -> NetConfig {
