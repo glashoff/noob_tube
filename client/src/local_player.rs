@@ -12,8 +12,11 @@
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
-use lightyear::prelude::Predicted;
-use noob_tube_shared::player::{PlayerInput, PlayerState};
+use lightyear::prelude::{
+    ConfirmedHistory, Interpolated, InterpolationSystems, InterpolationTimeline, NetworkTimeline,
+    Predicted, interpolation_fraction,
+};
+use noob_tube_shared::player::{PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::simulation;
 use noob_tube_shared::types::Authored;
 
@@ -36,11 +39,23 @@ impl Plugin for LocalPlayerPlugin {
             .register_type::<CurrentInput>()
             .register_type::<ScriptedInput>()
             .register_type::<MovementTicks>()
+            .register_type::<DrawnView>()
+            .init_resource::<DrawnView>()
             .init_resource::<CurrentInput>()
             .init_resource::<ScriptedInput>()
             .init_resource::<MovementTicks>()
             .add_systems(Startup, spawn_player)
-            .add_systems(Update, (note_pointer_over_ui, grab_cursor, look, sample_input).chain())
+            .add_systems(
+                Update,
+                (note_pointer_over_ui, note_drawn_view, grab_cursor, look, sample_input)
+                    .chain()
+                    // Before interpolation runs again, on purpose. A player reacts to what is on
+                    // the screen, and what is on the screen is the blend interpolation produced
+                    // *last* frame. Reading it after this frame's update would report a view the
+                    // player has not seen yet — half a frame into their own future.
+                    .before(InterpolationSystems::Prepare),
+            )
+            .add_systems(Update, report_drawn_view.after(sample_input))
             // The same step the server runs, over the one entity we predict. Lightyear re-runs
             // this schedule when it rolls back, so this is the replay too.
             .add_systems(
@@ -211,6 +226,8 @@ fn look(
 fn sample_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    // What the screen is showing of everyone else, as of this frame.
+    drawn: Res<DrawnView>,
     // Optional so the client still samples input with no window at all — see `windowing` in
     // `main.rs`. A headless client has no cursor to grab, and nothing scripted should wait on one.
     cursor: Option<Single<&CursorOptions, With<PrimaryWindow>>>,
@@ -222,12 +239,21 @@ fn sample_input(
     // already grabbed. Otherwise the click that gives the window focus also empties a round into
     // whatever the camera happened to be pointing at.
     let grabbed = cursor.is_some_and(|cursor| cursor.grab_mode != CursorGrabMode::None);
-    let firing = mouse.pressed(MouseButton::Left) && grabbed;
+    let scripted_fire = scripted.0.is_some_and(|scripted| scripted.fire);
+    let firing = scripted_fire || (mouse.pressed(MouseButton::Left) && grabbed);
+    let bracket = firing.then_some(drawn.0).flatten();
+
     if let Some(scripted) = scripted.0 {
-        input.0 = PlayerInput { yaw: player.yaw, pitch: player.pitch, ..scripted };
+        input.0 = PlayerInput {
+            yaw: player.yaw,
+            pitch: player.pitch,
+            view: bracket,
+            ..scripted
+        };
         return;
     }
     input.0 = PlayerInput {
+        view: bracket,
         forward: keys.pressed(KeyCode::KeyW),
         backward: keys.pressed(KeyCode::KeyS),
         left: keys.pressed(KeyCode::KeyA),
@@ -238,6 +264,111 @@ fn sample_input(
         yaw: player.yaw,
         pitch: player.pitch,
     };
+}
+
+/// What the screen is currently showing of everyone else, as two received snapshots and a fraction.
+///
+/// A resource rather than something worked out inside the input system, for two reasons. It is
+/// read at a particular moment in the frame — before interpolation runs again — and that is easier
+/// to say once, in a system order, than to remember at every use. And it is registered for
+/// reflection, so what a client is about to report is readable from outside the process, which is
+/// the only way to tell "the bracket is wrong" from "there is no bracket".
+///
+/// `None` means lightyear has nothing to blend: one snapshot is not a blend. See
+/// [`report_drawn_view`] for what that actually indicates.
+#[derive(Resource, Default, Reflect, Clone, Copy)]
+#[reflect(Resource)]
+pub struct DrawnView(pub Option<ViewBracket>);
+
+/// Update: works out the two received snapshots the screen is blending between, and how far along.
+///
+/// Every interpolated player is drawn from its own [`ConfirmedHistory`], and in principle each has
+/// its own bracket. In practice a player who is *moving* produces an update every send interval, so
+/// every moving player shares the same one; a player who is not moving produces no updates, and any
+/// bracket over a constant position gives the same answer. So one bracket describes the screen. The
+/// freshest is the one taken, because a history that has stopped growing belongs to someone who has
+/// stopped.
+///
+/// Ordered before `InterpolationSystems::Prepare`, which is the whole point of reading it here: a
+/// player reacts to what is on the screen, and what is on the screen is the blend interpolation
+/// produced *last* frame. Reading it after this frame's update would report a view the player has
+/// not seen yet.
+fn note_drawn_view(
+    timeline: Res<InterpolationTimeline>,
+    drawn: Query<&ConfirmedHistory<PlayerState>, With<Interpolated>>,
+    mut view: ResMut<DrawnView>,
+) {
+    let current = timeline.now().tick();
+    let overstep = timeline.overstep().to_f32();
+    let mut best: Option<ViewBracket> = None;
+    for history in drawn.iter() {
+        // The newest sample at or before now, and the one after it: exactly the pair lightyear
+        // blends. Mirroring its choice is the whole point — a different pair would describe a
+        // screen nobody saw.
+        let previous = (0..history.len())
+            .take_while(|index| {
+                history.get_nth_tick(*index).is_some_and(|tick| tick <= current)
+            })
+            .last();
+        let Some(previous) = previous else { continue };
+        let Some((from, _)) = history.get_nth_state(previous) else {
+            continue;
+        };
+        // No sample after this one means the blend has run dry and lightyear is holding the last
+        // value. There is no bracket to report, only a position.
+        let Some((to, _)) = history.get_nth_state(previous + 1) else {
+            continue;
+        };
+        if best.is_some_and(|best| best.to >= to) {
+            continue;
+        }
+        best = Some(ViewBracket {
+            from,
+            to,
+            factor: interpolation_fraction(from, to, current, overstep).clamp(0.0, 1.0),
+        });
+    }
+    view.0 = best;
+}
+
+/// Update: says once what the first shot actually reported.
+///
+/// What the shooter reports is the whole of what the server can know about the screen it was aimed
+/// at, and a client that reports nothing degrades quietly into a coarser rewind. This is the line
+/// that says which happened.
+fn report_drawn_view(
+    input: Res<CurrentInput>,
+    timeline: Res<InterpolationTimeline>,
+    drawn: Query<&ConfirmedHistory<PlayerState>, With<Interpolated>>,
+    mut reported: Local<bool>,
+) {
+    if *reported || !input.0.fire {
+        return;
+    }
+    *reported = true;
+    match input.0.view {
+        Some(view) => info!(
+            "first shot reports view ticks {}..{} at {:.2}",
+            view.from.0, view.to.0, view.factor,
+        ),
+        None => {
+            // Not a failure of ours: it means lightyear has nothing to blend, because the
+            // interpolation timeline has caught up with the newest sample that has arrived. Remote
+            // players are being clamped rather than interpolated at that point, which is a problem
+            // in its own right and worth saying so plainly.
+            let newest = drawn
+                .iter()
+                .filter_map(|history| history.get_nth_tick(history.len().checked_sub(1)?))
+                .max();
+            warn!(
+                "first shot reports no view bracket: interpolation is at tick {} but the newest \
+                 confirmed sample is {:?} — it is clamping, not blending. The shot falls back to \
+                 the coarser rewind.",
+                timeline.now().tick().0,
+                newest.map(|tick| tick.0),
+            );
+        }
+    }
 }
 
 /// FixedUpdate: counts fixed steps, for telling a stalled simulation from a stalled player.

@@ -155,10 +155,11 @@ jitter_safety_multiple = 4
 
 # Whether a shot is tested against the world the shooter saw, rather than the present one.
 #
-# Read by both binaries, meaning something different on each. On the client it makes every input
-# message carry the client's current interpolation delay. On the server it makes each player's
-# recent positions be kept, and each shot rewind its targets to the shooter's moment before the ray
-# is cast.
+# Read by both binaries, meaning something different on each. On the client it makes every shot
+# carry the two received snapshots the screen was blending between and how far between them it was,
+# and it makes every input message carry the client's interpolation delay as a coarser fallback. On
+# the server it makes each player's recent positions be kept, and each shot rewind its targets to
+# the shooter's moment before the ray is cast.
 #
 # Off, the server tests against where targets are NOW, while the aim came from where they were on
 # the shooter's screen — older by the round trip plus interp_ratio's delay. At ping_ms = 100 that

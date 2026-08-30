@@ -10,7 +10,7 @@ use lightyear::prelude::input::native::ActionState;
 use noob_tube_shared::simulation;
 use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::level;
-use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
+use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::collision::CollisionWorld;
 use noob_tube_shared::lag_compensation::{PositionHistory, Snapshot};
 use noob_tube_shared::shooting::{self, Health};
@@ -63,6 +63,47 @@ fn main() {
 /// Which spawn point a player returns to. Server-side, never replicated.
 #[derive(Component, Clone, Copy)]
 struct SpawnIndex(usize);
+
+/// How far back a shot reaches, and how precisely it can say so.
+///
+/// The two are not equally good. `Bracket` is what the shooter actually drew: the two confirmed
+/// snapshots it was blending and how far between them it was, so the same lerp over the server's
+/// own history reproduces that point exactly. `Delay` is the fallback lightyear provides for free —
+/// a moment in the past, blended from the two ticks either side of it, which lands somewhere near
+/// the drawn point rather than on it.
+#[derive(Clone, Copy)]
+enum Rewind {
+    Bracket(ViewBracket),
+    Delay((Tick, f32)),
+}
+
+impl Rewind {
+    /// The player's position and stance at that moment, out of a history.
+    fn apply(&self, history: &PositionHistory) -> Option<Snapshot> {
+        match *self {
+            Rewind::Bracket(view) => history.sample_bracket(view.from, view.to, view.factor),
+            Rewind::Delay((tick, overstep)) => history.sample(tick, overstep),
+        }
+    }
+
+    /// The earliest tick this reaches back to — how deep the rewind is, for the log.
+    fn oldest_tick(&self) -> Tick {
+        match *self {
+            Rewind::Bracket(view) => view.from,
+            Rewind::Delay((tick, _)) => tick,
+        }
+    }
+
+    /// How it is being asked for, so a log line says which of the two answered.
+    fn describe(&self) -> String {
+        match *self {
+            Rewind::Bracket(view) => {
+                format!("ticks {}..{} at {:.2}", view.from.0, view.to.0, view.factor)
+            }
+            Rewind::Delay((tick, overstep)) => format!("tick {} +{overstep:.2} (from a delay)", tick.0),
+        }
+    }
+}
 
 /// What a shot is fired from: where the shooter is, where they are looking, whether the trigger is
 /// down, and which connection to ask how far behind their view was.
@@ -128,11 +169,23 @@ fn resolve_shots(
         // The moment this shooter's screen was showing when the trigger went down. `tick` is the
         // tick the input was *stamped for*, not the one the packet arrived on, so this is the same
         // answer however late the packet was.
+        //
+        // Two ways of knowing it, and the first is better wherever it is available. The shooter
+        // sends the pair of confirmed ticks it was actually blending between, so the server can
+        // rebuild the identical blend; falling back on the interpolation delay means picking a
+        // moment and blending the two ticks either side of it, which is not the same point
+        // whenever the snapshots the client received were more than one tick apart — that is, at
+        // any send rate below the tick rate.
         let rewind = net
             .lag_compensation
-            .then(|| delays.get(controlled.owner).ok())
-            .flatten()
-            .map(|delay| delay.tick_and_overstep(tick));
+            .then(|| match action.0.view {
+                Some(view) => Some(Rewind::Bracket(view)),
+                None => delays
+                    .get(controlled.owner)
+                    .ok()
+                    .map(|delay| Rewind::Delay(delay.tick_and_overstep(tick))),
+            })
+            .flatten();
 
         // Once, on the first shot anyone fires. The server can be configured for lag compensation,
         // keep every position it needs and still rewind nothing, because the other half — the
@@ -143,11 +196,12 @@ fn resolve_shots(
         if !*reported && net.lag_compensation {
             *reported = true;
             match rewind {
-                Some((rewind_tick, _)) => {
-                    let back = (tick - rewind_tick).max(0) as u32;
+                Some(rewind) => {
+                    let back = (tick - rewind.oldest_tick()).max(0) as u32;
                     info!(
-                        "lag compensation live: first shot rewound {back} ticks ({:?})",
+                        "lag compensation live: first shot rewound {back} ticks ({:?}), {}",
                         net.tick_duration() * back,
+                        rewind.describe(),
                     );
                 }
                 None => warn!(
@@ -164,22 +218,22 @@ fn resolve_shots(
             .copied()
             .filter(|(entity, ..)| *entity != shooter)
             .map(|(entity, now, crouching)| {
-                let Some((rewind_tick, overstep)) = rewind else {
+                let Some(rewind) = rewind else {
                     return (entity, now, crouching);
                 };
                 let Ok(history) = histories.get(entity) else {
                     return (entity, now, crouching);
                 };
-                let Some(past) = history.sample(rewind_tick, overstep) else {
+                let Some(past) = rewind.apply(history) else {
                     // A player who joined moments ago simply has no such past, which is normal and
                     // passes. A *full* history that still cannot reach back this far is a
                     // configuration that cannot serve this connection, and says so.
                     if history.is_full() {
                         warn!(
                             "lag_comp_history_ticks is too short: peer {} asked to rewind to \
-                             tick {}, oldest kept is {:?}",
+                             {}, oldest kept is {:?}",
                             player.peer,
-                            rewind_tick.0,
+                            rewind.describe(),
                             history.oldest().map(|tick| tick.0),
                         );
                     }
@@ -188,8 +242,8 @@ fn resolve_shots(
                 trace!(
                     "peer {} rewound a target {} ticks to {}: it moved {:.2} m since",
                     player.peer,
-                    tick - rewind_tick,
-                    rewind_tick.0,
+                    tick - rewind.oldest_tick(),
+                    rewind.describe(),
                     (now - past.position).length(),
                 );
                 (entity, past.position, past.crouching)

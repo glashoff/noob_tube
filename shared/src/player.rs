@@ -31,6 +31,33 @@ pub struct PlayerInput {
     /// Vertical look angle in radians. Does not affect movement, but travels with the input so the
     /// server knows where a shot was aimed.
     pub pitch: f32,
+    /// What the screen was showing of everyone else, at the moment the trigger went down.
+    ///
+    /// `None` on every tick that is not a shot, which costs nothing on the wire: lightyear sends
+    /// "same as the previous tick" for an unchanged input, and an input that carries no bracket is
+    /// unchanged whenever the keys are.
+    pub view: Option<ViewBracket>,
+}
+
+/// The two received snapshots a client was drawing between, and how far between them it was.
+///
+/// This is the exact answer to "what did the shooter see". Remote players are drawn interpolated,
+/// which means their position on screen was never a position the server simulated — it was a blend
+/// of two, at some fraction. Sending the fraction and both ends of it lets the server rebuild that
+/// blend from its own history and get the identical point back, rather than approximating it from
+/// a delay in milliseconds.
+///
+/// The ticks are the *confirmed* ticks — the ones replication actually delivered, which at a send
+/// rate below the tick rate are further apart than one tick. That is why both are needed and a
+/// single instant would not do.
+#[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
+pub struct ViewBracket {
+    /// The older of the two snapshots.
+    pub from: lightyear::prelude::Tick,
+    /// The newer one. Always strictly after `from`.
+    pub to: lightyear::prelude::Tick,
+    /// 0 at `from`, 1 at `to`.
+    pub factor: f32,
 }
 
 /// Required by lightyear's input plugin. Our input carries no entity references — it is booleans

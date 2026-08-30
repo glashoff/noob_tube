@@ -105,6 +105,37 @@ impl PositionHistory {
         })
     }
 
+    /// The blend of two recorded ticks that a client was drawing, rebuilt from its own history.
+    ///
+    /// This is the exact form: the client reports the two confirmed ticks it was interpolating
+    /// between and how far between them it was, and the same lerp over the same two ticks gives
+    /// back the point that was on its screen. The delay-based [`Self::sample`] approximates it by
+    /// picking a moment and blending the two ticks either side, which differs whenever the
+    /// snapshots the client actually received were further apart than one tick — which, at any
+    /// send rate below the tick rate, is always.
+    ///
+    /// Returns `None` if either end has been forgotten, for the same reason as [`Self::sample`]:
+    /// half a bracket is not a bracket, and guessing the other half is how a shot lands on a
+    /// position nobody was ever in.
+    pub fn sample_bracket(&self, from: Tick, to: Tick, factor: f32) -> Option<Snapshot> {
+        let start = self.at(from)?;
+        let end = self.at(to)?;
+        Some(Snapshot {
+            position: start.position.lerp(end.position, factor.clamp(0.0, 1.0)),
+            // Discrete, and held until the moment arrives — the same choice interpolation makes.
+            crouching: start.crouching,
+        })
+    }
+
+    /// The recorded moment at exactly `tick`, if it is still kept.
+    fn at(&self, tick: Tick) -> Option<Snapshot> {
+        let index = self
+            .entries
+            .binary_search_by_key(&tick, |(recorded, _)| *recorded)
+            .ok()?;
+        Some(self.entries[index].1)
+    }
+
     /// True once the buffer has been filled, which is what separates "this player only just joined"
     /// from "the history is too short for this connection".
     pub fn is_full(&self) -> bool {
@@ -194,6 +225,40 @@ mod tests {
         assert_eq!(history.len(), 3);
         assert_eq!(history.oldest(), Some(Tick(7)));
         assert!(history.is_full());
+    }
+
+    /// The exact form: two confirmed ticks and a fraction, rebuilt from the dense history.
+    #[test]
+    fn a_bracket_is_rebuilt_from_both_ends() {
+        let sample = walking().sample_bracket(Tick(2), Tick(6), 0.25).expect("both ends kept");
+        assert_eq!(sample.position, Vec3::new(3.0, 0.0, 0.0));
+    }
+
+    /// A wide bracket is the normal case, not the exception: at a send rate below the tick rate the
+    /// two snapshots a client received are several ticks apart, and blending them is not the same
+    /// as reading the tick in the middle.
+    #[test]
+    fn a_wide_bracket_is_not_the_same_as_the_middle_tick() {
+        let mut history = PositionHistory::with_capacity(8);
+        for (tick, x) in [(0u32, 0.0), (1, 5.0), (2, 6.0)] {
+            history.record(Tick(tick), Snapshot { position: Vec3::new(x, 0.0, 0.0), crouching: false });
+        }
+        // The client saw the blend of ticks 0 and 2, halfway: 3.0. The tick in between says 5.0.
+        let blended = history.sample_bracket(Tick(0), Tick(2), 0.5).unwrap();
+        assert_eq!(blended.position.x, 3.0);
+        assert_eq!(history.sample(Tick(1), 0.0).unwrap().position.x, 5.0);
+    }
+
+    /// Half a bracket is not a bracket.
+    #[test]
+    fn a_forgotten_end_is_a_miss() {
+        let mut history = PositionHistory::with_capacity(3);
+        for tick in 10..13u32 {
+            history.record(Tick(tick), Snapshot { position: Vec3::ZERO, crouching: false });
+        }
+        assert!(history.sample_bracket(Tick(8), Tick(12), 0.5).is_none());
+        assert!(history.sample_bracket(Tick(10), Tick(99), 0.5).is_none());
+        assert!(history.sample_bracket(Tick(10), Tick(12), 0.5).is_some());
     }
 
     /// A short history is not the same failure as a stale one, and the caller reports them

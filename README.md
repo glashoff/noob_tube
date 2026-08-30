@@ -823,11 +823,26 @@ target was on the shooter's screen — older by the round trip **plus** the inte
 it. You would have to lead a running target by most of its own width, at every range, which players
 experience as the game being broken rather than as a skill to learn.
 
-Two things make the shooter's moment knowable, and both were already in place before this step. The
-shot travels as a **tick-stamped input**, so the server knows which tick the trigger went down on
-rather than when the packet happened to arrive. And with `lag_compensation` on, lightyear has the
-client report its own interpolation delay with every input message — how far behind its view of
-everyone else was.
+The shot travels as a **tick-stamped input**, so the server knows which tick the trigger went down
+on rather than when the packet happened to arrive. What it still needs is how far behind that tick
+the shooter's view of everyone else was, and there are two ways to know it.
+
+The exact one: **the client sends the two confirmed ticks it was blending between, and how far
+between them it was.** A remote player's position on screen was never a position the server
+simulated — it was a blend of two received snapshots at some fraction. Sending both ends and the
+fraction lets the server rebuild that blend from its own history and land on the identical point.
+The ticks are the *confirmed* ones, the ones replication actually delivered, which at a send rate
+below the tick rate are two ticks apart rather than one — which is exactly why a single instant
+would not do.
+
+The fallback: lightyear's own `InputConfig::lag_compensation`, which has the client report its
+interpolation *delay* with every input message. The server turns that into a moment and blends the
+two ticks either side of it. On the same shots, measured against the bracket, the two land **0.3 to
+2.1 cm apart** on a target running at 6 m/s — the delay is sampled once per message rather than at
+the frame the trigger went down, and quantised on the way.
+
+A shot with neither resolves against the present, which is the old behaviour. Each rung down is
+logged rather than silent.
 
 The server keeps the rest: `PositionHistory`, a short ring buffer of each player's position and
 stance, written in `FixedPostUpdate` so it holds the value at the *end* of a tick — the one
@@ -839,6 +854,21 @@ Per entity, not by world snapshot: a hitscan ray asks about each target separate
 entity means a player who joined a moment ago simply has a short history instead of a hole in a
 shared structure. The level is not rewound — geometry does not move, so a shot blocked by a crate
 now was blocked by it then.
+
+The client sends **one** bracket, not one per player, and that is enough: a player who is moving
+produces an update every send interval, so every moving player shares the same bracket, and a
+player who is not moving produces no updates at all, over which any bracket gives the same answer.
+
+The bracket is read *before* interpolation runs again in the frame, on purpose. A player reacts to
+what is on the screen, and what is on the screen is the blend interpolation produced last frame.
+
+**Found while measuring this:** above roughly 150 ms of ping the client has no bracket to send,
+because its interpolation timeline has caught up with the newest sample that has arrived — at
+300 ms it sits four ticks past it. Lightyear is then clamping to the last received position rather
+than blending two, which means remote players are stepping, not moving. That is a problem with the
+interpolation buffer rather than with shooting, it is now logged in as many words, and lag
+compensation degrades to the delay rung instead of breaking. `interp_ratio` is the knob; 1.7 send
+intervals is not enough once the network delay dominates.
 
 Measured with a single shot, at 300 ms of simulated ping. The shooter aims at a standing target;
 the target starts running perpendicular; a quarter of a second later the shooter fires, still aimed
@@ -859,7 +889,10 @@ Both halves are settings, in separate processes, so either can be on while the o
 result looks like nothing happening. Both cases name themselves on the first shot:
 
 ```
-lag compensation live: first shot rewound 20 ticks (312.5ms)
+first shot reports view ticks 544..546 at 0.86                        (client)
+lag compensation live: first shot rewound 13 ticks (203ms), ticks 546..548 at 0.26
+first shot reports no view bracket: interpolation is at tick 544 but the newest confirmed
+  sample is 540 — it is clamping, not blending. The shot falls back to the coarser rewind.
 lag compensation is on, but peer 178811… reports no view delay: its shots resolve against the
   present. Is lag_compensation off on that client?
 lag_comp_history_ticks is too short: peer 178811… asked to rewind to tick 1241, oldest kept is 1257

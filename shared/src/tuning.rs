@@ -157,10 +157,11 @@ pub struct NetConfig {
     pub jitter_safety_multiple: u8,
     /// Whether a shot is tested against where the shooter saw its target.
     ///
-    /// On, the client reports its interpolation delay with every input message and the server
-    /// rewinds each target into the past before casting the ray — see [`crate::lag_compensation`].
-    /// Off, the server tests against the present, and hitting anything moving means leading it by
-    /// the whole round trip.
+    /// On, every shot carries the two received snapshots the client was blending between and how
+    /// far between them it was, the client also reports its interpolation delay as a fallback, and
+    /// the server rewinds each target into the past before casting the ray — see
+    /// [`crate::lag_compensation`]. Off, the server tests against the present, and hitting anything
+    /// moving means leading it by the whole round trip.
     ///
     /// Both ends read this, and it means something slightly different on each: the server's history
     /// is useless if no client reports a delay, and a reported delay is ignored if the server keeps
