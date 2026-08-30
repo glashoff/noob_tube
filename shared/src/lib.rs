@@ -7,6 +7,7 @@ use core::time::Duration;
 
 pub mod collision;
 pub mod movement;
+pub mod player;
 
 /// Server simulation rate. Client prediction replays at the same rate.
 pub const TICK_RATE: f64 = 64.0;
