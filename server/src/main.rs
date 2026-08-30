@@ -80,9 +80,13 @@ fn start_listening(mut commands: Commands) {
 fn on_client_connected(trigger: On<Add, LinkOf>, mut commands: Commands) {
     let entity = trigger.entity;
     // ReplicationSender is what lets us replicate local entities to this client.
-    commands
-        .entity(entity)
-        .insert((ReplicationSender, Name::from("Connection"), Authored));
+    let mut connection = commands.entity(entity);
+    connection.insert((ReplicationSender, Name::from("Connection"), Authored));
+    // Both ends delay only what they receive, so setting the same values on each gives a symmetric
+    // link with a round trip of twice the configured latency.
+    if let Some(conditioner) = noob_tube_shared::conditioner::from_env() {
+        connection.insert(Link::default().with_conditioner(conditioner));
+    }
     info!("client connected: {entity}");
 }
 

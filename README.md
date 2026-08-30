@@ -344,6 +344,35 @@ This overlaps with `harness.rs`, which does scripted input and screenshots from 
 harness stays for now: it runs in CI without an agent, and BRP samples at the frame rate, which is
 not enough for the tick-exact checks M4 will need.
 
+### Simulating a bad network
+
+On localhost there is no latency, no jitter and no loss, so every netcode behaviour worth having is
+invisible and every measurement is meaningless. Three environment variables put a conditioner on the
+link, read by both binaries:
+
+```bash
+NOOB_TUBE_LATENCY_MS=60 NOOB_TUBE_JITTER_MS=8 NOOB_TUBE_LOSS=0.02 \
+  cargo run -p noob_tube_server
+```
+
+The conditioner delays incoming payloads only, so the same values on both ends give a symmetric link
+with a round trip of twice the latency.
+
+What it makes visible: at 120 ms round trip the client's own capsule trails its camera by about
+1.1 m while walking, and catches up when it stops. Measured server against local simulation, both
+read from the running client:
+
+```
+moving   server z =  1.97   local z =  3.09   1.12 m apart
+         server z =  9.71   local z = 10.82   1.12 m apart
+stopped  server z = 13.84   local z = 13.84   0.00 m apart
+```
+
+That gap is the latency itself — the client simulates ahead, and the server state it reads is
+another half round trip old. It is exactly the artefact prediction and reconciliation exist to hide,
+and it cannot be seen without a conditioner. The 0.000000 agreement measured earlier says only that
+two identical computations with nothing disturbing them produce the same answer.
+
 ### Recording what the ECS does
 
 The `+watch` methods hold the connection open and emit one JSON line per change, so redirecting

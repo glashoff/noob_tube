@@ -122,7 +122,7 @@ fn connect(mut commands: Commands) {
             noob_tube_shared::types::Authored,
             Client,
             ReplicationReceiver,
-            Link::default(),
+            Link::default().with_conditioner(noob_tube_shared::conditioner::from_env()),
             // Only server-side `ClientOf` entities get a PingManager registered automatically,
             // so the client adds its own. Without it the server's pings arrive but nothing
             // answers them, and the timelines never synchronise.
@@ -144,6 +144,9 @@ fn connect(mut commands: Commands) {
 
     commands.trigger(client::Connect { entity: client });
     info!("connecting to {server_addr}");
+    if let Some(what) = noob_tube_shared::conditioner::describe() {
+        info!("simulating a link with {what}");
+    }
 }
 
 fn on_connected(trigger: On<Add, Connected>) {

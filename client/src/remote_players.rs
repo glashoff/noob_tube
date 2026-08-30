@@ -17,7 +17,10 @@ pub struct RemotePlayersPlugin;
 
 impl Plugin for RemotePlayersPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (give_bodies, claim_own_player, place_bodies).chain())
+        app.add_systems(
+            Update,
+            (give_bodies, claim_own_player, place_bodies, place_heads).chain(),
+        )
             // Inputs must be written before lightyear packs them for sending, which is what this
             // system set marks.
             .add_systems(
@@ -26,6 +29,10 @@ impl Plugin for RemotePlayersPlugin {
             );
     }
 }
+
+/// A player's head, a child of the capsule. Carries the pitch the capsule cannot.
+#[derive(Component)]
+struct PlayerHead;
 
 /// Update: gives a replicated player a capsule to be seen as.
 ///
@@ -40,13 +47,47 @@ fn give_bodies(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
 ) {
+    let head_mesh = meshes.add(Cuboid::new(0.34, 0.34, 0.34));
+    let head_material = materials.add(Color::srgb(0.9, 0.75, 0.6));
+    // A nose, so the direction is unmistakable. A cube alone looks the same from four sides.
+    let nose_mesh = meshes.add(Cuboid::new(0.08, 0.08, 0.22));
+    let nose_material = materials.add(Color::srgb(0.15, 0.15, 0.18));
+
     for (entity, player) in arrived.iter() {
-        commands.entity(entity).insert((
-            Name::from(format!("Remote player {}", player.peer)),
-            Mesh3d(meshes.add(Capsule3d::new(CAPSULE_RADIUS, CAPSULE_HALF_HEIGHT * 2.0))),
-            MeshMaterial3d(materials.add(Color::srgb(0.8, 0.3, 0.25))),
-            Transform::default(),
-        ));
+        commands
+            .entity(entity)
+            .insert((
+                Name::from(format!("Remote player {}", player.peer)),
+                Mesh3d(meshes.add(Capsule3d::new(CAPSULE_RADIUS, CAPSULE_HALF_HEIGHT * 2.0))),
+                MeshMaterial3d(materials.add(Color::srgb(0.8, 0.3, 0.25))),
+                Transform::default(),
+            ))
+            .with_children(|body| {
+                body.spawn((
+                    Name::from("Head"),
+                    PlayerHead,
+                    Mesh3d(head_mesh.clone()),
+                    MeshMaterial3d(head_material.clone()),
+                    // Sits on top of the capsule rather than at eye height, which would put it
+                    // inside: the capsule reaches 1.7 m and the eyes are at 1.59 m, so an
+                    // anatomically placed head is almost entirely hidden.
+                    //
+                    // The placeholder therefore stands taller than the shape it collides with. That
+                    // is fine while the head only says where someone is looking, and has to be
+                    // resolved before M3's hitscan, or players will aim at a head the raycast
+                    // cannot hit.
+                    Transform::from_xyz(0.0, CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS + 0.17, 0.0),
+                ))
+                .with_children(|head| {
+                    // Forward is -Z, matching the convention movement uses.
+                    head.spawn((
+                        Name::from("Nose"),
+                        Mesh3d(nose_mesh.clone()),
+                        MeshMaterial3d(nose_material.clone()),
+                        Transform::from_xyz(0.0, 0.0, -0.22),
+                    ));
+                });
+            });
         info!("drawing player {}", player.peer);
     }
 }
@@ -106,4 +147,21 @@ fn send_input(
     mut action: Single<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
 ) {
     action.0 = input.0;
+}
+
+/// Update: pitches each head to match its player's aim.
+///
+/// Yaw already turns the whole body, so the head only carries pitch. Splitting them this way is
+/// what a real character does too — the legs face where you walk, the head looks where you aim —
+/// and it is the reason `Aim` is replicated at all.
+fn place_heads(
+    mut heads: Query<(&ChildOf, &mut Transform), With<PlayerHead>>,
+    bodies: Query<&Aim>,
+) {
+    for (parent, mut transform) in heads.iter_mut() {
+        let Ok(aim) = bodies.get(parent.parent()) else {
+            continue;
+        };
+        transform.rotation = Quat::from_rotation_x(aim.pitch);
+    }
 }

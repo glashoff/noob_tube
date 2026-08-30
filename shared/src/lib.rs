@@ -6,6 +6,7 @@
 use core::time::Duration;
 
 pub mod collision;
+pub mod conditioner;
 pub mod level;
 pub mod movement;
 pub mod player;
