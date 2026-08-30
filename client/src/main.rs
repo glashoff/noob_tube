@@ -61,13 +61,14 @@ fn remote_inspection() -> impl Plugin {
 /// game. Both start hidden — while one is up, egui takes the pointer, which fights the locked cursor
 /// that mouse look needs.
 ///
-/// **F1 shows only named entities.** An ECS world is flat by construction: there is no tree, and a
-/// full listing reads like a page of globals. Of the 563 entities in a running client, all but ten
-/// are engine internals — observers, resources (which are entities carrying `IsResource` in Bevy
-/// 0.19), and one BRP entity per registered method. Filtering on `Name` leaves exactly what this
-/// crate spawns, because that is what we bother to name.
+/// **F1 is the world**, shown as a tree of roots that expand into their children. It is readable
+/// because the level has a hierarchy: `Level` holds the ground, the props and the sun, so the top
+/// level is half a dozen entries rather than everything at once. It already hides observers and the
+/// entities Bevy 0.19 uses to store resources.
 ///
-/// **F2 shows everything**, for the times the answer is in the internals.
+/// **F2 filters on `With<Name>`** — a flat list of what this crate spawns, since that is what we
+/// bother to name. Useful for reaching one known entity without expanding anything, but it ignores
+/// the hierarchy and so shows parents beside their own children.
 ///
 /// Both show only what derives `Reflect` and is registered, the same requirement BRP has.
 #[cfg(feature = "inspector")]
@@ -80,11 +81,11 @@ fn world_inspector() -> impl Plugin {
         // The inspectors warn rather than add this themselves, so it has to come first.
         app.add_plugins(EguiPlugin::default())
             .add_plugins(
-                FilterQueryInspectorPlugin::<With<Name>>::default()
-                    .run_if(input_toggle_active(false, KeyCode::F1)),
+                WorldInspectorPlugin::new().run_if(input_toggle_active(false, KeyCode::F1)),
             )
             .add_plugins(
-                WorldInspectorPlugin::new().run_if(input_toggle_active(false, KeyCode::F2)),
+                FilterQueryInspectorPlugin::<With<Name>>::default()
+                    .run_if(input_toggle_active(false, KeyCode::F2)),
             );
     }
 }

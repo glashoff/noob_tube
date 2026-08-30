@@ -271,15 +271,17 @@ with editable values. It is a separate mechanism from BRP: it runs *inside* the 
 cannot see the server, and it draws over the game.
 
 ```bash
-cargo run -p noob_tube_client --features inspector   # F1 named entities, F2 everything
+cargo run -p noob_tube_client --features inspector   # F1 the world, F2 named entities
 ```
 
-There are two panels because an unfiltered one is close to unreadable. An ECS world is flat by
-construction — no tree, just entities and their components — and a running client holds 563 of them,
-of which all but ten are engine internals: 141 observers, one entity per resource (Bevy 0.19 stores
-resources as entities carrying `IsResource`), and one per registered BRP method. **F1** filters on
-`With<Name>`, which leaves what this crate spawns, because that is what we bother to name. **F2** is
-the whole world, for when the answer is in the internals.
+**F1** is the world as a tree: roots at the top level, expanding into their children. What makes it
+readable is that the level has a hierarchy — `Level` holds the ground, the props and the sun — so
+the top level is `Client`, `Level`, `LocalPlayer`, the pointer and the monitors, not every entity at
+once. The panel already hides observers and the entities Bevy 0.19 uses to store resources, so the
+563 entities a BRP query reports are never all on screen.
+
+**F2** filters on `With<Name>`: a flat list of what this crate spawns. Good for reaching one known
+entity, but it ignores the hierarchy and shows parents beside their own children.
 
 Both start hidden because egui takes the pointer while one is up, which fights the locked cursor
 mouse look needs. Both show the same set of types BRP does — whatever derives `Reflect` and is

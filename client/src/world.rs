@@ -10,9 +10,22 @@ pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_ground);
+        app.register_type::<Level>().add_systems(Startup, spawn_ground);
     }
 }
+
+/// Root of everything the level owns.
+///
+/// Giving the level a root is worth more than the tidier inspector tree it produces: despawning it
+/// takes the whole level with it, which is what a map change needs.
+///
+/// One rule comes with it. Child transforms are relative to this entity, so as long as it stays at
+/// the identity, world and local coordinates agree — and they have to, because the collision
+/// geometry in `CollisionWorld` is in world space and knows nothing about the hierarchy. Moving this
+/// entity would slide the visible level off its collision.
+#[derive(Component, Reflect)]
+#[reflect(Component)]
+pub struct Level;
 
 /// Spawns the ground twice: once as a render mesh, once as collision geometry.
 ///
@@ -23,6 +36,25 @@ fn spawn_ground(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // Parents need a Transform and a Visibility of their own: both propagate down the tree, and a
+    // child under a parent that has neither never becomes visible.
+    let level = commands
+        .spawn((
+            Name::from("Level"),
+            Level,
+            Transform::IDENTITY,
+            Visibility::default(),
+        ))
+        .id();
+    let props = commands
+        .spawn((
+            Name::from("Props"),
+            Transform::IDENTITY,
+            Visibility::default(),
+            ChildOf(level),
+        ))
+        .id();
+
     commands.spawn((
         Name::from("Ground"),
         Mesh3d(meshes.add(
@@ -36,6 +68,7 @@ fn spawn_ground(
             ..default()
         })),
         Transform::IDENTITY,
+        ChildOf(level),
     ));
 
     let mut world = CollisionWorld::new();
@@ -64,7 +97,9 @@ fn spawn_ground(
             Mesh3d(box_mesh.clone()),
             MeshMaterial3d(box_material.clone()),
             Transform::from_translation(offset),
+            ChildOf(props),
         ));
+        // `offset` is a world position here, which only holds while the level sits at the identity.
         world.add_cuboid(offset, Vec3::splat(1.0));
     }
 
@@ -79,5 +114,6 @@ fn spawn_ground(
             ..default()
         },
         Transform::from_xyz(50.0, 100.0, 50.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ChildOf(level),
     ));
 }
