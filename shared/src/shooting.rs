@@ -92,7 +92,26 @@ pub fn hit_distance(
     capsule.cast_ray(&pose, &ray, max_distance, true)
 }
 
-/// Who a shot hits, out of the targets offered.
+/// Where a shot stopped, and in whom.
+///
+/// Always a result, never a miss: a shot that hits nobody still ends somewhere — on a wall, or at
+/// the weapon's range — and that endpoint is what every client needs in order to draw the thing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shot {
+    /// How far along the ray it stopped.
+    pub distance: f32,
+    /// The player it stopped in, if it stopped in one.
+    pub target: Option<Entity>,
+}
+
+impl Shot {
+    /// The point it stopped at.
+    pub fn point(&self, origin: Vec3, direction: Vec3) -> Vec3 {
+        origin + direction * self.distance
+    }
+}
+
+/// Where a shot stops, given the targets offered.
 ///
 /// The level is tested too and wins ties by being nearer: a target behind a crate is behind cover,
 /// not merely obscured. `targets` supplies each candidate's entity, feet and stance; the shooter
@@ -102,7 +121,7 @@ pub fn resolve<T: IntoIterator<Item = (Entity, Vec3, bool)>>(
     origin: Vec3,
     direction: Vec3,
     targets: T,
-) -> Option<(Entity, f32)> {
+) -> Shot {
     // Anything past the wall is not a target, so the wall sets the budget for the whole search.
     let reach = world
         .raycast(origin, direction, WEAPON_RANGE)
@@ -117,7 +136,31 @@ pub fn resolve<T: IntoIterator<Item = (Entity, Vec3, bool)>>(
             best = Some((entity, distance));
         }
     }
-    best
+    match best {
+        Some((entity, distance)) => Shot { distance, target: Some(entity) },
+        None => Shot { distance: reach, target: None },
+    }
+}
+
+/// What every client is told about a shot, so that a shot can be seen rather than only felt.
+///
+/// Sent unreliably and to everyone, including the shooter. Unreliably because a tracer is over in
+/// a twentieth of a second: a retransmitted one would arrive after the moment it belongs to, and
+/// drawing it then would be worse than not drawing it at all.
+///
+/// Deliberately small. There is no surface normal in here, because every client already holds the
+/// same [`CollisionWorld`] built from the same numbers and can cast the ray itself to find one.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShotFired {
+    /// Which peer fired, so a client can tell its own shots from everyone else's.
+    pub shooter: u64,
+    /// The muzzle — the shooter's eye, which is where the ray was cast from.
+    pub from: Vec3,
+    /// Where it stopped: a player, a wall, or the end of its range.
+    pub to: Vec3,
+    /// Whether it stopped in a player. Decides blood against a bullet hole, and whether the
+    /// shooter gets a hit marker.
+    pub hit_player: bool,
 }
 
 #[cfg(test)]
@@ -168,8 +211,8 @@ mod tests {
         let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.0);
         let target = Vec3::new(0.0, 0.0, -10.0);
         let hit = resolve(&empty_world(), origin, direction, [(TARGET, target, false)]);
-        let (entity, distance) = hit.expect("a target straight ahead was not hit");
-        assert_eq!(entity, TARGET);
+        assert_eq!(hit.target, Some(TARGET), "a target straight ahead was not hit");
+        let distance = hit.distance;
 
         // Not a full radius short of the centre: a level shot from eye height passes above the
         // capsule's widest point and enters the rounded cap, where it is narrower. The cap's
@@ -188,7 +231,7 @@ mod tests {
         let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.0);
         // A metre to the side, well clear of the 0.35 m radius.
         let target = Vec3::new(1.0, 0.0, -10.0);
-        assert!(resolve(&empty_world(), origin, direction, [(TARGET, target, false)]).is_none());
+        assert!(resolve(&empty_world(), origin, direction, [(TARGET, target, false)]).target.is_none());
     }
 
     /// Cover has to work, or the level is decoration.
@@ -197,10 +240,10 @@ mod tests {
         let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.0);
         // The crate sits at z = -5; the target is behind it.
         let target = Vec3::new(0.0, 0.0, -10.0);
-        assert!(
-            resolve(&world_with_cover(), origin, direction, [(TARGET, target, false)]).is_none(),
-            "shot through a crate"
-        );
+        let shot = resolve(&world_with_cover(), origin, direction, [(TARGET, target, false)]);
+        assert!(shot.target.is_none(), "shot through a crate");
+        // And it stopped at the crate's near face, which is what the bullet hole is drawn on.
+        assert!((shot.distance - 4.0).abs() < 0.01, "stopped at {}", shot.distance);
     }
 
     /// A crouched player is a smaller target, which is the point of crouching.
@@ -227,7 +270,18 @@ mod tests {
             direction,
             [(far, Vec3::new(0.0, 0.0, -20.0), false), (near, Vec3::new(0.0, 0.0, -5.0), false)],
         );
-        assert_eq!(hit.map(|(entity, _)| entity), Some(near));
+        assert_eq!(hit.target, Some(near));
+    }
+
+    /// A shot that hits nothing still ends somewhere, or there is no tracer to draw.
+    #[test]
+    fn a_shot_into_the_open_ends_at_its_range() {
+        let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.5);
+        let shot = resolve(&empty_world(), origin, direction, []);
+        assert_eq!(shot.target, None);
+        assert_eq!(shot.distance, WEAPON_RANGE);
+        let end = shot.point(origin, direction);
+        assert!(end.y > origin.y, "an upward shot ended below where it started");
     }
 
     #[test]

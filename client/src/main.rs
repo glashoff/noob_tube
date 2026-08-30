@@ -5,6 +5,7 @@ mod debug_draw;
 mod harness;
 mod local_player;
 mod remote_players;
+mod shot_effects;
 mod world;
 
 use bevy::app::{PluginGroupBuilder, ScheduleRunnerPlugin};
@@ -35,6 +36,7 @@ fn main() {
             local_player::LocalPlayerPlugin,
             debug_draw::DebugDrawPlugin,
             crosshair::CrosshairPlugin,
+            shot_effects::ShotEffectsPlugin,
             remote_players::RemotePlayersPlugin,
             harness::HarnessPlugin,
         ))

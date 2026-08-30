@@ -813,6 +813,42 @@ target health over 2.5 s:
 Three shots to kill, respawn at the player's own spawn point. Turned 90° away with the trigger still
 held, health stops moving.
 
+#### Seeing a shot
+
+Until now a shot was a number in the server's log. Three things show it now.
+
+A **crosshair**, because the weapon fires down the centre of the screen and nothing said where the
+centre was. A **tracer** along the shot's path, gone in a twentieth of a second, which is what makes
+fire directional — being shot at *from somewhere* is a different thing from being shot at. And a
+**bullet hole** where it met the level, which is what makes a fight leave a mark. A shot that landed
+on a player puts a marker on the shooter's crosshair instead: white ticks with dark outlines, since
+the players are red and a red marker on the body it just hit would be invisible exactly when it
+matters.
+
+None of it is decided locally. The server resolves every shot and sends a `ShotFired` — shooter,
+muzzle, endpoint, and whether it stopped in a player — to everyone including the shooter. A client
+drawing its own shots would show hits the server never granted, and two players would be watching
+different fights.
+
+It goes **unreliably**, on a channel of its own. A tracer lives for 50 ms, so a retransmitted one
+arrives after the moment it belongs to, and drawing it then is worse than not drawing it. The
+separate channel also means a burst of effects can never delay a position update, and that the
+whole lot can be dropped under bandwidth pressure without losing anything the simulation needs.
+
+The message carries no surface normal, though a decal needs one to lie flat on a wall. Every client
+holds the same `CollisionWorld` the server does, built from the same numbers, so it casts the ray
+itself. Twelve bytes a shot that never have to be paid for.
+
+Two details that only showed up on screen. A tracer is light, not an object, and left casting
+shadows it drew a black stripe across the ground beside every shot — the most obviously wrong thing
+in the first screenshot. And one's own tracer starts at the eye, where perspective turns any real
+thickness into a wedge across half the screen; it now starts a little right and below, and never
+further out than a third of the way to what was hit, so a point-blank shot does not become a blob.
+
+Registering the channel is not enough to make it work: `add_direction` is what wires it into each
+connection's transport. Without it the server sent into a `ChannelNotFound`, logged once per shot
+and dropped, and every client drew nothing.
+
 #### Lag compensation
 
 Every shot is tested against the world the shooter was looking at, not the present one.

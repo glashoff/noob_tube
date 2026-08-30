@@ -13,8 +13,8 @@ use noob_tube_shared::level;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::collision::CollisionWorld;
 use noob_tube_shared::lag_compensation::{PositionHistory, Snapshot};
-use noob_tube_shared::shooting::{self, Health};
-use noob_tube_shared::protocol::ProtocolPlugin;
+use noob_tube_shared::shooting::{self, Health, ShotFired};
+use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin};
 use noob_tube_shared::types::Authored;
 use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, SERVER_PORT};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -54,6 +54,10 @@ fn main() {
         // history has to hold the position at the *end* of a tick, because that is the one
         // replication sends and therefore the one a client interpolates towards.
         .add_systems(FixedPostUpdate, record_positions)
+        // Once per frame, not once per tick: several ticks can resolve between two frames, and
+        // there is no reason to touch the network that often for something cosmetic.
+        .add_systems(PostUpdate, broadcast_shots)
+        .init_resource::<PendingShots>()
         .add_observer(on_client_connected)
         .add_observer(on_peer_connected)
         .add_plugins(remote_inspection())
@@ -149,6 +153,7 @@ fn resolve_shots(
     // right to: the reads below finish before any write starts, but nothing in the signature says
     // so. The set makes that ordering explicit instead of asserted.
     mut players: ParamSet<(Query<Shooter>, Query<Wounded>)>,
+    mut pending: ResMut<PendingShots>,
     // Latches the one line below that says whether any of this is actually happening.
     mut reported: Local<bool>,
 ) {
@@ -251,8 +256,17 @@ fn resolve_shots(
             .collect();
 
         let (origin, direction) = shooting::aim_ray(state.eye_position(), aim.yaw, aim.pitch);
-        if let Some((hit, distance)) = shooting::resolve(&world, origin, direction, targets) {
-            debug!("peer {} hit at {distance:.1} m", player.peer);
+        let shot = shooting::resolve(&world, origin, direction, targets);
+        // Told to everyone, hit or miss: a shot that struck a wall beside you is as much a part of
+        // knowing where the fire is coming from as one that struck you.
+        pending.0.push(ShotFired {
+            shooter: player.peer,
+            from: origin,
+            to: shot.point(origin, direction),
+            hit_player: shot.target.is_some(),
+        });
+        if let Some(hit) = shot.target {
+            debug!("peer {} hit at {:.1} m", player.peer, shot.distance);
             hits.push((hit, player.peer));
         }
     }
@@ -274,6 +288,30 @@ fn resolve_shots(
             position: level::spawn_point(spawn.0),
             ..PlayerState::default()
         };
+    }
+}
+
+/// Shots resolved since the last frame, waiting to be told to everyone.
+///
+/// A queue rather than a message sent from inside `resolve_shots`, because that system runs in the
+/// fixed schedule — several times per frame under a fast tick rate, and again for every tick a
+/// rollback replays, if the server ever gains one. Sending is a frame-rate concern, not a tick one.
+#[derive(Resource, Default)]
+struct PendingShots(Vec<ShotFired>);
+
+/// PostUpdate: tells every client what was shot.
+///
+/// Unreliably, and to everyone including the shooter — see [`ShotFired`]. Failing to send is
+/// logged and dropped rather than propagated: a lost tracer must never take down a tick.
+fn broadcast_shots(
+    mut pending: ResMut<PendingShots>,
+    mut sender: ServerMultiMessageSender,
+    server: Single<&Server>,
+) {
+    for shot in pending.0.drain(..) {
+        if let Err(error) = sender.send::<_, EffectsChannel>(&shot, *server, &NetworkTarget::All) {
+            warn!("could not send a shot effect: {error}");
+        }
     }
 }
 

@@ -234,6 +234,25 @@ impl CollisionWorld {
             .map(|(_, toi)| toi)
     }
 
+    /// Where a ray meets the level, and which way that surface faces.
+    ///
+    /// The normal is what a bullet hole needs: a decal has to lie *on* the wall, and a mark that
+    /// merely faced the shooter would stand off the floor edge-on at a grazing angle. Every client
+    /// builds this world from the same numbers as the server, so a client can ask this for itself
+    /// rather than having the answer sent to it.
+    pub fn raycast_normal(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+    ) -> Option<(f32, Vec3)> {
+        let ray = Ray::new(origin.into(), direction.into());
+        let (_, hit) = self
+            .query()
+            .cast_ray_and_get_normal(&ray, max_distance, true)?;
+        Some((hit.time_of_impact, hit.normal.into()))
+    }
+
     /// True when there is room to stand up from a crouch.
     ///
     /// Only the section a standing capsule adds on top needs to be clear, so this sweeps a ball of
@@ -281,6 +300,15 @@ mod tests {
         );
         world.rebuild();
         world
+    }
+
+    /// A bullet hole has to lie on the surface it hit, so the normal has to point out of it.
+    #[test]
+    fn a_ray_into_the_floor_comes_back_with_the_floor_pointing_up() {
+        let (distance, normal) =
+            floor().raycast_normal(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y, 10.0).expect("hit");
+        assert!((distance - 5.0).abs() < 1e-3, "{distance}");
+        assert!(normal.dot(Vec3::Y).abs() > 0.99, "{normal:?}");
     }
 
     /// Adds a wall in the x = 2 plane, facing -X.

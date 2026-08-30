@@ -14,7 +14,7 @@ use lightyear::prelude::input::native::InputPlugin;
 use std::f32::consts::{PI, TAU};
 
 use crate::player::{Aim, Player, PlayerInput, PlayerState};
-use crate::shooting::Health;
+use crate::shooting::{Health, ShotFired};
 use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
 
@@ -64,8 +64,33 @@ impl Plugin for ProtocolPlugin {
         app.add_plugins(InputPlugin::<PlayerInput> {
             config: self.net.input_config(),
         });
+
+        // Shots, going the other way: the server tells everyone what it resolved so they can draw
+        // it. A message rather than a component, because a shot is an event — it happens once and
+        // has no state afterwards, and replicating a component would mean inventing an entity to
+        // hang it on and then deciding when to remove it.
+        //
+        // Unreliable on purpose. A tracer lives for a twentieth of a second, so a retransmitted one
+        // would arrive after the moment it belongs to; drawing it then is worse than not drawing it.
+        // The direction matters twice over: it is what wires the channel into each connection's
+        // transport, not merely a declaration. Registering the channel without it leaves the server
+        // sending into a `ChannelNotFound`, logged once per shot and dropped.
+        app.add_channel::<EffectsChannel>(ChannelSettings {
+            mode: ChannelMode::UnorderedUnreliable,
+            ..default()
+        })
+        .add_direction(NetworkDirection::ServerToClient);
+        app.register_message::<ShotFired>()
+            .add_direction(NetworkDirection::ServerToClient);
     }
 }
+
+/// The channel everything cosmetic travels on.
+///
+/// Separate from replication so that a burst of effects can never delay a position update, and so
+/// that the whole lot can be dropped under bandwidth pressure without losing anything the
+/// simulation depends on.
+pub struct EffectsChannel;
 
 /// Blends two received player states for a moment in between them.
 ///
