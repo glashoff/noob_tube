@@ -1,5 +1,6 @@
 //! Game client: renders the world, samples input, predicts the local player.
 
+mod debug_draw;
 mod harness;
 mod local_player;
 mod world;
@@ -22,6 +23,7 @@ fn main() {
         .add_plugins((
             world::WorldPlugin,
             local_player::LocalPlayerPlugin,
+            debug_draw::DebugDrawPlugin,
             harness::HarnessPlugin,
         ))
         .add_plugins(client::ClientPlugins {

@@ -294,6 +294,28 @@ the tree is not proof that anything set one.
 Its `bevy_egui` and `egui` versions are pinned to this exact release, so it moves in lockstep with
 Bevy the way `bevy_remote` does.
 
+### Seeing the collision shapes
+
+`F3` draws the shapes the movement step reasons about, using Bevy's gizmos — immediate-mode lines
+that live for one frame:
+
+| | |
+|---|---|
+| capsule | green while grounded, red while airborne |
+| downward line | the probe `is_grounded` casts, `GROUND_SNAP_DIST` long |
+| cross | where `ground_height_below` says the ground is |
+
+None of this geometry exists as an entity. The capsule is a shape handed to a query and the probe is
+a ray cast and discarded, so there was nothing to look at while the game ran — which is how the M1
+freeze stayed hidden: the capsule had settled 1.6 mm into the floor, and that only showed up in the
+numbers after an afternoon of comparing logs. A gap between the cross and the capsule's base is
+exactly that failure, visible at a glance.
+
+Two limits in first person: the capsule surrounds the camera at 0.35 m, so at a 90 degree field of
+view it fills the screen, and the probe is vertical, so looking straight down projects it to a
+point. The cross is the part that reads. Seen from outside — other players in M3, or a detached
+camera — all three would.
+
 ### Driving the game from an agent
 
 `--features remote` also pulls in `bevy_brp_extras`, which adds BRP methods for screenshots and
