@@ -14,9 +14,14 @@ use lightyear::prelude::input::native::InputPlugin;
 use std::f32::consts::{PI, TAU};
 
 use crate::player::{Aim, Player, PlayerInput, PlayerState};
+use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
 
-pub struct ProtocolPlugin;
+/// Carries the tuning both sides need at registration time — the input rate and redundancy are
+/// part of how the input plugin is built, not something that can be changed later.
+pub struct ProtocolPlugin {
+    pub net: NetConfig,
+}
 
 impl Plugin for ProtocolPlugin {
     fn build(&self, app: &mut App) {
@@ -45,10 +50,15 @@ impl Plugin for ProtocolPlugin {
         // Sent once per entity: which peer this player belongs to never changes.
         app.component::<Player>().replicate_once();
 
-        // Inputs travel the other way, client to server. The plugin sends the last N ticks with
-        // every packet rather than one input per packet, so a dropped packet does not cost a tick
-        // of movement — and it keeps the history the client needs to replay after a rollback.
-        app.add_plugins(InputPlugin::<PlayerInput>::default());
+        // Inputs travel the other way, client to server. The plugin sends the last N packets'
+        // worth of ticks with every message rather than one input per message, so a dropped packet
+        // does not cost a tick of movement — and it keeps the history a rollback replays from.
+        //
+        // How often and how redundantly is `cmd_hz` and `input_redundancy`; both are fixed here,
+        // at registration, which is why the protocol needs the config at all.
+        app.add_plugins(InputPlugin::<PlayerInput> {
+            config: self.net.input_config(),
+        });
     }
 }
 

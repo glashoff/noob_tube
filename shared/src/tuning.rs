@@ -19,6 +19,8 @@
 //! jitter_ms = 10       # random variation on each leg, ± this
 //! loss = 0.02          # packet loss probability, 0.0 to 1.0
 //! send_hz = 32.0            # how often the server replicates          (server only)
+//! cmd_hz = 64.0             # how often the client sends inputs       (client only)
+//! input_redundancy = 5      # consecutive input packet losses survived (client only)
 //! interp_ratio = 1.7        # interpolation delay, in send intervals   (client only)
 //! interp_min_ms = 5         # floor under that delay                   (client only)
 //! input_delay_min_ticks = 0 # never process an input sooner than this  (client only)
@@ -39,6 +41,7 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::Resource;
 use lightyear::prelude::*;
+use lightyear::prelude::input;
 use serde::Deserialize;
 
 /// Where the config is looked for when `NOOB_TUBE_CONFIG` says nothing.
@@ -77,6 +80,23 @@ pub struct NetConfig {
     /// to solve: with no gap between updates there is nothing to interpolate across, so remote
     /// players look smooth for the wrong reason and start stepping the moment the rate drops.
     pub send_hz: f64,
+    /// How often the client sends its inputs, in Hz — Source's `cl_cmdrate`.
+    ///
+    /// Separate from `send_hz`, which is the other direction. Lightyear's own default is to send
+    /// every *frame*, which at 200 fps is three input packets per simulated tick: bandwidth spent
+    /// on nothing, since the extra packets carry no tick the previous one did not.
+    ///
+    /// Matching `tick_hz` is the usual choice and what Source does. Below it, each packet simply
+    /// carries the several ticks that accumulated. Zero restores lightyear's every-frame default.
+    pub cmd_hz: f64,
+    /// How many consecutive lost input packets the client can survive without the server missing a
+    /// tick of movement.
+    ///
+    /// Every input message repeats the last N packets' worth of ticks, so a gap is filled by the
+    /// next packet rather than costing movement. It is the cheapest redundancy in the whole
+    /// protocol — inputs are a handful of bytes — and the reason a lossy link still walks in a
+    /// straight line. Lightyear's default is 5.
+    pub input_redundancy: u16,
     /// How far in the past other players are drawn, as a multiple of the send interval.
     ///
     /// Below 1.0 the next update has usually not arrived yet and remote players freeze; well above
@@ -138,6 +158,9 @@ impl Default for NetConfig {
             jitter_ms: 0,
             loss: 0.0,
             send_hz: 32.0,
+            // Matching the tick rate, as Source does with cl_cmdrate.
+            cmd_hz: 64.0,
+            input_redundancy: 5,
             interp_ratio: 1.7,
             interp_min_ms: 5,
             // Lightyear's `no_input_delay()`: cover every millisecond of latency with prediction.
@@ -203,6 +226,8 @@ impl NetConfig {
         env_parse("NOOB_TUBE_JITTER_MS", &mut self.jitter_ms);
         env_parse("NOOB_TUBE_LOSS", &mut self.loss);
         env_parse("NOOB_TUBE_SEND_HZ", &mut self.send_hz);
+        env_parse("NOOB_TUBE_CMD_HZ", &mut self.cmd_hz);
+        env_parse("NOOB_TUBE_INPUT_REDUNDANCY", &mut self.input_redundancy);
         env_parse("NOOB_TUBE_INTERP_RATIO", &mut self.interp_ratio);
         env_parse("NOOB_TUBE_INTERP_MIN_MS", &mut self.interp_min_ms);
         env_parse("NOOB_TUBE_INPUT_DELAY_MIN_TICKS", &mut self.input_delay_min_ticks);
@@ -245,6 +270,22 @@ impl NetConfig {
     /// How often the server sends replication updates.
     pub fn send_interval(&self) -> Duration {
         Duration::from_secs_f64(1.0 / self.send_hz.max(f64::MIN_POSITIVE))
+    }
+
+    /// How often the client sends inputs, and how much history each packet repeats.
+    ///
+    /// Zero `cmd_hz` means every frame, which is lightyear's own default and what
+    /// `Duration::default()` means to it.
+    pub fn input_config(&self) -> input::InputConfig<crate::player::PlayerInput> {
+        input::InputConfig {
+            send_interval: if self.cmd_hz > 0.0 {
+                Duration::from_secs_f64(1.0 / self.cmd_hz)
+            } else {
+                Duration::default()
+            },
+            packet_redundancy: self.input_redundancy,
+            ..Default::default()
+        }
     }
 
     /// The delay a client draws other players at.
@@ -296,10 +337,13 @@ impl NetConfig {
             ""
         };
         format!(
-            "{link}, ticking at {:.0} Hz, sending at {:.0} Hz, interpolating at {}×, \
+            "{link}, ticking at {:.0} Hz, sending at {:.0} Hz, inputs at {:.0} Hz ×{}, \
+             interpolating at {}×, \
              input delay {}..{} ticks, predicting up to {}, client lead ≥{} ticks [{source}]{stale}",
             self.tick_hz,
             self.send_hz,
+            self.cmd_hz,
+            self.input_redundancy,
             self.interp_ratio,
             self.input_delay_min_ticks,
             self.input_delay_max_ticks,
@@ -435,6 +479,22 @@ mod tests {
     #[should_panic(expected = "min_client_lead_ticks")]
     fn a_lead_below_one_tick_is_refused() {
         NetConfig { min_client_lead_ticks: 0.5, ..default_config() }.validate();
+    }
+
+    #[test]
+    fn a_command_rate_becomes_an_interval() {
+        let config = NetConfig { cmd_hz: 64.0, ..default_config() };
+        assert_eq!(
+            config.input_config().send_interval,
+            Duration::from_secs_f64(1.0 / 64.0)
+        );
+    }
+
+    /// Zero is lightyear's "every frame", which `Duration::default()` is how it spells.
+    #[test]
+    fn a_command_rate_of_zero_means_every_frame() {
+        let config = NetConfig { cmd_hz: 0.0, ..default_config() };
+        assert_eq!(config.input_config().send_interval, Duration::default());
     }
 
     #[test]

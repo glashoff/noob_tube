@@ -367,6 +367,8 @@ ping_ms = 100              # simulated round trip; each end delays half of it
 jitter_ms = 10             # random variation on each leg, ± this
 loss = 0.02                # packet loss probability, 0.0 to 1.0
 send_hz = 32.0             # how often the server replicates           (server only)
+cmd_hz = 64.0              # how often the client sends inputs         (client only)
+input_redundancy = 5       # consecutive input packet losses survived  (client only)
 interp_ratio = 1.7         # interpolation delay, in send intervals    (client only)
 interp_min_ms = 5          # floor under that delay                    (client only)
 min_client_lead_ticks = 1  # guaranteed lead of the client's clock     (client only)
@@ -435,6 +437,21 @@ and starts letting remote players freeze between updates, because the next one h
 
 Lightyear **clamps rather than extrapolates** when it does run dry, so a too-short delay shows up as
 players stuttering to a halt and jumping, not as them sliding through walls.
+
+#### The other direction: how often inputs go out
+
+`send_hz` is the server talking. `cmd_hz` is the client talking back — Source's `cl_cmdrate`, and
+the same trap `send_hz` was: lightyear's own default sends inputs every *frame*, which at 200 fps is
+three packets per simulated tick, two of which carry no tick the first did not. It now defaults to
+64, matching the tick rate as Source does.
+
+Beside it, `input_redundancy`: every input message repeats the last N packets' worth of ticks, so a
+lost packet is covered by the next one instead of costing the server a tick of movement. Five by
+default. It is the cheapest redundancy in the protocol — inputs are a handful of bytes — and it is
+why walking stayed straight at 10 % packet loss in the M4 measurement. Set it to 1 with `loss = 0.1`
+to see what it buys.
+
+Both are fixed when the protocol is registered, which is why `ProtocolPlugin` takes the config.
 
 #### When does the server act on my input?
 

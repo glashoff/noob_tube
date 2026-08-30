@@ -45,6 +45,24 @@ loss = 0.0
 # players look smooth for the wrong reason.
 send_hz = 32.0
 
+# How often the client sends its inputs, in Hz. Client only. This is Source's cl_cmdrate.
+#
+# The other direction from send_hz. Lightyear's own default is to send every FRAME, which at 200 fps
+# is three input packets per simulated tick — bandwidth spent on nothing, since the extra packets
+# carry no tick the previous one did not. Matching tick_hz is the usual choice and what Source does.
+# Below tick_hz, each packet simply carries the several ticks that accumulated since the last.
+#
+# 0 restores lightyear's every-frame behaviour.
+cmd_hz = 64.0
+
+# How many consecutive lost input packets the client survives without the server missing a tick.
+#
+# Every input message repeats the last N packets' worth of ticks, so a gap is filled by the next
+# packet instead of costing movement. It is the cheapest redundancy in the protocol — inputs are a
+# handful of bytes — and the reason a lossy link still walks in a straight line. Try loss = 0.1 with
+# this at 1 to see what it is buying.
+input_redundancy = 5
+
 # How far in the past other players are drawn, as a multiple of the send interval. Client only.
 #
 # At the defaults this is 1.7 / 32 Hz ≈ 53 ms on top of the network. Lower it and remote players

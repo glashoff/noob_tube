@@ -29,7 +29,7 @@ fn main() {
             tick_duration: net.tick_duration(),
         })
         // The protocol must be registered after the plugin group and before any Server entity.
-        .add_plugins(ProtocolPlugin)
+        .add_plugins(ProtocolPlugin { net })
         .insert_resource(Time::<Fixed>::from_hz(net.tick_hz))
         // How often replication updates go out. Without this lightyear sends every frame, and
         // interpolation then has nothing to interpolate across — see `SEND_RATE`.

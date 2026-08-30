@@ -43,7 +43,7 @@ fn main() {
             tick_duration: net.tick_duration(),
         })
         // After the plugin group, before the Client entity is spawned.
-        .add_plugins(noob_tube_shared::protocol::ProtocolPlugin)
+        .add_plugins(noob_tube_shared::protocol::ProtocolPlugin { net })
         .add_systems(Startup, connect)
         .add_observer(on_connected)
         .add_plugins(remote_inspection())
