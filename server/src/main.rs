@@ -1,6 +1,6 @@
 //! Headless authoritative server.
 //!
-//! Simulates the game at `TICK_RATE` and replicates state to connected clients. It runs no
+//! Simulates the game at the configured tick rate and replicates state to connected clients. It runs no
 //! renderer, no window and no audio — see this crate's `Cargo.toml`, where Bevy's default features
 //! are switched off.
 
@@ -13,7 +13,7 @@ use noob_tube_shared::level;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
 use noob_tube_shared::protocol::ProtocolPlugin;
 use noob_tube_shared::types::Authored;
-use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, PROTOCOL_ID, SERVER_PORT, tick_duration};
+use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, SERVER_PORT};
 use std::net::{Ipv4Addr, SocketAddr};
 
 fn main() {
@@ -26,11 +26,11 @@ fn main() {
         .add_plugins(bevy::state::app::StatesPlugin)
         .add_plugins(bevy::log::LogPlugin::default())
         .add_plugins(server::ServerPlugins {
-            tick_duration: tick_duration(),
+            tick_duration: net.tick_duration(),
         })
         // The protocol must be registered after the plugin group and before any Server entity.
         .add_plugins(ProtocolPlugin)
-        .insert_resource(Time::<Fixed>::from_hz(noob_tube_shared::TICK_RATE))
+        .insert_resource(Time::<Fixed>::from_hz(net.tick_hz))
         // How often replication updates go out. Without this lightyear sends every frame, and
         // interpolation then has nothing to interpolate across — see `SEND_RATE`.
         .insert_resource(ReplicationMetadata::new(net.send_interval()))
@@ -71,7 +71,7 @@ fn start_listening(net: Res<NetConfig>, mut commands: Commands) {
             Name::from("Server"),
             Authored,
             server::NetcodeServer::new(server::NetcodeConfig {
-                protocol_id: PROTOCOL_ID,
+                protocol_id: net.protocol_id(),
                 private_key: PLACEHOLDER_PRIVATE_KEY,
                 ..default()
             }),

@@ -3,7 +3,6 @@
 //! Everything in here must run on the headless server as well as in the rendering client, so it
 //! must not depend on rendering, windowing or asset loading.
 
-use core::time::Duration;
 
 pub mod collision;
 pub mod level;
@@ -16,19 +15,15 @@ pub mod types;
 #[cfg(feature = "remote")]
 pub mod remote;
 
-/// Server simulation rate. Client prediction replays at the same rate.
-pub const TICK_RATE: f64 = 64.0;
-
-pub fn tick_duration() -> Duration {
-    Duration::from_secs_f64(1.0 / TICK_RATE)
-}
-
 
 /// Default UDP port the server listens on.
 pub const SERVER_PORT: u16 = 5000;
 
-/// Netcode protocol id. Clients and servers only talk to each other when these match, so bumping
-/// it locks out incompatible builds.
+/// Base netcode protocol id. Clients and servers only talk to each other when these match, so
+/// bumping it locks out incompatible builds.
+///
+/// Not used directly: [`NetConfig::protocol_id`](tuning::NetConfig::protocol_id) mixes the tick
+/// rate in, so two peers that disagree about it cannot connect at all.
 pub const PROTOCOL_ID: u64 = 0x_4E_4F_4F_42_54_55_42_45; // "NOOBTUBE"
 
 /// Netcode private key.

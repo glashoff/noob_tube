@@ -9,7 +9,7 @@ mod world;
 use bevy::prelude::*;
 use lightyear::prelude::*;
 use noob_tube_shared::tuning::NetConfig;
-use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, PROTOCOL_ID, SERVER_PORT, tick_duration};
+use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, SERVER_PORT};
 use std::net::{Ipv4Addr, SocketAddr};
 
 fn main() {
@@ -23,7 +23,7 @@ fn main() {
             }),
             ..default()
         }))
-        .insert_resource(Time::<Fixed>::from_hz(noob_tube_shared::TICK_RATE))
+        .insert_resource(Time::<Fixed>::from_hz(net.tick_hz))
         // How far in the past other players are drawn. Inserted before the plugin group, which
         // only fills this in if it is missing.
         .insert_resource(net.interpolation())
@@ -40,7 +40,7 @@ fn main() {
             harness::HarnessPlugin,
         ))
         .add_plugins(client::ClientPlugins {
-            tick_duration: tick_duration(),
+            tick_duration: net.tick_duration(),
         })
         // After the plugin group, before the Client entity is spawned.
         .add_plugins(noob_tube_shared::protocol::ProtocolPlugin)
@@ -120,7 +120,7 @@ fn connect(net: Res<NetConfig>, mut commands: Commands) {
         server_addr,
         client_id: rand_client_id(),
         private_key: PLACEHOLDER_PRIVATE_KEY,
-        protocol_id: PROTOCOL_ID,
+        protocol_id: net.protocol_id(),
     };
 
     // Prediction needs its manager resource in place before the client entity exists.

@@ -15,6 +15,7 @@ use lightyear::prelude::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use noob_tube_shared::movement::{CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS, CAPSULE_Y_OFFSET};
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
+use noob_tube_shared::tuning::NetConfig;
 
 use crate::local_player::CurrentInput;
 
@@ -51,7 +52,11 @@ impl Plugin for RemotePlayersPlugin {
 /// delay from the measured round trip, so what is actually in effect is only knowable at runtime.
 /// Printing it also closes the gap between "the setting was read" and "the setting is doing
 /// something", which is not the same thing and has twice not been today.
-fn report_input_delay(timeline: Res<client::LocalTimelineSync>, mut reported: Local<bool>) {
+fn report_input_delay(
+    timeline: Res<client::LocalTimelineSync>,
+    net: Res<NetConfig>,
+    mut reported: Local<bool>,
+) {
     if *reported || !timeline.is_synced() {
         return;
     }
@@ -59,7 +64,7 @@ fn report_input_delay(timeline: Res<client::LocalTimelineSync>, mut reported: Lo
     let ticks = timeline.input_delay();
     info!(
         "clocks synced: input delay {ticks} ticks ({:?})",
-        noob_tube_shared::tick_duration() * u32::from(ticks)
+        net.tick_duration() * u32::from(ticks)
     );
 }
 

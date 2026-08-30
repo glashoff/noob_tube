@@ -234,7 +234,7 @@ fn sample_input(
 ///
 /// The two look identical from outside, and one of them cost an afternoon. Note that this now
 /// counts replayed ticks as well: a rollback re-runs `FixedMain`, so the number climbing faster
-/// than `TICK_RATE` is itself the signal that corrections are happening.
+/// than the tick rate is itself the signal that corrections are happening.
 fn count_ticks(mut ticks: ResMut<MovementTicks>) {
     ticks.0 += 1;
 }

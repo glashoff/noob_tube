@@ -362,6 +362,7 @@ The file is for the settings you keep, the environment for the one you are chang
 stay local.
 
 ```toml
+tick_hz = 64.0             # simulation rate; must match on both sides
 ping_ms = 100              # simulated round trip; each end delays half of it
 jitter_ms = 10             # random variation on each leg, ± this
 loss = 0.02                # packet loss probability, 0.0 to 1.0
@@ -386,7 +387,16 @@ session.
 the server's copy delays inputs coming in, each client's copy delays snapshots coming in — so a file
 read by the server alone gives a half-duplex link that behaves like nothing real.
 
-Nothing here fails quietly, which is the point:
+Verified: a 64 Hz server and a 64 Hz client connect, a 128/128 pair connects, and a 64 Hz server
+with a 32 Hz client times out instead.
+
+`tick_hz` is the one setting both sides must agree on — the server owns the simulation rate and the
+client replays its prediction at it. Two processes reading two files cannot be made to agree, so the
+tick rate is mixed into the netcode protocol id instead: peers that disagree fail to connect rather
+than connecting and then quietly disagreeing about every tick number after that. The symptom is
+`connection request timed out`, and both binaries log their rate at startup.
+
+Nothing else here fails quietly either, which is the point:
 
 ```
 $ NOOB_TUBE_CONFIG=typo.toml cargo run -p noob_tube_server

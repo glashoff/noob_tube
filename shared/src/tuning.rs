@@ -14,6 +14,7 @@
 //! `NOOB_TUBE_PING_MS=200 cargo run -p noob_tube_client` tries one value without editing anything.
 //!
 //! ```toml
+//! tick_hz = 64.0       # simulation rate; must match on both sides
 //! ping_ms = 100        # simulated round trip; each end delays half of it
 //! jitter_ms = 10       # random variation on each leg, ± this
 //! loss = 0.02          # packet loss probability, 0.0 to 1.0
@@ -51,6 +52,18 @@ pub const DEFAULT_CONFIG_PATH: &str = "noob_tube.toml";
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct NetConfig {
+    /// How often the simulation steps, in Hz.
+    ///
+    /// The server owns this rate and the client replays prediction at it, so the two **must**
+    /// agree. They are separate processes reading separate files, so nothing here can enforce that
+    /// — instead [`Self::protocol_id`] mixes the rate into the netcode protocol id, and peers that
+    /// disagree simply fail to connect. A refused connection is a bad afternoon; a silent tick-rate
+    /// mismatch is a worse week.
+    ///
+    /// It sets the granularity of everything else: input delay and the client's lead are counted in
+    /// ticks, and one tick is `1 / tick_hz`. Raising it costs CPU on the server linearly and makes
+    /// each rollback replay more ticks for the same wall-clock error.
+    pub tick_hz: f64,
     /// Simulated round trip. Zero leaves the link untouched.
     pub ping_ms: u64,
     /// Random variation added to each leg, in each direction.
@@ -119,6 +132,8 @@ pub struct NetConfig {
 impl Default for NetConfig {
     fn default() -> Self {
         Self {
+            // What CS:GO's official servers run. Third-party competitive servers use 128.
+            tick_hz: 64.0,
             ping_ms: 0,
             jitter_ms: 0,
             loss: 0.0,
@@ -156,6 +171,11 @@ impl NetConfig {
     /// inside a system where the message is far less useful.
     fn validate(&self) {
         assert!(
+            self.tick_hz > 0.0,
+            "tick_hz is {}, which is not a rate",
+            self.tick_hz,
+        );
+        assert!(
             self.min_client_lead_ticks >= 1.0,
             "min_client_lead_ticks is {}, below one tick: the server would sometimes simulate a \
              tick before the input for it had arrived.",
@@ -178,6 +198,7 @@ impl NetConfig {
     }
 
     fn apply_env(&mut self) {
+        env_parse("NOOB_TUBE_TICK_HZ", &mut self.tick_hz);
         env_parse("NOOB_TUBE_PING_MS", &mut self.ping_ms);
         env_parse("NOOB_TUBE_JITTER_MS", &mut self.jitter_ms);
         env_parse("NOOB_TUBE_LOSS", &mut self.loss);
@@ -205,6 +226,20 @@ impl NetConfig {
             .with_incoming_jitter(Duration::from_millis(self.jitter_ms))
             .with_fixed_loss(self.loss.clamp(0.0, 1.0));
         Some(RecvLinkConditioner::new(config))
+    }
+
+    /// One tick.
+    pub fn tick_duration(&self) -> Duration {
+        Duration::from_secs_f64(1.0 / self.tick_hz)
+    }
+
+    /// The netcode protocol id, with the tick rate mixed in.
+    ///
+    /// Netcode refuses a connect token whose protocol id does not match, which turns a tick-rate
+    /// disagreement from an invisible desync into a connection that never establishes. The two
+    /// processes read their config separately and nothing else can catch this.
+    pub fn protocol_id(&self) -> u64 {
+        crate::PROTOCOL_ID ^ self.tick_hz.to_bits().rotate_left(17)
     }
 
     /// How often the server sends replication updates.
@@ -261,8 +296,9 @@ impl NetConfig {
             ""
         };
         format!(
-            "{link}, sending at {:.0} Hz, interpolating at {}×, input delay {}..{} ticks, \
-             predicting up to {}, client lead ≥{} ticks [{source}]{stale}",
+            "{link}, ticking at {:.0} Hz, sending at {:.0} Hz, interpolating at {}×, \
+             input delay {}..{} ticks, predicting up to {}, client lead ≥{} ticks [{source}]{stale}",
+            self.tick_hz,
             self.send_hz,
             self.interp_ratio,
             self.input_delay_min_ticks,
@@ -399,6 +435,35 @@ mod tests {
     #[should_panic(expected = "min_client_lead_ticks")]
     fn a_lead_below_one_tick_is_refused() {
         NetConfig { min_client_lead_ticks: 0.5, ..default_config() }.validate();
+    }
+
+    #[test]
+    fn a_tick_rate_becomes_a_duration() {
+        let config = NetConfig { tick_hz: 64.0, ..default_config() };
+        assert_eq!(config.tick_duration(), Duration::from_secs_f64(1.0 / 64.0));
+    }
+
+    /// The whole reason the tick rate is in the protocol id: two peers that disagree must not be
+    /// able to connect and then quietly disagree about everything else.
+    #[test]
+    fn a_different_tick_rate_is_a_different_protocol() {
+        let a = NetConfig { tick_hz: 64.0, ..default_config() };
+        let b = NetConfig { tick_hz: 128.0, ..default_config() };
+        assert_ne!(a.protocol_id(), b.protocol_id());
+    }
+
+    /// ...but nothing else may change it, or unrelated settings would stop peers connecting.
+    #[test]
+    fn other_settings_do_not_change_the_protocol() {
+        let a = default_config();
+        let b = NetConfig { ping_ms: 250, send_hz: 20.0, ..default_config() };
+        assert_eq!(a.protocol_id(), b.protocol_id());
+    }
+
+    #[test]
+    #[should_panic(expected = "tick_hz")]
+    fn a_tick_rate_of_zero_is_refused() {
+        NetConfig { tick_hz: 0.0, ..default_config() }.validate();
     }
 
     fn default_config() -> NetConfig {

@@ -14,6 +14,20 @@
 # server's copy delays inputs coming in, each client's copy delays snapshots coming in — so a file
 # read by the server alone gives a half-duplex link that behaves like nothing real.
 
+# How often the simulation steps, in Hz. 64 is what CS:GO's official servers run; third-party
+# competitive servers use 128.
+#
+# The server owns this rate and the client replays its prediction at it, so BOTH SIDES MUST AGREE.
+# They are separate processes reading separate files, so nothing can enforce it directly — instead
+# the tick rate is mixed into the netcode protocol id, and peers that disagree simply fail to
+# connect ("connection request timed out"). That is deliberate: a refused connection is a bad
+# afternoon, a silent tick-rate mismatch is a worse week. Both binaries log their rate at startup.
+#
+# It also sets the granularity of everything below: input delay and the client's lead are counted in
+# ticks. Raising it costs server CPU linearly and makes each rollback replay more ticks for the same
+# wall-clock error.
+tick_hz = 64.0
+
 # Simulated round trip, in milliseconds. Each end delays half of it. 0 leaves the link untouched.
 ping_ms = 0
 
@@ -63,7 +77,7 @@ interp_min_ms = 5
 # starting this late every time, even on a perfect link. Fighting games and RTSs pay it gladly for
 # a simulation that never rewinds. Shooters do not, which is why this is 0.
 #
-# One tick is 15.6 ms at the 64 Hz tick rate.
+# One tick is 15.6 ms at the default 64 Hz.
 input_delay_min_ticks = 0
 
 # How much latency is covered by input delay before prediction takes over.
