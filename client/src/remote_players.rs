@@ -4,6 +4,11 @@
 //! from the server carrying [`Player`], [`PlayerState`] and [`Aim`], and this module only gives them
 //! something visible. A capsule, because it is the exact shape the movement code collides with —
 //! character models are M2.
+//!
+//! The values are already smoothed by the time anything here reads them. The server marks every
+//! player `Interpolated` for every client but its owner, and lightyear then keeps a history of
+//! received updates and writes a blend of two of them back into the component each frame. That
+//! happens in place, on the same entity — there is no second copy to look up.
 
 use bevy::prelude::*;
 use lightyear::prelude::*;
@@ -19,7 +24,12 @@ impl Plugin for RemotePlayersPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (give_bodies, claim_own_player, place_bodies, place_heads).chain(),
+            (give_bodies, claim_own_player, place_bodies, place_heads)
+                .chain()
+                // Interpolation writes the smoothed values into `PlayerState` and `Aim` in Update
+                // as well. Without this the capsules would render whatever last frame's sample
+                // was — one frame of lag added on top of the delay interpolation already costs.
+                .after(InterpolationSystems::All),
         )
             // Inputs must be written before lightyear packs them for sending, which is what this
             // system set marks.
@@ -97,6 +107,11 @@ fn give_bodies(
 /// `PlayerState::position` is the feet, the capsule mesh is centred, hence the offset. Yaw is
 /// applied but pitch is not: a capsule leaning back would look wrong, and a real body only turns at
 /// the waist. That is M2's problem.
+///
+/// This also runs for our own player, whose entity is not interpolated — so its capsule shows the
+/// server's raw idea of where we are, a step behind the camera. That gap is exactly what M4's
+/// prediction closes, and until then it is the clearest view of how far apart the two simulations
+/// run.
 fn place_bodies(
     mut bodies: Query<(&PlayerState, &Aim, &mut Transform), With<client::Remote>>,
 ) {

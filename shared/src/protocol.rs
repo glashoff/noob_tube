@@ -11,6 +11,7 @@
 use bevy::prelude::*;
 use lightyear::prelude::*;
 use lightyear::prelude::input::native::InputPlugin;
+use std::f32::consts::{PI, TAU};
 
 use crate::player::{Aim, Player, PlayerInput, PlayerState};
 use crate::types::SharedTypesPlugin;
@@ -22,9 +23,17 @@ impl Plugin for ProtocolPlugin {
         app.add_plugins(SharedTypesPlugin);
         // Position and velocity: the server is the authority, and in M4 this is what the client
         // predicts and rolls back.
-        app.component::<PlayerState>().replicate();
+        //
+        // The interpolation rule only takes effect on entities carrying `Interpolated`, which the
+        // server hands out per client via `InterpolationTarget` — so registering it here does not
+        // impose interpolation on the entity a client owns.
+        app.component::<PlayerState>()
+            .replicate()
+            .add_interpolation_with(lerp_player_state);
         // Aim is separate so it can be treated differently — see the note on `PlayerState`.
-        app.component::<Aim>().replicate();
+        app.component::<Aim>()
+            .replicate()
+            .add_interpolation_with(lerp_aim);
         // Sent once per entity: which peer this player belongs to never changes.
         app.component::<Player>().replicate_once();
 
@@ -32,5 +41,123 @@ impl Plugin for ProtocolPlugin {
         // every packet rather than one input per packet, so a dropped packet does not cost a tick
         // of movement — and it keeps the history the client needs to replay after a rollback.
         app.add_plugins(InputPlugin::<PlayerInput>::default());
+    }
+}
+
+/// Blends two received player states for a moment in between them.
+///
+/// Lightyear samples this on the interpolation timeline, which trails the last received update by
+/// about one and a half send intervals. `t` is where in that gap we are, 0 at `start` and 1 at
+/// `end`; it is never extrapolated past 1, so a late packet freezes a player rather than sending
+/// them sliding through a wall.
+///
+/// Only the continuous fields can actually be blended. `on_ground` and `crouching` are discrete,
+/// and half a crouch is not a stance — they hold `start`'s value until the timeline reaches `end`,
+/// which is the choice that never shows a state before it happened.
+fn lerp_player_state(start: PlayerState, end: PlayerState, t: f32) -> PlayerState {
+    PlayerState {
+        position: start.position.lerp(end.position, t),
+        velocity: start.velocity.lerp(end.velocity, t),
+        on_ground: start.on_ground,
+        crouching: start.crouching,
+    }
+}
+
+/// Blends two received aim angles.
+fn lerp_aim(start: Aim, end: Aim, t: f32) -> Aim {
+    Aim {
+        yaw: lerp_angle(start.yaw, end.yaw, t),
+        pitch: lerp_angle(start.pitch, end.pitch, t),
+    }
+}
+
+/// Interpolates two angles the short way around the circle.
+///
+/// Yaw is unbounded and wraps, so a player turning past π reports something near +π on one tick and
+/// near −π on the next. Interpolating those numbers directly would spin the body almost all the way
+/// round in one send interval, in the wrong direction, on every crossing.
+///
+/// The result is an angle, not a number in any particular range: walking from 2.0 to −3.0 lands on
+/// 3.28, which is the same direction. Everything downstream feeds it to `Quat::from_rotation_*`,
+/// which cannot tell the difference; normalising would only introduce a discontinuity of its own.
+fn lerp_angle(start: f32, end: f32, t: f32) -> f32 {
+    let mut delta = (end - start).rem_euclid(TAU);
+    if delta > PI {
+        delta -= TAU;
+    }
+    start + delta * t
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tolerance in radians. The angle maths goes through `rem_euclid`, so exact equality is not
+    /// on offer, but anything a player could see is orders of magnitude larger than this.
+    const EPS: f32 = 1e-5;
+
+    #[test]
+    fn halfway_is_halfway() {
+        assert!((lerp_angle(0.0, 1.0, 0.5) - 0.5).abs() < EPS);
+    }
+
+    /// Compares two angles as directions rather than as numbers.
+    fn same_direction(a: f32, b: f32) -> bool {
+        let mut delta = (a - b).rem_euclid(TAU);
+        if delta > PI {
+            delta -= TAU;
+        }
+        delta.abs() < EPS
+    }
+
+    /// The ends have to land on the samples exactly, or a player would never quite face where the
+    /// server says they face. Exactly *as a direction*: crossing the seam takes the number out of
+    /// [−π, π], on purpose.
+    #[test]
+    fn the_ends_are_exact() {
+        assert!((lerp_angle(2.0, -3.0, 0.0) - 2.0).abs() < EPS);
+        assert!(same_direction(lerp_angle(2.0, -3.0, 1.0), -3.0));
+        assert!(same_direction(lerp_angle(0.5, 1.5, 1.0), 1.5));
+    }
+
+    /// The case the whole function exists for: crossing the seam at ±π.
+    #[test]
+    fn crossing_the_seam_takes_the_short_way() {
+        let start = PI - 0.1;
+        let end = -PI + 0.1;
+        let middle = lerp_angle(start, end, 0.5);
+        // The short way is 0.2 rad forward, putting the midpoint just past π rather than at 0.
+        let stepped = (middle - start).abs();
+        assert!(stepped < 0.2, "turned {stepped} rad instead of 0.1");
+    }
+
+    #[test]
+    fn a_turn_of_half_a_circle_does_not_reverse() {
+        // Exactly π is the ambiguous case; either direction is equally short. It must at least
+        // move by half of it, not stand still or jump.
+        let middle = lerp_angle(0.0, PI, 0.5);
+        assert!((middle.abs() - PI / 2.0).abs() < EPS, "midpoint was {middle}");
+    }
+
+    #[test]
+    fn position_blends_but_stance_does_not() {
+        let start = PlayerState {
+            position: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            on_ground: true,
+            crouching: false,
+        };
+        let end = PlayerState {
+            position: Vec3::new(4.0, 0.0, 0.0),
+            velocity: Vec3::new(8.0, 0.0, 0.0),
+            on_ground: false,
+            crouching: true,
+        };
+
+        let middle = lerp_player_state(start, end, 0.5);
+        assert_eq!(middle.position, Vec3::new(2.0, 0.0, 0.0));
+        assert_eq!(middle.velocity, Vec3::new(4.0, 0.0, 0.0));
+        assert!(middle.on_ground, "stance changed before reaching the sample");
+        assert!(!middle.crouching, "stance changed before reaching the sample");
     }
 }

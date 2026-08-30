@@ -495,8 +495,8 @@ on its own and gets its own treatment.
 
 | component | mode | why |
 |---|---|---|
-| `PlayerState` | `replicate` | position and velocity, changing every tick |
-| `Aim` | `replicate` | where the player looks, changing every tick |
+| `PlayerState` | `replicate` + interpolate | position and velocity, changing every tick |
+| `Aim` | `replicate` + interpolate | where the player looks, changing every tick |
 | `Player` | `replicate_once` | which peer owns this entity, never changes |
 
 `Aim` is separate from `PlayerState` rather than a field in it, and that separation is the point of
@@ -513,6 +513,56 @@ component stays out.
 Instead of a separate entity for prediction, lightyear marks entities that arrived over the network
 with `client::Remote`. That is what the client filters on to avoid ever drawing a capsule on the
 local player.
+
+#### Interpolating the other players
+
+Updates arrive at discrete server ticks, and drawing each one the moment it lands makes remote
+players advance in steps. So the client does not draw the newest state it has: it keeps a history of
+received values and renders a moment slightly in the past, blending the two samples that bracket it.
+The delay is `max(send_interval × 1.7, 5 ms)` plus a jitter margin — short enough not to be felt,
+long enough that the next sample has almost always arrived.
+
+Almost. When it has not, lightyear **clamps rather than extrapolates**: the player freezes at the
+last known state until the packet turns up. A guess would put them somewhere they never were, and on
+a hitscan game that is a shot at a phantom.
+
+It only does anything because the server sends *less often than it ticks*. Lightyear's default
+replication interval is zero — an update every frame — and with no gap between updates there is
+nothing to interpolate across. The server therefore sets `ReplicationMetadata` to `SEND_RATE`, 32 Hz
+against a 64 Hz simulation. That number is the dial for the whole trade: it decides the bandwidth,
+and the interpolation delay follows from it as `send_interval × 1.7`.
+
+Measured with two clients walking the same route at 60 ms of simulated latency, sampling both
+players' positions on the same client at ~60 Hz:
+
+| | samples where the position did not change | trailing the server |
+|---|---|---|
+| own player, not interpolated | 47 % | 0.425 m |
+| other player, interpolated | 1.7 % | 0.464 m |
+
+The 47 % is the stepping, seen directly: at 32 Hz updates and 60 Hz sampling, roughly every second
+sample finds the same value still sitting there. The interpolated player moves on all but 1.7 % of
+them. The cost is the 4 cm it trails further behind — smaller than the `× 1.7` formula predicts, and
+not worth chasing.
+
+Which players get this is the server's decision, per client. The player entity carries
+`InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(peer))`, so everyone sees everyone
+else smoothed, and nobody sees a smoothed copy of themselves — the owner has a local simulation that
+is ahead of the network, and blending toward a version of themselves that trails it by design would
+only drag them backwards.
+
+Unlike older lightyear versions, this happens **in place**. There is no confirmed/interpolated entity
+pair to keep in step: the received values go into a `ConfirmedHistory<C>`, and the blend is written
+back onto the same component of the same entity. The drawing code reads `PlayerState` and `Aim` and
+never learns that anything happened — it only has to run *after* `InterpolationSystems::All`, or it
+would render the previous frame's sample.
+
+What can be blended is decided per component, because most state cannot be. Position and velocity
+lerp; `on_ground` and `crouching` are discrete and hold the earlier sample's value until the timeline
+reaches the later one, which is the choice that never shows a stance before it happened. `Aim` needs
+its own function again: yaw wraps, so a player turning past π reports `+3.1` on one tick and `-3.1`
+on the next, and interpolating those *numbers* would spin the body almost all the way round, the
+wrong way, on every crossing. The interpolation takes the short way around the circle instead.
 
 Shooting is hitscan: the client reports where it aimed, the server raycasts against player capsules
 (not per bone yet), applies damage, and handles death and respawn.

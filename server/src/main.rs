@@ -26,6 +26,9 @@ fn main() {
         // The protocol must be registered after the plugin group and before any Server entity.
         .add_plugins(ProtocolPlugin)
         .insert_resource(Time::<Fixed>::from_hz(noob_tube_shared::TICK_RATE))
+        // How often replication updates go out. Without this lightyear sends every frame, and
+        // interpolation then has nothing to interpolate across — see `SEND_RATE`.
+        .insert_resource(ReplicationMetadata::new(noob_tube_shared::send_interval()))
         // The same geometry the client collides against, built from the same numbers. If the two
         // disagreed, every step near the difference would produce a correction the player sees.
         .insert_resource(level::collision_world())
@@ -121,6 +124,10 @@ fn on_peer_connected(
         // Replicate is the other half of ReplicationSender: that says the channel may send, this
         // says the entity should be sent.
         Replicate::to_clients(NetworkTarget::All),
+        // Everyone but the owner sees this player smoothed between received updates. The owner is
+        // left out on purpose: they run their own simulation of this entity locally and would only
+        // be dragged backwards by a version of themselves that trails the network by design.
+        InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(remote.0)),
         // Says which connection owns this player. It arrives at that one client as `Controlled`,
         // which is how a client recognises its own player without comparing peer ids — and it is
         // what routes that client's inputs to this entity.

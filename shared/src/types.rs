@@ -6,7 +6,7 @@
 
 use bevy::prelude::*;
 
-use crate::player::{PlayerInput, PlayerState};
+use crate::player::{Aim, Player, PlayerInput, PlayerState};
 
 /// Marks an entity spawned by this project, as opposed to one a Bevy plugin created.
 ///
@@ -51,6 +51,8 @@ impl Plugin for SharedTypesPlugin {
             .register_type::<Vec3>()
             .register_type::<Authored>()
             .register_type::<PlayerInput>()
-            .register_type::<PlayerState>();
+            .register_type::<PlayerState>()
+            .register_type::<Aim>()
+            .register_type::<Player>();
     }
 }

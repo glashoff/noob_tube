@@ -22,6 +22,22 @@ pub fn tick_duration() -> Duration {
     Duration::from_secs_f64(1.0 / TICK_RATE)
 }
 
+/// How often the server sends replication updates, in Hz.
+///
+/// Deliberately below [`TICK_RATE`]. Lightyear's default is zero, meaning *every frame*, which is
+/// both more bandwidth than a shooter needs and hides the problem interpolation exists to solve:
+/// with an update every frame there is no gap to fill, so remote players look smooth for the wrong
+/// reason and would start stepping the moment the rate dropped.
+///
+/// The interpolation delay follows from this number as `send_interval × 1.7`, so it is also the
+/// dial that decides how far in the past other players are drawn — 32 Hz costs about 53 ms. Source
+/// engine games ship 20 to 66 Hz for the same trade.
+pub const SEND_RATE: f64 = 32.0;
+
+pub fn send_interval() -> Duration {
+    Duration::from_secs_f64(1.0 / SEND_RATE)
+}
+
 /// Default UDP port the server listens on.
 pub const SERVER_PORT: u16 = 5000;
 
