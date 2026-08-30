@@ -254,6 +254,11 @@ unconditionally, for `schedule_data`, and that reaches `bevy_core_pipeline` and 
 There is no way around it short of forking. What keeps the shipped server headless is that the
 feature is off: without it the server's dependency tree contains no `bevy_render` at all.
 
+A second client on the same machine needs its own port: `BRP_EXTRAS_PORT=15704`. Not 15703 — that
+belongs to the first client's render sub-app, which `bevy_remote` binds at `port + 1` and which
+serves a different, nearly empty world. Querying it returns no game entities and looks like a
+broken client.
+
 `tools/brp` is a dependency-free client for it:
 
 ```bash

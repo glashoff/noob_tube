@@ -11,7 +11,7 @@ use lightyear::prelude::input::native::{ActionState, InputMarker};
 use noob_tube_shared::movement::{CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS, CAPSULE_Y_OFFSET};
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
 
-use crate::local_player::CurrentInput;
+use crate::local_player::{CurrentInput, LocalPlayer};
 
 pub struct RemotePlayersPlugin;
 
@@ -74,14 +74,23 @@ fn place_bodies(
 /// `InputMarker` tells lightyear which `ActionState` this client fills in, as opposed to the ones it
 /// merely receives for other players.
 fn claim_own_player(
-    mine: Query<(Entity, &Player), (With<client::Remote>, Added<Controlled>)>,
+    mine: Query<(Entity, &Player, &PlayerState), (With<client::Remote>, Added<Controlled>)>,
+    mut local: Single<&mut LocalPlayer>,
     mut commands: Commands,
 ) {
-    for (entity, player) in mine.iter() {
+    for (entity, player, state) in mine.iter() {
         commands
             .entity(entity)
             .insert(InputMarker::<PlayerInput>::default());
-        info!("player {} is ours", player.peer);
+        // Adopt the server's state. The local simulation starts at the origin, but the server puts
+        // the nth player at its own spawn point, so without this the second client's camera stands
+        // two metres away from its own capsule — the first visible symptom of two simulations that
+        // never agree on anything but by accident.
+        //
+        // This is a one-off correction at the moment ownership is established. Doing it on every
+        // update is reconciliation, which needs a rollback to be worth anything, and that is M4.
+        local.state = *state;
+        info!("player {} is ours, adopting server state", player.peer);
     }
 }
 

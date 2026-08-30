@@ -31,6 +31,10 @@ pub const CRATES: [Vec3; 3] = [
 ///
 /// Nothing clever: players stand two metres apart along X, which is enough to tell capsules apart
 /// while there are a handful of them. Real spawn points come with real levels.
+///
+/// The index the server passes is a count of existing players, so it climbs as people reconnect —
+/// a client that joins after two others have left starts at x = 6 rather than x = 0. Harmless on an
+/// empty plane, wrong on a real map, and fixed by picking a free spawn point rather than counting.
 pub fn spawn_point(index: usize) -> Vec3 {
     Vec3::new(index as f32 * 2.0, 0.0, 0.0)
 }

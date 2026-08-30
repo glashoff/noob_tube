@@ -103,11 +103,8 @@ fn on_peer_connected(
         return;
     };
 
-    // Spread players out so they do not spawn inside one another. Nothing clever: the nth player
-    // stands n metres along X, which is enough to tell capsules apart while there are a handful.
-    let index = players.iter().count() as f32;
     let mut state = PlayerState::default();
-    state.position = Vec3::new(index * 2.0, 0.0, 0.0);
+    state.position = level::spawn_point(players.iter().count());
 
     commands.spawn((
         Name::from(format!("Player {peer}")),
