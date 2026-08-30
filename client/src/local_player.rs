@@ -211,7 +211,9 @@ fn look(
 fn sample_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
+    // Optional so the client still samples input with no window at all — see `windowing` in
+    // `main.rs`. A headless client has no cursor to grab, and nothing scripted should wait on one.
+    cursor: Option<Single<&CursorOptions, With<PrimaryWindow>>>,
     player: Single<&LocalPlayer>,
     scripted: Res<ScriptedInput>,
     mut input: ResMut<CurrentInput>,
@@ -219,7 +221,8 @@ fn sample_input(
     // The same left click both grabs the cursor and fires, so firing waits until the cursor is
     // already grabbed. Otherwise the click that gives the window focus also empties a round into
     // whatever the camera happened to be pointing at.
-    let firing = mouse.pressed(MouseButton::Left) && cursor.grab_mode != CursorGrabMode::None;
+    let grabbed = cursor.is_some_and(|cursor| cursor.grab_mode != CursorGrabMode::None);
+    let firing = mouse.pressed(MouseButton::Left) && grabbed;
     if let Some(scripted) = scripted.0 {
         input.0 = PlayerInput { yaw: player.yaw, pitch: player.pitch, ..scripted };
         return;

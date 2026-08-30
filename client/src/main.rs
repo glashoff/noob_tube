@@ -6,23 +6,20 @@ mod local_player;
 mod remote_players;
 mod world;
 
+use bevy::app::{PluginGroupBuilder, ScheduleRunnerPlugin};
 use bevy::prelude::*;
+use bevy::window::ExitCondition;
 use lightyear::prelude::*;
 use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, SERVER_PORT};
+use core::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};
 
 fn main() {
     let net = configure();
 
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Noob Tube".into(),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(windowing())
         .insert_resource(Time::<Fixed>::from_hz(net.tick_hz))
         // How far in the past other players are drawn. Inserted before the plugin group, which
         // only fills this in if it is missing.
@@ -49,6 +46,41 @@ fn main() {
         .add_plugins(remote_inspection())
         .add_plugins(world_inspector())
         .run();
+}
+
+/// The plugin group, with or without a window on someone's desktop.
+///
+/// `NOOB_TUBE_HEADLESS=1` builds the client with no window at all. It exists because testing needs
+/// several clients at once, and every one of them used to pop up over whatever the developer was
+/// doing and steal the focus — which on top of being irritating changes the thing under test, since
+/// an unfocused window releases the cursor and stops firing.
+///
+/// Not a hidden window: winit cannot hide one on Wayland. The window is never created, `WinitPlugin`
+/// is left out, and a plain loop drives the schedule instead of an event loop. Rendering is still
+/// set up, so meshes, materials and the camera all behave — there is simply nowhere for the frames
+/// to go. What does *not* work headless is the screenshot harness, which needs a surface.
+fn windowing() -> PluginGroupBuilder {
+    if std::env::var("NOOB_TUBE_HEADLESS").is_ok_and(|value| value != "0") {
+        return DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                // Without this the app exits the moment it notices it has no windows.
+                exit_condition: ExitCondition::DontExit,
+                close_when_requested: false,
+                ..default()
+            })
+            .disable::<bevy::winit::WinitPlugin>()
+            // 240 Hz: fast enough that the fixed timestep never starves, slow enough not to spin a
+            // core for nothing.
+            .add(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / 240.0)));
+    }
+    DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "Noob Tube".into(),
+            ..default()
+        }),
+        ..default()
+    })
 }
 
 /// Reads our own settings, then asks the server for the one it owns.

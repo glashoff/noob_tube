@@ -233,6 +233,22 @@ cargo run -p noob_tube_client --features remote   # BRP on 127.0.0.1:15702
 
 The client takes the protocol's default port so third-party tools find it without configuration.
 
+Testing usually means two or three clients at once, and every one of them opening a window over
+whatever you were doing is more than an irritation: an unfocused window releases the cursor, and a
+client with a released cursor stops firing, so the windows change the thing being measured.
+
+```bash
+NOOB_TUBE_HEADLESS=1 cargo run -p noob_tube_client --features remote
+```
+
+builds the client with **no window at all**. Not a hidden one — winit cannot hide a window on
+Wayland. `WinitPlugin` is left out, no window is ever created, and a plain loop drives the schedule
+instead of an event loop. Rendering is still set up, so meshes, materials and the camera behave
+exactly as they do on screen; there is simply nowhere for the frames to go, and everything is driven
+over BRP instead. Startup is a few seconds slower, because initialising the GPU is now the longest
+thing that happens before the connection. What does *not* work headless is the screenshot harness,
+which needs a surface to read back.
+
 A second instance on the same port fails to bind **silently** — no log line, no warning. Queries
 then answer from whichever process got there first, which may be a stale build still running from
 an earlier session. If a value looks impossible, check who actually owns the port before suspecting
