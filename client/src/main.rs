@@ -1,5 +1,6 @@
 //! Game client: renders the world, samples input, predicts the local player.
 
+mod crosshair;
 mod debug_draw;
 mod harness;
 mod local_player;
@@ -33,6 +34,7 @@ fn main() {
             noob_tube_shared::types::SharedTypesPlugin,
             local_player::LocalPlayerPlugin,
             debug_draw::DebugDrawPlugin,
+            crosshair::CrosshairPlugin,
             remote_players::RemotePlayersPlugin,
             harness::HarnessPlugin,
         ))
