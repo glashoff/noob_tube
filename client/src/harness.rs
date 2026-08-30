@@ -9,9 +9,10 @@
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use noob_tube_shared::player::PlayerInput;
+use lightyear::prelude::Predicted;
+use noob_tube_shared::player::{PlayerInput, PlayerState};
 
-use crate::local_player::{LocalPlayer, MovementTicks, ScriptedInput};
+use crate::local_player::{MovementTicks, ScriptedInput};
 
 /// Frames to run before capturing. Enough for the ground to load and the walk to cover distance.
 const CAPTURE_FRAME: u32 = 500;
@@ -44,7 +45,7 @@ struct Harness {
 fn drive(
     mut harness: ResMut<Harness>,
     mut scripted: ResMut<ScriptedInput>,
-    player: Single<&LocalPlayer>,
+    player: Option<Single<&PlayerState, With<Predicted>>>,
     virtual_time: Res<Time<Virtual>>,
     ticks: Res<MovementTicks>,
     mut commands: Commands,
@@ -61,21 +62,24 @@ fn drive(
         ..default()
     });
 
+    // Nothing to report until the server has given us a player to predict.
+    let Some(player) = player else { return };
+
     // Periodic trace so a stall shows up as a position that stops changing.
     if harness.frame % 60 == 0 {
         info!(
             "harness: frame {} ticks={} feet={:?} vel={:?} speed={:.3}",
             harness.frame,
             ticks.0,
-            player.state.position,
-            player.state.velocity,
+            player.position,
+            player.velocity,
             virtual_time.relative_speed()
         );
     }
 
     if harness.frame == CAPTURE_FRAME {
-        let p = player.state.position;
-        info!("harness: feet at {p:?}, on_ground={}", player.state.on_ground);
+        let p = player.position;
+        info!("harness: feet at {p:?}, on_ground={}", player.on_ground);
         commands
             .spawn(Screenshot::primary_window())
             .observe(save_to_disk(harness.path.clone()));

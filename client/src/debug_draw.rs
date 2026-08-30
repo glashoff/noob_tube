@@ -15,7 +15,8 @@ use noob_tube_shared::movement::{
     CROUCH_CAPSULE_Y_OFFSET, GROUND_SNAP_DIST,
 };
 
-use crate::local_player::LocalPlayer;
+use lightyear::prelude::Predicted;
+use noob_tube_shared::player::PlayerState;
 
 /// Green while the player is grounded, red while airborne. This one bool decides whether the
 /// player accelerates to MAX_SPEED or the much lower MAX_SPEED_AIR, and it flickering on flat
@@ -52,12 +53,12 @@ impl Plugin for DebugDrawPlugin {
 ///
 /// It comes into its own in M3, when other players are drawn and can be looked at from outside.
 fn draw_collision(
-    player: Single<&LocalPlayer>,
+    player: Option<Single<&PlayerState, With<Predicted>>>,
     world: Option<Res<CollisionWorld>>,
     mut gizmos: Gizmos,
 ) {
     let Some(world) = world else { return };
-    let state = &player.state;
+    let Some(state) = player else { return };
 
     let (half_height, y_offset) = if state.crouching {
         (CROUCH_CAPSULE_HALF_HEIGHT, CROUCH_CAPSULE_Y_OFFSET)

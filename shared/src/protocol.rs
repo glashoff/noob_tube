@@ -21,18 +21,26 @@ pub struct ProtocolPlugin;
 impl Plugin for ProtocolPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(SharedTypesPlugin);
-        // Position and velocity: the server is the authority, and in M4 this is what the client
-        // predicts and rolls back.
+        // Position and velocity. The server is the authority; the owning client predicts it and
+        // rolls back when the two disagree.
         //
-        // The interpolation rule only takes effect on entities carrying `Interpolated`, which the
-        // server hands out per client via `InterpolationTarget` — so registering it here does not
-        // impose interpolation on the entity a client owns.
+        // Prediction and interpolation are both registered, and which one an entity gets is decided
+        // per entity by the marker it carries — `Predicted` for its owner, `Interpolated` for
+        // everyone else. The server hands those out with `PredictionTarget` and
+        // `InterpolationTarget`, so nothing here decides it.
         app.component::<PlayerState>()
             .replicate()
+            .predict()
             .add_interpolation_with(lerp_player_state);
         // Aim is separate so it can be treated differently — see the note on `PlayerState`.
+        //
+        // It is predicted alongside position rather than left to arrive late. The camera does not
+        // read it (mouse look owns its own angles, which no rollback may touch), but the body does,
+        // and an unpredicted `Aim` on a predicted entity means replication and the movement step
+        // both writing it every tick with values a round trip apart.
         app.component::<Aim>()
             .replicate()
+            .predict()
             .add_interpolation_with(lerp_aim);
         // Sent once per entity: which peer this player belongs to never changes.
         app.component::<Player>().replicate_once();

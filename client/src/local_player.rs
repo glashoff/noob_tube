@@ -1,14 +1,20 @@
-//! The locally controlled player: mouse look, keyboard input, and the movement step.
+//! The locally controlled player: mouse look, keyboard input, and the camera.
 //!
-//! In M1 this runs entirely locally. M3 replaces the direct application with input sent to the
-//! server, and M4 turns it into prediction with reconciliation. The movement itself lives in
-//! `shared` and does not change.
+//! What this module no longer does is simulate. Since M4 the player *is* the replicated entity the
+//! server marked `Predicted`, stepped by the shared
+//! [`step_players`](noob_tube_shared::simulation::step_players) and rolled back by lightyear when
+//! the server disagrees. There is one simulation now, not two running side by side.
+//!
+//! What stays here is everything the client owns outright. The look angles are the clearest case:
+//! they are input, not state, and a rollback must never touch them — being thrown back a fifth of a
+//! second of mouse movement is far worse than the position error it would be fixing.
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
-use noob_tube_shared::collision::CollisionWorld;
+use lightyear::prelude::Predicted;
 use noob_tube_shared::player::{PlayerInput, PlayerState};
+use noob_tube_shared::simulation;
 use noob_tube_shared::types::Authored;
 
 /// Radians of look per pixel of mouse movement.
@@ -22,6 +28,10 @@ pub struct LocalPlayerPlugin;
 impl Plugin for LocalPlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PointerOverUi>()
+            // Lightyear counts rollbacks but does not register the type, so nothing outside the
+            // process can read it. It is the one number that says whether prediction is agreeing
+            // with the server: a steady climb means the client is guessing wrong.
+            .register_type::<lightyear::prediction::prelude::PredictionMetrics>()
             .register_type::<LocalPlayer>()
             .register_type::<CurrentInput>()
             .register_type::<ScriptedInput>()
@@ -31,20 +41,30 @@ impl Plugin for LocalPlayerPlugin {
             .init_resource::<MovementTicks>()
             .add_systems(Startup, spawn_player)
             .add_systems(Update, (note_pointer_over_ui, grab_cursor, look, sample_input).chain())
-            // Movement runs on the fixed timestep so it ticks at the same rate the server will.
-            .add_systems(FixedUpdate, step_movement)
+            // The same step the server runs, over the one entity we predict. Lightyear re-runs
+            // this schedule when it rolls back, so this is the replay too.
+            .add_systems(
+                FixedUpdate,
+                (simulation::step_players::<With<Predicted>>, count_ticks),
+            )
             .add_systems(PostUpdate, place_camera.before(TransformSystems::Propagate));
     }
 }
 
-/// The camera entity, which is also the player.
+/// The camera, and the look angles that steer it.
+///
+/// It held the player's `PlayerState` until M4. That state now lives on the predicted entity, which
+/// is the server's entity — the camera is a view of it rather than its owner.
+///
+/// The angles stay here, outside anything replicated, because they are the one part of the player
+/// the client is genuinely authoritative over. They travel to the server *as input*; what comes
+/// back is a consequence, not a correction.
 ///
 /// `Reflect` plus the `#[reflect(Component)]` attribute are what make this readable through the
 /// remote inspector; without them the component exists but cannot be named or serialised.
-#[derive(Component, Reflect)]
+#[derive(Component, Reflect, Default)]
 #[reflect(Component)]
 pub struct LocalPlayer {
-    pub state: PlayerState,
     pub yaw: f32,
     pub pitch: f32,
 }
@@ -92,22 +112,18 @@ fn note_pointer_over_ui() {}
 #[reflect(Resource)]
 pub struct MovementTicks(pub u64);
 
-/// Startup: creates the one entity that is both the player and the camera.
+/// Startup: creates the camera.
 ///
-/// Merging the two is a simplification of M1 that only holds while the local player is the only
-/// player and is never seen from outside. M3 splits them, because a replicated player needs a body
-/// that other clients can draw and the camera has to be able to detach from it on death.
+/// It exists from the first frame, before any connection: there is a world to look at long before
+/// the server has a player for us, and a camera that appeared on connect would leave the first
+/// seconds black.
 ///
 /// The 90 degree field of view is horizontal, matching what the genre has settled on.
 fn spawn_player(mut commands: Commands) {
     commands.spawn((
         Name::from("LocalPlayer"),
         Authored,
-        LocalPlayer {
-            state: PlayerState::default(),
-            yaw: 0.0,
-            pitch: 0.0,
-        },
+        LocalPlayer::default(),
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
             fov: 90f32.to_radians(),
@@ -182,9 +198,9 @@ fn look(
 
 /// Update: collects this frame's intent into [`CurrentInput`].
 ///
-/// Sampling and applying are deliberately separate. This runs per frame, while [`step_movement`]
-/// consumes the result on the fixed tick, so a key pressed and released between two ticks can still
-/// be seen — and, more importantly, the same `PlayerInput` value is what M3 puts on the wire.
+/// Sampling and using are deliberately separate. This runs per frame, while the fixed tick
+/// consumes the result, so a key pressed and released between two ticks can still be seen — and it
+/// is the same `PlayerInput` value that goes on the wire.
 ///
 /// `keys.pressed` reports the key being held, not the moment it went down, which is what a movement
 /// step wants: holding W has to keep producing forward intent on every tick.
@@ -214,35 +230,24 @@ fn sample_input(
     };
 }
 
-/// FixedUpdate: advances the player by exactly one tick.
+/// FixedUpdate: counts fixed steps, for telling a stalled simulation from a stalled player.
 ///
-/// This is the only place the player's position changes. It runs on the fixed timestep at
-/// `TICK_RATE`, so it may run zero, one or several times in a frame, and `time.delta_secs()` is the
-/// constant tick length rather than the frame time. That constancy is the point: the server will
-/// step the same function with the same dt, and prediction in M4 replays it — a step that depended
-/// on frame rate could not be replayed to the same result.
-///
-/// [`MovementTicks`] only exists so the harness can tell a stalled simulation from a stalled
-/// player. The two look identical from the outside, and one of them cost an afternoon.
-fn step_movement(
-    input: Res<CurrentInput>,
-    world: Option<Res<CollisionWorld>>,
-    time: Res<Time<Fixed>>,
-    mut ticks: ResMut<MovementTicks>,
-    mut player: Single<&mut LocalPlayer>,
-) {
+/// The two look identical from outside, and one of them cost an afternoon. Note that this now
+/// counts replayed ticks as well: a rollback re-runs `FixedMain`, so the number climbing faster
+/// than `TICK_RATE` is itself the signal that corrections are happening.
+fn count_ticks(mut ticks: ResMut<MovementTicks>) {
     ticks.0 += 1;
-    // The collision world appears in Startup, which can land after the first fixed tick.
-    let Some(world) = world else { return };
-    player
-        .state
-        .apply_input(&input.0, &world, time.delta_secs());
 }
 
-/// PostUpdate: writes the player's eye position and look angles into the camera transform.
+/// PostUpdate: writes the predicted eye position and the look angles into the camera transform.
 ///
-/// The simulation owns `LocalPlayer`; the transform is a view of it, rewritten from scratch each
-/// frame. Nothing reads the transform back, so the two can never disagree.
+/// The two halves come from opposite places, which is the whole shape of prediction in one system.
+/// Position comes from the predicted entity, which the server can correct. The angles come from the
+/// mouse and are never corrected. Nothing reads the transform back, so it can never disagree with
+/// either.
+///
+/// Until the server has sent us a player there is nothing to stand at, and the camera keeps the
+/// position it had — turning on the spot in an empty level for the first fraction of a second.
 ///
 /// Runs in PostUpdate rather than FixedUpdate so the view follows the mouse at the frame rate
 /// rather than the tick rate — 64 Hz mouse look feels notably worse than the movement does. It must
@@ -251,9 +256,13 @@ fn step_movement(
 ///
 /// `EulerRot::YXZ` applies yaw first and pitch second, in the camera's own frame. Any other order
 /// makes the horizon tilt as you look up while turning.
-fn place_camera(mut player: Single<(&LocalPlayer, &mut Transform)>) {
-    let (player, transform) = &mut *player;
-    transform.translation = player.state.eye_position();
-    transform.rotation =
-        Quat::from_euler(EulerRot::YXZ, player.yaw, player.pitch, 0.0);
+fn place_camera(
+    predicted: Option<Single<&PlayerState, With<Predicted>>>,
+    mut camera: Single<(&LocalPlayer, &mut Transform)>,
+) {
+    let (player, transform) = &mut *camera;
+    if let Some(state) = predicted {
+        transform.translation = state.eye_position();
+    }
+    transform.rotation = Quat::from_euler(EulerRot::YXZ, player.yaw, player.pitch, 0.0);
 }

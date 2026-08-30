@@ -483,11 +483,9 @@ where the two disagree, the client's prediction and the server's authority disag
 player can stand, and every step near the difference becomes a correction the player feels. The
 visible meshes stay in the client, built from the same constants.
 
-Measured across the two processes after 22 metres of walking and strafing, the server's position and
-the client's local simulation agree to the last digit — maximum difference 0.000000. They are
-computed independently; the client's own player is a local entity that replication never touches.
-That identity is the precondition for M4: prediction is only worth doing if replaying an input
-locally lands where the server will.
+Both sides step the same function against collision geometry built from the same constants. That
+identity is the precondition for prediction, and M4 depends on it: replaying an input locally has to
+land where the server will put it, or every replay produces a correction.
 
 Lightyear replicates *components*, not snapshots, which is worth stating because it is the opposite
 of how `webgame` worked. There is no per-tick blob of the whole world: each component is registered
@@ -495,8 +493,8 @@ on its own and gets its own treatment.
 
 | component | mode | why |
 |---|---|---|
-| `PlayerState` | `replicate` + interpolate | position and velocity, changing every tick |
-| `Aim` | `replicate` + interpolate | where the player looks, changing every tick |
+| `PlayerState` | `replicate` + predict + interpolate | position and velocity, changing every tick |
+| `Aim` | `replicate` + predict + interpolate | where the player looks, changing every tick |
 | `Player` | `replicate_once` | which peer owns this entity, never changes |
 
 `Aim` is separate from `PlayerState` rather than a field in it, and that separation is the point of
@@ -511,8 +509,9 @@ simulated part as its own field in `PlayerState` and add it to `Aim` when drawin
 component stays out.
 
 Instead of a separate entity for prediction, lightyear marks entities that arrived over the network
-with `client::Remote`. That is what the client filters on to avoid ever drawing a capsule on the
-local player.
+with `client::Remote`, and marks the one this client owns `Predicted`. Both are filters the client
+draws with: `Remote` says an entity came from the server, `Without<Predicted>` leaves our own body
+out, since the camera sits inside it.
 
 #### Interpolating the other players
 
@@ -576,11 +575,54 @@ each client — the server only replicates that the player died.
 
 Hit detection here is *not* lag-compensated — the server tests against the position it currently
 holds, not against what the shooter saw. Against moving targets that means visibly needing to lead
-your shots. Fixing it needs a position history to rewind into, which arrives with M4.
+your shots. Fixing it needs a position history on the server to rewind into, plus the client reporting its
+interpolation delay — lightyear has `InputConfig::lag_compensation` for exactly this, currently off.
 
-### M4 — Prediction
-The local player is predicted and reconciled against server snapshots via rollback and replay.
-Without it, movement feels mushy above roughly 50 ms of latency.
+### M4 — Prediction ✔
+The local player is simulated on the client without waiting for the round trip, and reconciled
+against the server by rolling back and replaying. Without it, movement feels mushy above roughly
+50 ms of latency.
+
+The shape of it is one sentence: **the client's own player entity is the server's entity.** There is
+no local copy running alongside a replicated one. The entity arrives over the network carrying
+`Predicted`, the client steps it every tick from its own input, lightyear keeps a
+`PredictionHistory<C>` of what it guessed, and when a confirmed state arrives that disagrees, it
+rewinds to that tick and re-runs `FixedMain` forward to the present.
+
+That replay is why the movement step lives in `shared/src/simulation.rs` as *one* system rather than
+one per binary. The server runs `step_players::<()>`, the client runs
+`step_players::<With<Predicted>>`, and the filter is the only difference. Two copies of the same six
+lines is precisely how prediction stops working: one of them gains a condition, and the drift shows
+up as a correction the player feels rather than as a compile error.
+
+What is deliberately *not* predicted is the mouse. The look angles live on the client's camera
+entity, outside anything replicated, and travel to the server as input. Being thrown back a fifth of
+a second of mouse movement is far worse than the position error a rollback would be fixing. `Aim` —
+the replicated angles other players see — *is* predicted, because it is a pure function of the input
+and replays to exactly the same value.
+
+Measured at 60 ms of simulated latency with 8 ms of jitter, walking 44 m:
+
+| | |
+|---|---|
+| client running ahead of the server | +0.60 m |
+| rollbacks, clean link | **0** |
+| rollbacks, 10 % packet loss | 1, replaying 15 ticks |
+
+The lead is not an error — it is the point. The client simulates roughly a round trip into the
+future so that its own input takes effect immediately; the server is where it should be, an
+`RTT/2` behind. Before prediction the same measurement showed a 1.1 m gap between two simulations
+that had no way to reconcile.
+
+The zero deserves the packet-loss row beside it, because zero rollbacks is also what a broken
+rollback check would report. Under 10 % loss the server misses an input, falls back to repeating the
+last one, and diverges — and the client notices and replays. The machinery fires exactly when it
+should and not otherwise.
+
+Still open: **visual correction**. A rollback currently snaps the camera to the corrected position.
+Lightyear can decay the error over several frames (`add_correction`), which needs `PlayerState` to
+implement `Diffable`. At one rollback per eight seconds of lossy link this is not yet visible, but it
+will be the moment players collide with each other.
 
 ---
 

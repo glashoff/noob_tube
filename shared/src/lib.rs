@@ -11,6 +11,7 @@ pub mod level;
 pub mod movement;
 pub mod player;
 pub mod protocol;
+pub mod simulation;
 pub mod types;
 #[cfg(feature = "remote")]
 pub mod remote;
