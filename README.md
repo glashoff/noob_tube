@@ -432,10 +432,28 @@ per-bone hit detection builds on the same data.
 The server simulates authoritatively at 64 Hz and replicates player entities. Clients send input
 and interpolate remote players.
 
-Replication is in place: the server spawns a player entity per connected peer and replicates it to
-everyone, and clients draw each one as a capsule. Still missing before players can move — client
-input sent to the server, and the level geometry available to the server, which today only the
-client builds.
+Replication and input are in place. The server spawns a player entity per connected peer, simulates
+it authoritatively at 64 Hz from the inputs that arrive, and replicates the result; clients draw each
+player as a capsule.
+
+Inputs travel as their own component through lightyear's input plugin, which sends the last N ticks
+with every packet rather than one input per packet — a dropped packet then costs no movement, and
+the same history is what a rollback replays from.
+
+Which player belongs to whom is the server's decision, not a comparison the client makes: the server
+puts `ControlledBy` on the player entity pointing at that connection, and it arrives at exactly one
+client as `Controlled`. That is the entity the client attaches its input marker to.
+
+The level geometry moved to `shared`, so both sides collide against the same numbers. They have to:
+where the two disagree, the client's prediction and the server's authority disagree about where a
+player can stand, and every step near the difference becomes a correction the player feels. The
+visible meshes stay in the client, built from the same constants.
+
+Measured across the two processes after 22 metres of walking and strafing, the server's position and
+the client's local simulation agree to the last digit — maximum difference 0.000000. They are
+computed independently; the client's own player is a local entity that replication never touches.
+That identity is the precondition for M4: prediction is only worth doing if replaying an input
+locally lands where the server will.
 
 Lightyear replicates *components*, not snapshots, which is worth stating because it is the opposite
 of how `webgame` worked. There is no per-tick blob of the whole world: each component is registered

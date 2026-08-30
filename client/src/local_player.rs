@@ -49,10 +49,11 @@ pub struct LocalPlayer {
     pub pitch: f32,
 }
 
-/// Input gathered this frame, consumed by the fixed-timestep movement step.
+/// Input gathered this frame, consumed by the fixed-timestep movement step and by the system that
+/// hands it to lightyear for sending.
 #[derive(Resource, Default, Reflect)]
 #[reflect(Resource)]
-struct CurrentInput(PlayerInput);
+pub struct CurrentInput(pub PlayerInput);
 
 /// When set, replaces keyboard input. Used by the harness to drive the player without a human.
 #[derive(Resource, Default, Reflect)]

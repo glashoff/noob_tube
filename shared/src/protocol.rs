@@ -10,8 +10,9 @@
 
 use bevy::prelude::*;
 use lightyear::prelude::*;
+use lightyear::prelude::input::native::InputPlugin;
 
-use crate::player::{Aim, Player, PlayerState};
+use crate::player::{Aim, Player, PlayerInput, PlayerState};
 use crate::types::SharedTypesPlugin;
 
 pub struct ProtocolPlugin;
@@ -26,5 +27,10 @@ impl Plugin for ProtocolPlugin {
         app.component::<Aim>().replicate();
         // Sent once per entity: which peer this player belongs to never changes.
         app.component::<Player>().replicate_once();
+
+        // Inputs travel the other way, client to server. The plugin sends the last N ticks with
+        // every packet rather than one input per packet, so a dropped packet does not cost a tick
+        // of movement — and it keeps the history the client needs to replay after a rollback.
+        app.add_plugins(InputPlugin::<PlayerInput>::default());
     }
 }

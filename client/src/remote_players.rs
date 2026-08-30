@@ -7,14 +7,23 @@
 
 use bevy::prelude::*;
 use lightyear::prelude::*;
+use lightyear::prelude::input::native::{ActionState, InputMarker};
 use noob_tube_shared::movement::{CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS, CAPSULE_Y_OFFSET};
-use noob_tube_shared::player::{Aim, Player, PlayerState};
+use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
+
+use crate::local_player::CurrentInput;
 
 pub struct RemotePlayersPlugin;
 
 impl Plugin for RemotePlayersPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (give_bodies, place_bodies).chain());
+        app.add_systems(Update, (give_bodies, claim_own_player, place_bodies).chain())
+            // Inputs must be written before lightyear packs them for sending, which is what this
+            // system set marks.
+            .add_systems(
+                FixedPreUpdate,
+                send_input.in_set(client::input::InputSystems::WriteClientInputs),
+            );
     }
 }
 
@@ -54,4 +63,38 @@ fn place_bodies(
         transform.translation = state.position + Vec3::Y * CAPSULE_Y_OFFSET;
         transform.rotation = Quat::from_rotation_y(aim.yaw);
     }
+}
+
+/// Update: takes ownership of the player the server says is ours.
+///
+/// `Controlled` arrives on exactly one replicated entity: the one the server marked `ControlledBy`
+/// our connection. That is a better answer than comparing peer ids, because the server decides it
+/// and the client cannot get it wrong.
+///
+/// `InputMarker` tells lightyear which `ActionState` this client fills in, as opposed to the ones it
+/// merely receives for other players.
+fn claim_own_player(
+    mine: Query<(Entity, &Player), (With<client::Remote>, Added<Controlled>)>,
+    mut commands: Commands,
+) {
+    for (entity, player) in mine.iter() {
+        commands
+            .entity(entity)
+            .insert(InputMarker::<PlayerInput>::default());
+        info!("player {} is ours", player.peer);
+    }
+}
+
+/// FixedPreUpdate: hands this tick's input to lightyear.
+///
+/// Writing it into `ActionState` is the whole of sending: the plugin buffers it, packs the last N
+/// ticks into the next packet, and keeps the history that M4's rollback will replay from.
+///
+/// The local player keeps simulating itself in `local_player.rs` as well. For now that is two
+/// simulations running side by side rather than prediction — reconciling them is M4.
+fn send_input(
+    input: Res<CurrentInput>,
+    mut action: Single<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
+) {
+    action.0 = input.0;
 }

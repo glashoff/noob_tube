@@ -1,11 +1,11 @@
-//! The level. For M1 that is one very large flat plane.
+//! What the level looks like.
+//!
+//! Where it *is* lives in `noob_tube_shared::level`, so the server collides against the same
+//! numbers. This module only turns them into meshes.
 
 use bevy::prelude::*;
-use noob_tube_shared::collision::CollisionWorld;
+use noob_tube_shared::level::{self, CRATES, CRATE_HALF_EXTENT, HALF_EXTENT};
 use noob_tube_shared::types::Authored;
-
-/// Half-extent of the ground plane, in metres.
-const HALF_EXTENT: f32 = 250.0;
 
 pub struct WorldPlugin;
 
@@ -28,7 +28,7 @@ impl Plugin for WorldPlugin {
 #[reflect(Component)]
 pub struct Level;
 
-/// Spawns the ground twice: once as a render mesh, once as collision geometry.
+/// Builds the level: meshes for what is seen, plus the shared collision world for what is hit.
 ///
 /// Keeping the two separate is deliberate — real levels use a simplified collision mesh, and
 /// building that split in now means no rework when actual geometry arrives.
@@ -75,41 +75,26 @@ fn spawn_ground(
         ChildOf(level),
     ));
 
-    let mut world = CollisionWorld::new();
-    world.add_trimesh(
-        vec![
-            Vec3::new(-HALF_EXTENT, 0.0, -HALF_EXTENT),
-            Vec3::new(HALF_EXTENT, 0.0, -HALF_EXTENT),
-            Vec3::new(HALF_EXTENT, 0.0, HALF_EXTENT),
-            Vec3::new(-HALF_EXTENT, 0.0, HALF_EXTENT),
-        ],
-        vec![[0, 1, 2], [0, 2, 3]],
-    );
-    // A few boxes to bump into, so collision and sliding are visible at all.
-    let box_mesh = meshes.add(Cuboid::new(2.0, 2.0, 2.0));
+    // A few boxes to bump into. The positions come from `shared`, which is also what the collision
+    // world is built from, so the visible crate and the one you collide with cannot drift apart.
+    let box_mesh = meshes.add(Cuboid::new(
+        CRATE_HALF_EXTENT * 2.0,
+        CRATE_HALF_EXTENT * 2.0,
+        CRATE_HALF_EXTENT * 2.0,
+    ));
     let box_material = materials.add(Color::srgb(0.55, 0.4, 0.3));
-    for (i, offset) in [
-        Vec3::new(6.0, 1.0, -8.0),
-        Vec3::new(-5.0, 1.0, -12.0),
-        Vec3::new(0.0, 1.0, -18.0),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (i, centre) in CRATES.into_iter().enumerate() {
         commands.spawn((
             Name::from(format!("Crate {i}")),
             Authored,
             Mesh3d(box_mesh.clone()),
             MeshMaterial3d(box_material.clone()),
-            Transform::from_translation(offset),
+            Transform::from_translation(centre),
             ChildOf(props),
         ));
-        // `offset` is a world position here, which only holds while the level sits at the identity.
-        world.add_cuboid(offset, Vec3::splat(1.0));
     }
 
-    world.rebuild();
-    commands.insert_resource(world);
+    commands.insert_resource(level::collision_world());
 
     commands.spawn((
         Name::from("Sun"),

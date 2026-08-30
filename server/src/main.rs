@@ -6,7 +6,9 @@
 
 use bevy::prelude::*;
 use lightyear::prelude::*;
-use noob_tube_shared::player::{Aim, Player, PlayerState};
+use lightyear::prelude::input::native::ActionState;
+use noob_tube_shared::level;
+use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
 use noob_tube_shared::protocol::ProtocolPlugin;
 use noob_tube_shared::types::Authored;
 use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, PROTOCOL_ID, SERVER_PORT, tick_duration};
@@ -23,7 +25,12 @@ fn main() {
         })
         // The protocol must be registered after the plugin group and before any Server entity.
         .add_plugins(ProtocolPlugin)
+        .insert_resource(Time::<Fixed>::from_hz(noob_tube_shared::TICK_RATE))
+        // The same geometry the client collides against, built from the same numbers. If the two
+        // disagreed, every step near the difference would produce a correction the player sees.
+        .insert_resource(level::collision_world())
         .add_systems(Startup, start_listening)
+        .add_systems(FixedUpdate, step_players)
         .add_observer(on_client_connected)
         .add_observer(on_peer_connected)
         .add_plugins(remote_inspection())
@@ -108,9 +115,40 @@ fn on_peer_connected(
         Player { peer },
         state,
         Aim::default(),
+        // Where this client's inputs are written once they arrive.
+        ActionState::<PlayerInput>::default(),
         // Replicate is the other half of ReplicationSender: that says the channel may send, this
         // says the entity should be sent.
         Replicate::to_clients(NetworkTarget::All),
+        // Says which connection owns this player. It arrives at that one client as `Controlled`,
+        // which is how a client recognises its own player without comparing peer ids — and it is
+        // what routes that client's inputs to this entity.
+        ControlledBy {
+            owner: trigger.entity,
+            lifetime: Lifetime::SessionBased,
+        },
     ));
     info!("player spawned for peer {peer}");
+}
+
+/// FixedUpdate: advances every player by one tick from the input that arrived for it.
+///
+/// This is the authoritative simulation. It calls the same `apply_input` the client runs locally,
+/// against collision geometry built from the same constants — that identity is what makes client
+/// prediction possible at all in M4. Anything read here that the client cannot also read would show
+/// up as a correction the player feels.
+fn step_players(
+    world: Res<noob_tube_shared::collision::CollisionWorld>,
+    time: Res<Time<Fixed>>,
+    mut players: Query<(&ActionState<PlayerInput>, &mut PlayerState, &mut Aim)>,
+) {
+    let dt = time.delta_secs();
+    for (action, mut state, mut aim) in players.iter_mut() {
+        let input = action.0;
+        state.apply_input(&input, &world, dt);
+        // Aim is not simulated; it is simply what the client reported, forwarded so other clients
+        // can draw where this player looks.
+        aim.yaw = input.yaw;
+        aim.pitch = input.pitch;
+    }
 }

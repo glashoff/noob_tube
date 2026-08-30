@@ -4,6 +4,7 @@
 //! client's prediction replay call [`PlayerState::apply_input`], so it must stay deterministic:
 //! same state plus same input yields the same result, or prediction and authority drift apart.
 
+use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +28,12 @@ pub struct PlayerInput {
     /// Vertical look angle in radians. Does not affect movement, but travels with the input so the
     /// server knows where a shot was aimed.
     pub pitch: f32,
+}
+
+/// Required by lightyear's input plugin. Our input carries no entity references — it is booleans
+/// and two angles — so there is nothing to remap when entity ids differ between peers.
+impl MapEntities for PlayerInput {
+    fn map_entities<M: EntityMapper>(&mut self, _mapper: &mut M) {}
 }
 
 impl PlayerInput {
