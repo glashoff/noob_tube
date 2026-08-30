@@ -20,7 +20,24 @@ fn main() {
         })
         .add_systems(Startup, start_listening)
         .add_observer(on_client_connected)
+        .add_plugins(remote_inspection())
         .run();
+}
+
+/// Live ECS inspection over BRP, compiled in only with `--features remote`.
+///
+/// The server has no window, so this is the only way to look inside it while it runs.
+#[cfg(feature = "remote")]
+fn remote_inspection() -> impl Plugin {
+    noob_tube_shared::remote::RemoteInspectPlugin {
+        port: noob_tube_shared::remote::SERVER_REMOTE_PORT,
+    }
+}
+
+/// Without the feature there is nothing to add, and `()` is a valid empty plugin group.
+#[cfg(not(feature = "remote"))]
+fn remote_inspection() -> impl Plugin {
+    |_: &mut App| {}
 }
 
 /// Binds the UDP socket and starts accepting connections.

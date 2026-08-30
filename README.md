@@ -206,7 +206,8 @@ A Cargo workspace, mirroring how `webgame` splits its code:
 .
 ├── shared/    movement constants, wire protocol   — used by both sides
 ├── client/    rendering, input, prediction        — Bevy with default features
-└── server/    headless, authoritative             — Bevy with default features off
+├── server/    headless, authoritative             — Bevy with default features off
+└── tools/     development helpers, not shipped
 ```
 
 Run them in two terminals:
@@ -215,6 +216,66 @@ Run them in two terminals:
 cargo run -p noob_tube_server
 cargo run -p noob_tube_client
 ```
+
+---
+
+## Looking inside a running build
+
+The `remote` feature serves the [Bevy Remote Protocol](https://docs.rs/bevy_remote), a JSON-RPC
+endpoint that reads and writes the live ECS. It is off by default and must stay that way in
+anything released: the protocol can spawn entities and mutate components, so an enabled endpoint is
+a way into the process, even bound to localhost as it is here.
+
+```bash
+cargo run -p noob_tube_server --features remote   # BRP on 127.0.0.1:15712
+cargo run -p noob_tube_client --features remote   # BRP on 127.0.0.1:15702
+```
+
+The client takes the protocol's default port so third-party tools find it without configuration.
+
+`bevy_remote` is a direct dependency rather than the `bevy/bevy_remote` feature. That feature also
+switches on `serialize` across `bevy_internal`, so turning `remote` on or off would change the
+feature set of nearly every Bevy crate and invalidate the whole cached tree — an eleven minute
+rebuild every time the flag is toggled. The price is keeping the version in lockstep with Bevy's by
+hand, which the facade would have done for us.
+
+This does *not* give the server a wgpu-free build. `bevy_remote` depends on `bevy_dev_tools`
+unconditionally, for `schedule_data`, and that reaches `bevy_core_pipeline` and so `bevy_render`.
+There is no way around it short of forking. What keeps the shipped server headless is that the
+feature is off: without it the server's dependency tree contains no `bevy_render` at all.
+
+`tools/brp` is a dependency-free client for it:
+
+```bash
+tools/brp list                              # registered component types
+tools/brp query noob_tube_client::local_player::LocalPlayer
+tools/brp get <entity> <type>...            # current values
+tools/brp watch <entity> <type>...          # stream every change until interrupted
+tools/brp --port 15712 list                 # the server instead
+```
+
+### Recording what the ECS does
+
+The `+watch` methods hold the connection open and emit one JSON line per change, so redirecting
+`watch` to a file is a recording that can be analysed afterwards. They read Bevy's own change
+detection rather than polling — see `is_changed` in `bevy_remote`'s `builtin_methods.rs` — and
+report removals separately through `RemovedComponents`.
+
+Two limits are worth knowing before trusting a recording:
+
+- Change detection triggers on *mutable access*, not on a changed value. A component written every
+  tick with an identical value is reported as changed every tick.
+- `world.get_components+watch` follows one entity and a fixed list of components. There is no
+  whole-world recorder; several entities mean several streams.
+- Requests are processed once per frame, so a recording is sampled at the frame rate, not the tick
+  rate. Measured against the client: six seconds produced 356 rows where 64 Hz would be 384 ticks,
+  because two ticks falling in one frame collapse into a single report. Good enough to watch a value
+  drift, not good enough to reconstruct a tick-exact history — which is what prediction and rollback
+  will need in M4, and what the harness will have to keep doing.
+
+Nothing shows up over BRP unless the type derives `Reflect` and is registered — a component that
+works perfectly is simply invisible otherwise. `RemoteInspectPlugin` registers the shared types,
+`LocalPlayerPlugin` registers its own.
 
 ---
 

@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Minimal Bevy Remote Protocol client.
+
+BRP is JSON-RPC 2.0 over HTTP POST. Ordinary methods answer once; the `+watch` methods keep the
+connection open and push one JSON object per change, which is what makes recording possible.
+
+Usage:
+  tools/brp list                          registered component types
+  tools/brp query <type>...               entities carrying all of these components
+  tools/brp get <entity> <type>...        one entity's component values
+  tools/brp watch <entity> <type>...      stream changes to those components until interrupted
+  tools/brp <method> '<json params>'      any other method, params passed through
+
+  --port N   default 15702 (client); the server listens on 15712
+"""
+
+import json
+import sys
+import urllib.request
+
+DEFAULT_PORT = 15702
+
+
+def _open(port, method, params):
+    body = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    ).encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    return urllib.request.urlopen(req)
+
+
+def call(port, method, params):
+    """One request, one JSON answer."""
+    return json.load(_open(port, method, params))
+
+
+def watch(port, method, params):
+    """Stream changes until the connection is closed or the process is interrupted."""
+    resp = _open(port, method, params)
+    # A watch response is Server-Sent Events: each change arrives as `data: {json}` followed by a
+    # blank line. Anything else in the stream is SSE framing and not ours to parse.
+    for raw in resp:
+        line = raw.decode("utf-8").rstrip("\n")
+        if line.startswith("data: "):
+            yield json.loads(line[6:])
+
+
+def main(argv):
+    port = DEFAULT_PORT
+    if "--port" in argv:
+        i = argv.index("--port")
+        port = int(argv[i + 1])
+        del argv[i : i + 2]
+
+    if not argv:
+        print(__doc__)
+        return 1
+
+    cmd, rest = argv[0], argv[1:]
+
+    if cmd == "list":
+        method, params, stream = "world.list_components", None, False
+    elif cmd == "query":
+        method = "world.query"
+        params = {"data": {"components": rest}, "filter": {"with": rest}}
+        stream = False
+    elif cmd == "get":
+        method = "world.get_components"
+        params = {"entity": int(rest[0]), "components": rest[1:]}
+        stream = False
+    elif cmd == "watch":
+        method = "world.get_components+watch"
+        params = {"entity": int(rest[0]), "components": rest[1:]}
+        stream = True
+    else:
+        method = cmd
+        params = json.loads(rest[0]) if rest else None
+        stream = method.endswith("+watch")
+
+    if stream:
+        for msg in watch(port, method, params):
+            print(json.dumps(msg.get("result", msg), separators=(",", ":")), flush=True)
+    else:
+        print(json.dumps(call(port, method, params), indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        pass

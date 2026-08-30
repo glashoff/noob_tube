@@ -5,6 +5,7 @@
 //! same state plus same input yields the same result, or prediction and authority drift apart.
 
 use bevy::math::{Vec2, Vec3};
+use bevy::reflect::Reflect;
 
 use crate::collision::CollisionWorld;
 use crate::movement::*;
@@ -13,7 +14,7 @@ use crate::movement::*;
 ///
 /// Only the fields here may influence movement. Anything read from elsewhere — wall-clock time,
 /// frame rate, randomness — would break replay.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect)]
 pub struct PlayerInput {
     pub forward: bool,
     pub backward: bool,
@@ -43,7 +44,7 @@ impl PlayerInput {
 ///
 /// This is the complete rollback snapshot — four fields. Keeping it this small is the point of
 /// having no solver state anywhere.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct PlayerState {
     /// Position of the feet, not the capsule centre.
     pub position: Vec3,

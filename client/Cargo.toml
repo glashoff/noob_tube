@@ -8,3 +8,6 @@ license.workspace = true
 noob_tube_shared = { workspace = true }
 bevy = { workspace = true, features = ["default"] }
 lightyear = { workspace = true }
+
+[features]
+remote = ["noob_tube_shared/remote"]

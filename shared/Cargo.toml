@@ -8,3 +8,9 @@ license.workspace = true
 bevy = { workspace = true }
 lightyear = { workspace = true }
 rapier3d = { workspace = true }
+bevy_remote = { workspace = true, optional = true }
+
+[features]
+# Opens a Bevy Remote Protocol endpoint for live inspection. Off by default: the protocol can
+# mutate the world, not just read it, so it must never reach a release build.
+remote = ["dep:bevy_remote"]

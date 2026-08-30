@@ -29,7 +29,22 @@ fn main() {
         })
         .add_systems(Startup, connect)
         .add_observer(on_connected)
+        .add_plugins(remote_inspection())
         .run();
+}
+
+/// Live ECS inspection over BRP, compiled in only with `--features remote`.
+#[cfg(feature = "remote")]
+fn remote_inspection() -> impl Plugin {
+    noob_tube_shared::remote::RemoteInspectPlugin {
+        port: noob_tube_shared::remote::CLIENT_REMOTE_PORT,
+    }
+}
+
+/// Without the feature there is nothing to add, and `()` is a valid empty plugin group.
+#[cfg(not(feature = "remote"))]
+fn remote_inspection() -> impl Plugin {
+    |_: &mut App| {}
 }
 
 fn connect(mut commands: Commands) {

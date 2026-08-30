@@ -8,6 +8,8 @@ use core::time::Duration;
 pub mod collision;
 pub mod movement;
 pub mod player;
+#[cfg(feature = "remote")]
+pub mod remote;
 
 /// Server simulation rate. Client prediction replays at the same rate.
 pub const TICK_RATE: f64 = 64.0;
