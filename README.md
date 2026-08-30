@@ -363,6 +363,7 @@ stay local.
 
 ```toml
 tick_hz = 64.0             # simulation rate; must match on both sides
+meta_port = 5001           # where the server publishes this config      (server only)
 ping_ms = 100              # simulated round trip; each end delays half of it
 jitter_ms = 10             # random variation on each leg, ± this
 loss = 0.02                # packet loss probability, 0.0 to 1.0
@@ -391,6 +392,44 @@ read by the server alone gives a half-duplex link that behaves like nothing real
 
 Verified: a 64 Hz server and a 64 Hz client connect, a 128/128 pair connects, and a 64 Hz server
 with a 32 Hz client times out instead.
+
+#### Learning the tick rate from the server
+
+A client should not have to be told what the server runs at, so it asks. The server publishes its
+`NetConfig` as TOML — the same language the config file speaks, parsed by the same code — over a
+small HTTP endpoint on `meta_port`, beside the game's UDP socket:
+
+```
+$ curl http://127.0.0.1:5001/
+tick_hz = 128.0
+ping_ms = 0
+...
+```
+
+The client fetches it in `main`, before `App::new`. It has to be that early, and that is the whole
+reason for a second listener rather than sending it over the game connection: the tick rate goes
+into the lightyear plugin group and into `Time<Fixed>` at app-build time, so by the time a
+connection exists the app is already built around a number. lightyear cannot help here — it never
+puts the tick duration on the wire (`SenderMetadata` carries the send interval *in ticks*, which is
+circular), and its `SetTickDuration` trigger is half-finished: the only global observer updates
+`Time<Fixed>` and leaves the `TickDuration` resource that every timeline converts with untouched.
+
+**Only the tick rate is adopted.** Everything else in the served config is either the client's own
+preference — its simulated link, its input rate, how far in the past it draws other players — or
+something lightyear already learns over the wire. A server dictating a client's latency simulation
+would be nonsense.
+
+Measured, with the client always starting at 64 Hz:
+
+| server | endpoint | client says | result |
+|---|---|---|---|
+| 128 Hz | on | *runs 128 Hz, adopting it over our 64* | connects |
+| 64 Hz | on | *agrees on 64 Hz* | connects |
+| 64 Hz | off | *no metadata, keeping our 64 Hz* | connects |
+
+The first row is the point: before the endpoint, that pair could not connect at all.
+
+This is a convenience, not a safety net. The safety net is below, and stays.
 
 `tick_hz` is the one setting both sides must agree on — the server owns the simulation rate and the
 client replays its prediction at it. Two processes reading two files cannot be made to agree, so the

@@ -11,9 +11,13 @@ license = "AGPL-3.0-or-later"
 noob_tube_shared = { path = "shared" }
 bevy = { version = "0.19.1", default-features = false, features = ["serialize"] }
 serde = { version = "1", features = ["derive"] }
-# Only for the network config file. Chosen over RON because the file is meant to be edited by
-# hand between rounds, and TOML is the format a Rust developer already has in front of them.
-toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+# Logging from the metadata thread, which runs outside the ECS. Bevy's `info!` and friends come
+# from bevy_log, which the shared crate does not pull in — it builds bevy with default features off.
+tracing = "0.1"
+# The network config: read from a file, and served over the metadata endpoint so a client can
+# adopt the server's tick rate. Chosen over RON because the file is meant to be edited by hand
+# between rounds, and TOML is the format a Rust developer already has in front of them.
+toml = { version = "0.9", default-features = false, features = ["parse", "display", "serde"] }
 lightyear = { version = "0.29", features = ["udp", "netcode", "input_native"] }
 # Taken as a subcrate rather than through `bevy/bevy_remote`, because that feature also switches on
 # `serialize` across bevy_internal: toggling `remote` would then invalidate the whole cached Bevy
@@ -30,7 +34,14 @@ rapier3d = "=0.35.0-glamx0.2"
 
 [profile.dev]
 opt-level = 1
+# Enough debug info to keep the file and line in a panic, and nothing else. Full debug info is for
+# a debugger, and dominates the build directory: every cached feature combination of the Bevy tree
+# carries its own copy, which is how `target/` reached 113 GB and filled the disk twice.
+debug = "line-tables-only"
 
 # Dependencies stay optimised in dev builds — physics and networking are unusable otherwise.
 [profile.dev.package."*"]
 opt-level = 3
+# And carry no debug info at all. A backtrace through Bevy or lightyear loses its line numbers;
+# panics in our own code, which is where the ones worth reading come from, keep theirs.
+debug = false

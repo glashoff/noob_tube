@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::Resource;
 use lightyear::prelude::*;
 use lightyear::prelude::input;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Where the config is looked for when `NOOB_TUBE_CONFIG` says nothing.
 pub const DEFAULT_CONFIG_PATH: &str = "noob_tube.toml";
@@ -52,7 +52,7 @@ pub const DEFAULT_CONFIG_PATH: &str = "noob_tube.toml";
 /// `deny_unknown_fields` is deliberate. A misspelled key that silently does nothing is the same
 /// failure as a conditioner that was never applied: the run looks fine and every number from it is
 /// wrong. Better to refuse to start.
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct NetConfig {
     /// How often the simulation steps, in Hz.
@@ -142,6 +142,12 @@ pub struct NetConfig {
     /// Lightyear's default is 1.0 — exactly one tick, the least that can work: below it the server
     /// would sometimes simulate tick `T` before the input for `T` arrived.
     pub min_client_lead_ticks: f32,
+    /// TCP port for the metadata endpoint, beside the game's UDP socket.
+    ///
+    /// The server publishes its config there so a client can adopt the tick rate before building
+    /// its app; see [`crate::metadata`]. Zero switches it off — the client then keeps whatever its
+    /// own file says, and a disagreement shows up as a refused connection.
+    pub meta_port: u16,
     /// How many multiples of the measured jitter to add to the client's lead.
     ///
     /// The margin covers `jitter × this`, so it is a bet on how many packets arrive in time: 1
@@ -170,6 +176,8 @@ impl Default for NetConfig {
             // Lightyear's `SyncConfig` defaults.
             min_client_lead_ticks: 1.0,
             jitter_safety_multiple: 4,
+            // Beside SERVER_PORT, which is UDP; the two do not collide.
+            meta_port: crate::SERVER_PORT + 1,
         }
     }
 }
@@ -235,6 +243,7 @@ impl NetConfig {
         env_parse("NOOB_TUBE_MAX_PREDICTED_TICKS", &mut self.max_predicted_ticks);
         env_parse("NOOB_TUBE_MIN_CLIENT_LEAD_TICKS", &mut self.min_client_lead_ticks);
         env_parse("NOOB_TUBE_JITTER_SAFETY_MULTIPLE", &mut self.jitter_safety_multiple);
+        env_parse("NOOB_TUBE_META_PORT", &mut self.meta_port);
     }
 
     /// The link conditioner for this process, or `None` when nothing is being simulated.
@@ -251,6 +260,17 @@ impl NetConfig {
             .with_incoming_jitter(Duration::from_millis(self.jitter_ms))
             .with_fixed_loss(self.loss.clamp(0.0, 1.0));
         Some(RecvLinkConditioner::new(config))
+    }
+
+    /// Adopts the parts of a server's config that the client has no business choosing.
+    ///
+    /// Only the tick rate. Everything else here is either the client's own preference (its
+    /// simulated link, its input rate, how far in the past it draws other players) or something
+    /// lightyear already learns over the wire (the server's send interval, which arrives as
+    /// `SenderMetadata`). Copying the lot would mean a server dictating a client's own latency
+    /// simulation, which is nonsense.
+    pub fn adopt_from_server(&mut self, server: &NetConfig) {
+        self.tick_hz = server.tick_hz;
     }
 
     /// One tick.
@@ -479,6 +499,35 @@ mod tests {
     #[should_panic(expected = "min_client_lead_ticks")]
     fn a_lead_below_one_tick_is_refused() {
         NetConfig { min_client_lead_ticks: 0.5, ..default_config() }.validate();
+    }
+
+    /// The whole point of the metadata endpoint, and its whole limit: the tick rate crosses, the
+    /// client's own preferences do not.
+    #[test]
+    fn only_the_tick_rate_is_adopted() {
+        let server = NetConfig {
+            tick_hz: 128.0,
+            ping_ms: 300,
+            cmd_hz: 20.0,
+            interp_ratio: 4.0,
+            ..default_config()
+        };
+        let mut client = NetConfig { tick_hz: 64.0, ping_ms: 50, ..default_config() };
+
+        client.adopt_from_server(&server);
+
+        assert_eq!(client.tick_hz, 128.0, "the tick rate has to cross");
+        assert_eq!(client.ping_ms, 50, "the server does not choose our link simulation");
+        assert_eq!(client.cmd_hz, default_config().cmd_hz);
+        assert_eq!(client.interp_ratio, default_config().interp_ratio);
+    }
+
+    /// The endpoint speaks the same TOML the config file does, so a round trip must be lossless.
+    #[test]
+    fn the_config_survives_a_round_trip() {
+        let original = NetConfig { tick_hz: 128.0, ping_ms: 70, cmd_hz: 20.0, ..default_config() };
+        let text = toml::to_string(&original).unwrap();
+        assert_eq!(toml::from_str::<NetConfig>(&text).unwrap(), original);
     }
 
     #[test]

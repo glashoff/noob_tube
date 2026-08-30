@@ -28,6 +28,20 @@
 # wall-clock error.
 tick_hz = 64.0
 
+# TCP port where the server publishes this config, beside the game's UDP socket.
+#
+# A client fetches it before building its app and adopts the tick rate — and only the tick rate.
+# Everything else here is either its own preference (its simulated link, its input rate, how far in
+# the past it draws others) or something lightyear already learns over the wire.
+#
+# This has to be an endpoint of its own because the tick rate is needed before there is a
+# connection: it goes into the lightyear plugin group and into Time<Fixed> at app-build time.
+# lightyear never puts it on the wire, and its SetTickDuration trigger only updates Time<Fixed>,
+# leaving the TickDuration resource every timeline converts with untouched.
+#
+# 0 switches it off; the client then keeps its own rate and a disagreement is a refused connection.
+meta_port = 5001
+
 # Simulated round trip, in milliseconds. Each end delays half of it. 0 leaves the link untouched.
 ping_ms = 0
 

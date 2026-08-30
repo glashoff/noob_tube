@@ -13,7 +13,7 @@ use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, SERVER_PORT};
 use std::net::{Ipv4Addr, SocketAddr};
 
 fn main() {
-    let net = noob_tube_shared::tuning::NetConfig::load();
+    let net = configure();
 
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -49,6 +49,45 @@ fn main() {
         .add_plugins(remote_inspection())
         .add_plugins(world_inspector())
         .run();
+}
+
+/// Reads our own settings, then asks the server for the one it owns.
+///
+/// The tick rate has to be settled before `App::new`, because it goes into the lightyear plugin
+/// group and into `Time<Fixed>`. That is the whole reason the server publishes a metadata endpoint
+/// rather than sending it over the game connection: by the time a connection exists, the app is
+/// already built around a number.
+///
+/// A server that does not answer is not an error — plenty will not have the endpoint, and a
+/// disagreement still fails safely, as a refused connection rather than a desync. Which of the two
+/// happened is worth saying out loud either way.
+///
+/// `println!` rather than `info!`, and this is the one place it is right: all of this happens
+/// before `App::new`, so `LogPlugin` has not installed a tracing subscriber and every `info!` here
+/// would go nowhere at all.
+fn configure() -> NetConfig {
+    let mut net = NetConfig::load();
+    if net.meta_port == 0 {
+        return net;
+    }
+
+    let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), net.meta_port);
+    match noob_tube_shared::metadata::fetch(addr) {
+        Some(server) => {
+            let ours = net.tick_hz;
+            net.adopt_from_server(&server);
+            if net.tick_hz == ours {
+                println!("server at {addr} agrees on {} Hz", net.tick_hz);
+            } else {
+                println!("server at {addr} runs {} Hz, adopting it over our {ours}", net.tick_hz);
+            }
+        }
+        None => println!(
+            "no metadata from {addr}, keeping our {} Hz — a mismatch will refuse to connect",
+            net.tick_hz
+        ),
+    }
+    net
 }
 
 /// Live ECS inspection over BRP, compiled in only with `--features remote`.

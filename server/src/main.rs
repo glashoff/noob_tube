@@ -20,6 +20,7 @@ fn main() {
     // Read once, at startup, before anything can ask for it.
     let net = NetConfig::load();
 
+
     App::new()
         .add_plugins(MinimalPlugins)
         // lightyear registers states; MinimalPlugins does not include StatesPlugin.
@@ -38,7 +39,7 @@ fn main() {
         // The same geometry the client collides against, built from the same numbers. If the two
         // disagreed, every step near the difference would produce a correction the player sees.
         .insert_resource(level::collision_world())
-        .add_systems(Startup, start_listening)
+        .add_systems(Startup, (start_listening, publish_metadata))
         .add_systems(FixedUpdate, simulation::step_players::<()>)
         .add_observer(on_client_connected)
         .add_observer(on_peer_connected)
@@ -83,6 +84,17 @@ fn start_listening(net: Res<NetConfig>, mut commands: Commands) {
     commands.trigger(server::Start { entity: server });
     info!("listening on {addr}");
     info!("{}", net.describe());
+}
+
+/// Startup: publishes the config beside the game socket, so a client can adopt the tick rate
+/// before it builds its app.
+///
+/// A Startup system rather than a plain call from `main`, only so that its log line has somewhere
+/// to go: the tracing subscriber arrives with `LogPlugin`, inside the App. Zero switches it off.
+fn publish_metadata(net: Res<NetConfig>) {
+    if net.meta_port != 0 {
+        noob_tube_shared::metadata::serve(*net, net.meta_port);
+    }
 }
 
 /// Fires once per incoming connection. Lightyear spawns a child entity carrying `LinkOf` for each

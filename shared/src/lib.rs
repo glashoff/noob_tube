@@ -6,6 +6,7 @@
 
 pub mod collision;
 pub mod level;
+pub mod metadata;
 pub mod movement;
 pub mod player;
 pub mod protocol;
