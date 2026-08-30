@@ -1,0 +1,11 @@
+[package]
+name = "noob_tube_server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Headless: no rendering, no windowing, no audio. Bevy's default features stay off.
+[dependencies]
+noob_tube_shared = { workspace = true }
+bevy = { workspace = true, features = ["bevy_log", "bevy_state"] }
+lightyear = { workspace = true }

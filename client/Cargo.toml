@@ -1,0 +1,10 @@
+[package]
+name = "noob_tube_client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+noob_tube_shared = { workspace = true }
+bevy = { workspace = true, features = ["default"] }
+lightyear = { workspace = true }

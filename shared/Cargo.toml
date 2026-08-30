@@ -1,0 +1,10 @@
+[package]
+name = "noob_tube_shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bevy = { workspace = true }
+lightyear = { workspace = true }
+rapier3d = { workspace = true }
