@@ -21,6 +21,9 @@ pub struct LocalPlayerPlugin;
 impl Plugin for LocalPlayerPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<LocalPlayer>()
+            .register_type::<CurrentInput>()
+            .register_type::<ScriptedInput>()
+            .register_type::<MovementTicks>()
             .init_resource::<CurrentInput>()
             .init_resource::<ScriptedInput>()
             .init_resource::<MovementTicks>()
@@ -45,15 +48,21 @@ pub struct LocalPlayer {
 }
 
 /// Input gathered this frame, consumed by the fixed-timestep movement step.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 struct CurrentInput(PlayerInput);
 
 /// When set, replaces keyboard input. Used by the harness to drive the player without a human.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct ScriptedInput(pub Option<PlayerInput>);
 
 /// Diagnostics: how many times the fixed movement step has actually run.
-#[derive(Resource, Default)]
+///
+/// Registered for reflection so it can be read over BRP while the game runs. A stalled simulation
+/// and a stalled player look identical from outside; this is what tells them apart.
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
 pub struct MovementTicks(pub u64);
 
 /// Startup: creates the one entity that is both the player and the camera.

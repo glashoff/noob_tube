@@ -9,6 +9,8 @@ Usage:
   tools/brp query <type>...               entities carrying all of these components
   tools/brp get <entity> <type>...        one entity's component values
   tools/brp watch <entity> <type>...      stream changes to those components until interrupted
+  tools/brp resources                     registered resource types
+  tools/brp resource <type>               one resource's value
   tools/brp <method> '<json params>'      any other method, params passed through
 
   --port N   default 15702 (client); the server listens on 15712
@@ -72,6 +74,11 @@ def main(argv):
         method = "world.get_components"
         params = {"entity": int(rest[0]), "components": rest[1:]}
         stream = False
+    elif cmd == "resources":
+        method, params, stream = "world.list_resources", None, False
+    elif cmd == "resource":
+        # Unlike components, this takes one type per call — the method has no plural form.
+        method, params, stream = "world.get_resources", {"resource": rest[0]}, False
     elif cmd == "watch":
         method = "world.get_components+watch"
         params = {"entity": int(rest[0]), "components": rest[1:]}

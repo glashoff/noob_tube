@@ -233,6 +233,16 @@ cargo run -p noob_tube_client --features remote   # BRP on 127.0.0.1:15702
 
 The client takes the protocol's default port so third-party tools find it without configuration.
 
+A second instance on the same port fails to bind **silently** — no log line, no warning. Queries
+then answer from whichever process got there first, which may be a stale build still running from
+an earlier session. If a value looks impossible, check who actually owns the port before suspecting
+the code:
+
+```bash
+ss -ltnp | grep 15702
+readlink -f /proc/<pid>/exe    # `(deleted)` means the binary has been rebuilt since
+```
+
 `bevy_remote` is a direct dependency rather than the `bevy/bevy_remote` feature. That feature also
 switches on `serialize` across `bevy_internal`, so turning `remote` on or off would change the
 feature set of nearly every Bevy crate and invalidate the whole cached tree — an eleven minute
