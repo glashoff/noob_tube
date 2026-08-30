@@ -11,6 +11,8 @@ use noob_tube_shared::simulation;
 use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::level;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
+use noob_tube_shared::collision::CollisionWorld;
+use noob_tube_shared::shooting::{self, Health};
 use noob_tube_shared::protocol::ProtocolPlugin;
 use noob_tube_shared::types::Authored;
 use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, SERVER_PORT};
@@ -40,14 +42,83 @@ fn main() {
         // disagreed, every step near the difference would produce a correction the player sees.
         .insert_resource(level::collision_world())
         .add_systems(Startup, (start_listening, publish_metadata))
-        .add_systems(FixedUpdate, simulation::step_players::<()>)
+        .add_systems(
+            FixedUpdate,
+            // Before the step, which consumes the trigger by starting the cooldown, and which
+            // moves everyone. A shot has to be resolved against the positions its shooter was
+            // looking at, not the ones a tick of movement later.
+            (resolve_shots, simulation::step_players::<()>).chain(),
+        )
         .add_observer(on_client_connected)
         .add_observer(on_peer_connected)
         .add_plugins(remote_inspection())
         .run();
 }
 
-/// Live ECS inspection over BRP, compiled in only with `--features remote`.
+/// Which spawn point a player returns to. Server-side, never replicated.
+#[derive(Component, Clone, Copy)]
+struct SpawnIndex(usize);
+
+/// FixedUpdate: fires every trigger that is down and ready, and applies the damage.
+///
+/// Server only. The client predicts its own cooldown, so the weapon answers the trigger without
+/// waiting for a round trip, but whether anyone was *hit* is decided here and only here.
+///
+/// Two passes, because a shooter cannot hold everyone else's health mutably while looking for a
+/// target. The first reads; the second writes.
+fn resolve_shots(
+    world: Res<CollisionWorld>,
+    // A ParamSet because the two halves both want `PlayerState` — the first to aim at, the second
+    // to respawn. Bevy refuses two queries with overlapping mutable access held at once, and it is
+    // right to: the reads below finish before any write starts, but nothing in the signature says
+    // so. The set makes that ordering explicit instead of asserted.
+    mut players: ParamSet<(
+        Query<(Entity, &PlayerState, &Aim, &ActionState<PlayerInput>, &Player)>,
+        Query<(&mut Health, &mut PlayerState, &Player, &SpawnIndex)>,
+    )>,
+) {
+    // Everyone who could be hit, gathered once rather than once per shooter.
+    let targets: Vec<(Entity, Vec3, bool)> = players
+        .p0()
+        .iter()
+        .map(|(entity, state, ..)| (entity, state.position, state.crouching))
+        .collect();
+
+    let mut hits: Vec<(Entity, u64)> = Vec::new();
+    for (shooter, state, aim, action, player) in players.p0().iter() {
+        if !state.is_firing(&action.0) {
+            continue;
+        }
+        let (origin, direction) = shooting::aim_ray(state.eye_position(), aim.yaw, aim.pitch);
+        // Everyone but the shooter. Left in, they would hit themselves at zero distance.
+        let others = targets.iter().copied().filter(|(entity, ..)| *entity != shooter);
+        if let Some((hit, distance)) = shooting::resolve(&world, origin, direction, others) {
+            debug!("peer {} hit at {distance:.1} m", player.peer);
+            hits.push((hit, player.peer));
+        }
+    }
+
+    for (target, shooter) in hits {
+        let mut wounded = players.p1();
+        let Ok((mut health, mut state, player, spawn)) = wounded.get_mut(target) else {
+            continue;
+        };
+        if !health.hurt(shooting::WEAPON_DAMAGE) {
+            continue;
+        }
+        info!("peer {shooter} killed peer {}", player.peer);
+        // Respawning by overwriting the state is the whole of death for now: no ragdoll, no
+        // delay, no score. The killed client's prediction disagrees for one round trip and then
+        // rolls back to here, which is exactly the correction rollback exists for.
+        *health = Health::default();
+        *state = PlayerState {
+            position: level::spawn_point(spawn.0),
+            ..PlayerState::default()
+        };
+    }
+}
+
+/// FixedUpdate: advances every player by one tick, compiled in only with `--features remote`.
 ///
 /// The server has no window, so this is the only way to look inside it while it runs.
 #[cfg(feature = "remote")]
@@ -129,15 +200,20 @@ fn on_peer_connected(
         return;
     };
 
+    // Reused on every respawn, so a player always comes back where they started. Server-side
+    // only — a client has no use for it.
+    let spawn = SpawnIndex(players.iter().count());
     let mut state = PlayerState::default();
-    state.position = level::spawn_point(players.iter().count());
+    state.position = level::spawn_point(spawn.0);
 
     commands.spawn((
         Name::from(format!("Player {peer}")),
         Authored,
         Player { peer },
+        spawn,
         state,
         Aim::default(),
+        Health::default(),
         // Where this client's inputs are written once they arrive.
         ActionState::<PlayerInput>::default(),
         // Replicate is the other half of ReplicationSender: that says the channel may send, this

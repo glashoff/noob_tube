@@ -222,6 +222,18 @@ impl CollisionWorld {
         Some(origin.y - toi)
     }
 
+    /// Distance to the first piece of level geometry along a ray, if any within `max_distance`.
+    ///
+    /// What a shot stops at. Players are not in this world — it holds the level and nothing else —
+    /// so a hitscan tests this for the wall behind the target and the target's own capsule
+    /// separately, and takes whichever is nearer.
+    pub fn raycast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<f32> {
+        let ray = Ray::new(origin.into(), direction.into());
+        self.query()
+            .cast_ray(&ray, max_distance, true)
+            .map(|(_, toi)| toi)
+    }
+
     /// True when there is room to stand up from a crouch.
     ///
     /// Only the section a standing capsule adds on top needs to be clear, so this sweeps a ball of

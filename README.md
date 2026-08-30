@@ -770,10 +770,36 @@ each client — the server only replicates that the player died.
 
 **Two players fighting each other on the plane completes the first step.**
 
+Firing travels as a bool in `PlayerInput`, which buys three things at once: it is stamped with the
+tick it belongs to, it inherits the input redundancy so a lost packet does not swallow a shot, and
+the tick number is exactly what lag compensation will need to rewind to.
+
+The rate of fire is `PlayerState::fire_cooldown`, in the rollback snapshot with everything else. It
+has to be predicted — the client's own answer to "can I shoot yet" cannot wait for a round trip, or
+the weapon feels disconnected from the trigger. What is *not* predicted is `Health`. A client
+guessing that its shot landed would have to un-kill someone on screen when the server disagreed, and
+there is no graceful way to do that.
+
+`resolve_shots` runs before `step_players` in `FixedUpdate`, so a shot resolves against the
+positions its shooter was looking at rather than the ones a tick of movement later — and so the
+cooldown check sees the trigger before `apply_input` consumes it.
+
+Measured with two clients 2 m apart, one holding fire:
+
+```
+target health over 2.5 s:
+32 -> 100 -> 66 -> 32 -> 100 -> 66 -> 32 -> 100 -> 66 -> 32 -> ...
+6 respawns
+```
+
+Three shots to kill, respawn at the player's own spawn point. Turned 90° away with the trigger still
+held, health stops moving.
+
 Hit detection here is *not* lag-compensated — the server tests against the position it currently
 holds, not against what the shooter saw. Against moving targets that means visibly needing to lead
-your shots. Fixing it needs a position history on the server to rewind into, plus the client reporting its
-interpolation delay — lightyear has `InputConfig::lag_compensation` for exactly this, currently off.
+your shots. Fixing it needs a position history on the server to rewind into, plus the client
+reporting its interpolation delay — lightyear has `InputConfig::lag_compensation` for exactly this,
+currently off.
 
 ### M4 — Prediction ✔
 The local player is simulated on the client without waiting for the round trip, and reconciled

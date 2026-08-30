@@ -23,6 +23,9 @@ pub struct PlayerInput {
     pub right: bool,
     pub jump: bool,
     pub crouch: bool,
+    /// Held, not tapped. The rate of fire comes from [`PlayerState::fire_cooldown`], so holding the
+    /// button produces a steady stream rather than one shot per tick.
+    pub fire: bool,
     /// Horizontal look angle in radians. Movement is relative to it.
     pub yaw: f32,
     /// Vertical look angle in radians. Does not affect movement, but travels with the input so the
@@ -66,6 +69,12 @@ pub struct PlayerState {
     pub velocity: Vec3,
     pub on_ground: bool,
     pub crouching: bool,
+    /// Ticks until this player may fire again.
+    ///
+    /// In the rollback snapshot on purpose. It is the client's own answer to "can I shoot yet",
+    /// and it has to be predicted for the weapon to feel connected to the trigger; leaving it to
+    /// the server would put a round trip between the click and the shot.
+    pub fire_cooldown: u8,
 }
 
 impl Default for PlayerState {
@@ -75,6 +84,7 @@ impl Default for PlayerState {
             velocity: Vec3::ZERO,
             on_ground: true,
             crouching: false,
+            fire_cooldown: 0,
         }
     }
 }
@@ -113,8 +123,23 @@ impl PlayerState {
         self.position + Vec3::Y * self.eye_height()
     }
 
+    /// True when the trigger is down and the weapon is ready.
+    ///
+    /// Read *before* [`apply_input`](Self::apply_input) consumes it: that call starts the cooldown,
+    /// so afterwards the answer is always no.
+    pub fn is_firing(&self, input: &PlayerInput) -> bool {
+        input.fire && self.fire_cooldown == 0
+    }
+
     /// Advances one tick.
     pub fn apply_input(&mut self, input: &PlayerInput, world: &CollisionWorld, dt: f32) {
+        // Before the stance changes, so a shot uses the stance it was aimed from.
+        if self.is_firing(input) {
+            self.fire_cooldown = crate::shooting::FIRE_INTERVAL_TICKS;
+        } else {
+            self.fire_cooldown = self.fire_cooldown.saturating_sub(1);
+        }
+
         self.update_stance(input, world);
 
         let speed = if self.crouching {

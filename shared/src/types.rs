@@ -7,6 +7,7 @@
 use bevy::prelude::*;
 
 use crate::player::{Aim, Player, PlayerInput, PlayerState};
+use crate::shooting::Health;
 
 /// Marks an entity spawned by this project, as opposed to one a Bevy plugin created.
 ///
@@ -53,6 +54,7 @@ impl Plugin for SharedTypesPlugin {
             .register_type::<PlayerInput>()
             .register_type::<PlayerState>()
             .register_type::<Aim>()
-            .register_type::<Player>();
+            .register_type::<Player>()
+            .register_type::<Health>();
     }
 }

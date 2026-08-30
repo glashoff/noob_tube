@@ -205,15 +205,21 @@ fn look(
 /// `keys.pressed` reports the key being held, not the moment it went down, which is what a movement
 /// step wants: holding W has to keep producing forward intent on every tick.
 ///
-/// [`ScriptedInput`] overrides the keyboard when the harness drives the player. The look angles are
-/// taken from the player either way, so a script can steer by writing `yaw` while leaving the rest
-/// of the input alone.
+/// [`ScriptedInput`] overrides the keyboard and the mouse when the harness drives the player. The
+/// look angles are taken from the player either way, so a script can steer by writing `yaw` while
+/// leaving the rest of the input alone.
 fn sample_input(
     keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     player: Single<&LocalPlayer>,
     scripted: Res<ScriptedInput>,
     mut input: ResMut<CurrentInput>,
 ) {
+    // The same left click both grabs the cursor and fires, so firing waits until the cursor is
+    // already grabbed. Otherwise the click that gives the window focus also empties a round into
+    // whatever the camera happened to be pointing at.
+    let firing = mouse.pressed(MouseButton::Left) && cursor.grab_mode != CursorGrabMode::None;
     if let Some(scripted) = scripted.0 {
         input.0 = PlayerInput { yaw: player.yaw, pitch: player.pitch, ..scripted };
         return;
@@ -225,6 +231,7 @@ fn sample_input(
         right: keys.pressed(KeyCode::KeyD),
         jump: keys.pressed(KeyCode::Space),
         crouch: keys.pressed(KeyCode::ControlLeft),
+        fire: firing,
         yaw: player.yaw,
         pitch: player.pitch,
     };

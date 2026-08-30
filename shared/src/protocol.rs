@@ -14,6 +14,7 @@ use lightyear::prelude::input::native::InputPlugin;
 use std::f32::consts::{PI, TAU};
 
 use crate::player::{Aim, Player, PlayerInput, PlayerState};
+use crate::shooting::Health;
 use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
 
@@ -49,6 +50,10 @@ impl Plugin for ProtocolPlugin {
             .add_interpolation_with(lerp_aim);
         // Sent once per entity: which peer this player belongs to never changes.
         app.component::<Player>().replicate_once();
+        // Health is the server's alone. A client predicting whether its shot landed would have to
+        // un-kill someone on screen when the server disagreed, and there is no graceful way to do
+        // that — so this only ever arrives.
+        app.component::<Health>().replicate();
 
         // Inputs travel the other way, client to server. The plugin sends the last N packets'
         // worth of ticks with every message rather than one input per message, so a dropped packet
@@ -78,6 +83,7 @@ fn lerp_player_state(start: PlayerState, end: PlayerState, t: f32) -> PlayerStat
         velocity: start.velocity.lerp(end.velocity, t),
         on_ground: start.on_ground,
         crouching: start.crouching,
+        fire_cooldown: start.fire_cooldown,
     }
 }
 
@@ -164,12 +170,14 @@ mod tests {
             velocity: Vec3::ZERO,
             on_ground: true,
             crouching: false,
+            fire_cooldown: 0,
         };
         let end = PlayerState {
             position: Vec3::new(4.0, 0.0, 0.0),
             velocity: Vec3::new(8.0, 0.0, 0.0),
             on_ground: false,
             crouching: true,
+            fire_cooldown: 4,
         };
 
         let middle = lerp_player_state(start, end, 0.5);
