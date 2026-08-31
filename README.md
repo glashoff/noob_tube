@@ -1273,11 +1273,20 @@ was from the simulated one, worst frame of the last second, amber past half the 
 A number that exists only in a log after the fact cannot be compared with "that felt wrong just
 then". F3 hides it.
 
-It is one number rather than a breakdown, and that was a correction. It showed the total and "how
-much of it is smoothing" until a run reported a share *larger* than the whole: the smoothing offset
-and frame interpolation's one tick of delay point in different directions the moment the player
-turns, and vectors at an angle do not add like numbers. The colour carries the smoothing part
-instead, where it cannot be read as arithmetic.
+Two figures side by side, neither claimed to be part of the other — which was the mistake the first
+version made. It read "X behind, Y of that smoothing" and reported a share *larger* than the whole,
+because the smoothing offset and frame interpolation's one tick of delay point in different
+directions the moment the player turns, and vectors at an angle do not add like numbers.
+
+They answer different questions, and only one of them is a fault. **Behind** is the whole distance
+between the drawn player and the simulated one, and on a link with no corrections at all it is not
+zero — which is the thing that surprises people. It is one tick of movement, what frame
+interpolation costs by design. Measured on a perfect link: walking at 5.50 m/s gives 8.5 cm against
+a tick's 8.59, crouching at 2.60 m/s gives 3.9 against 4.06, and standing still gives 0.00. It
+scales with speed and vanishes when you stop, because it is a delay rather than an error — and it is
+0.00 even while walking into a wall at full velocity, which is how the first attempt at this
+measurement managed to report nothing at all. **Correction** is the part left over from a rollback,
+and it stays at zero until the client guesses wrong.
 
 None of this touches the simulation. Both the frame blend and the smoothing write into the live
 `PlayerState` in `PostUpdate`, and `RunFixedMainLoop` restores the simulated value before the next

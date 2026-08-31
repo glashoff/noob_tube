@@ -8,11 +8,22 @@
 //! what they are while somebody is playing, next to the thing they are judging. A number that only
 //! exists in a log after the fact cannot be compared with "that felt wrong just then".
 //!
-//! One figure, not a breakdown. It was two for a while — the total and "how much of it is
-//! smoothing" — and that reads as a decomposition, which it is not: the smoothing offset and the
-//! one tick of frame-interpolation delay point in different directions as soon as the player turns,
-//! so the share came out *larger* than the whole. Vectors at an angle do not add like numbers. The
-//! colour carries the smoothing part instead, where it cannot be read as arithmetic.
+//! Two figures, side by side, neither claimed to be part of the other — which was the mistake the
+//! first version made. It read "X behind, Y of that smoothing", and the share came out *larger* than
+//! the whole: the smoothing offset and the one tick of frame-interpolation delay point in different
+//! directions the moment the player turns, and vectors at an angle do not add like numbers.
+//!
+//! They answer different questions, and only one of them is a fault.
+//!
+//! **Behind** is the whole distance between the drawn player and the simulated one. On a link with
+//! no corrections at all it is not zero, and that surprises people: it is one tick of movement,
+//! which is what frame interpolation costs by design. Measured on a perfect link — 5.50 m/s gives
+//! 8.5 cm against a tick's 8.59, crouching at 2.60 m/s gives 3.9 against 4.06, and standing still
+//! gives 0.00. It scales with speed and vanishes when you stop, because it is a *delay*, not an
+//! error.
+//!
+//! **Correction** is the part left over from a rollback, the one [`VIEW_LEASH`](crate::local_player)
+//! governs, and the one that is zero until the client guesses wrong.
 
 use bevy::prelude::*;
 
@@ -86,8 +97,11 @@ fn update_readout(
     let (mut text, mut colour) = readout.into_inner();
     let smoothing = corrections.smoothing_last_second;
     text.0 = format!(
-        "view off by {:.1} cm  (worst frame in the last second)",
+        // ASCII only: the default font has no glyph for a middle dot, and a missing glyph draws
+        // as an empty box rather than as nothing.
+        "view {:.1} cm behind  |  correction {:.1} cm   (worst frame in the last second)",
         corrections.lag_last_second * 100.0,
+        smoothing * 100.0,
     );
     colour.0 = if smoothing >= VIEW_LEASH * 0.99 {
         // On the leash: corrections are arriving faster than they are being paid off, and what is
