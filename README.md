@@ -133,11 +133,12 @@ vehicle is not expressible at all. Avian's collider trees update incrementally a
 static geometry in a tree of its own, and — through `lightyear_avian3d` — comes with the rollback
 integration that made the solver affordable in the first place.
 
-`shared/tests/avian_matches_rapier.rs` holds the migration to account while both are in the tree:
-every query the movement code makes is asked of both engines. Rays agree to the last decimal place.
-Capsule sweeps agree horizontally and differ vertically by design, because Avian's move-and-slide
-runs depenetration passes that hold the capsule a skin width clear of a surface where rapier's let
-it rest.
+The migration was held to account by a test that asked both engines every query the movement code
+makes, kept while both were in the tree. Rays agreed to the last decimal place; capsule sweeps
+agreed horizontally and differed vertically by design, because Avian's move-and-slide runs
+depenetration passes that hold the capsule a skin width clear of a surface where rapier's let it
+rest. Pushed diagonally into a crate's corner rapier squeezed the capsule 7 cm upwards and Avian
+does not, which is a way of climbing a box we are glad to lose. rapier is gone and so is the test.
 
 **Ragdolls — client-only, cosmetic.** When a player dies the body falls under its own simulation.
 That carries state by definition, and it does not matter: it never touches gameplay, is never
@@ -201,19 +202,29 @@ Level collision uses a **separate, simplified mesh**, not the render mesh — th
 
 ```
 GLB → Bevy Mesh asset → ATTRIBUTE_POSITION + indices
-    → ColliderBuilder::trimesh → ColliderSet
-    → QueryPipeline::update()        once, then immutable
+    → Collider::trimesh → an entity with RigidBody::Static
 ```
 
-**Use the `=0.35.0-glamx0.2` build of rapier.** rapier and parry are compiled against glam, but
-which glam matters: the plain 0.35.3 release uses glam 0.33 while Bevy 0.19 uses 0.32, so every
-vector would need translating at the boundary. The `-glamx0.2` build — the one `bevy_rapier3d`
-depends on — is compiled against glam 0.32, which makes `rapier3d::math::Vector` literally
-`bevy::math::Vec3`. A test in `shared/src/lib.rs` asserts this so a careless version bump fails
-loudly instead of silently costing conversions everywhere.
+Colliders are ECS entities, so the acceleration structure maintains itself: Avian keeps static,
+kinematic and dynamic bodies in separate trees and refits them as things move. That is what the
+first version could not do at all — its BVH was built once and no collider in it could ever move.
 
-The BVH is built by calling `BroadPhaseBvh::update` directly. rapier supports this explicitly —
-its documentation names the case of a broad-phase "driven without the physics pipeline".
+Four things about Avian's API answer *wrongly* rather than loudly when they are got wrong, and each
+one cost real time:
+
+- **`MoveAndSlide` only sees colliders attached to a rigid body.** Its collider query is filtered
+  `With<ColliderOf>` and used as the predicate for every cast it makes, so a bare `Collider` is
+  invisible to sweeps while staying visible to `SpatialQuery::cast_ray`. Level geometry carries
+  `RigidBody::Static` for that reason and no other.
+- **A collider is placed by `Position`, not `Transform`.** `Transform` reaches `Position` through a
+  system, so a collider spawned with only a transform sits at the origin until that has run.
+- **Disabling `PhysicsTransformPlugin`, which `lightyear_avian3d` requires, breaks collider
+  queries** unless `Transform` is required from `ColliderMarker` by hand. Without a
+  `GlobalTransform` present when `ColliderOf` is inserted, a collider is wired into the tree
+  wrongly: its shape and pose stay correct — a direct `Collider::cast_ray` still answers — while
+  `SpatialQuery` never finds it, so every ray misses and the floor is not there.
+- **`Collider::cuboid` takes full side lengths**, where `Hitbox` and the level constants are
+  written in half-extents.
 
 ---
 

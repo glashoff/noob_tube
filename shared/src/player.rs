@@ -227,11 +227,10 @@ impl PlayerState {
             self.velocity.y <= 0.0 && level.is_grounded(self.position, self.crouching);
 
         // Hold the capsule one skin above the surface while grounded, never on it and never in
-        // it. The sweep leaves it a fraction of a millimetre low each tick and never puts that
-        // back, which compounds into centimetres over a minute of walking; but resting it exactly
-        // on the surface is worse, because a shape cast that starts touching its target reports
-        // contact at distance zero and the slide loop makes no progress at all. A whole skin of
-        // clearance keeps every cast in the well-behaved regime.
+        // it. A sweep leaves it a fraction of a millimetre low each tick and never puts that back,
+        // which compounds into centimetres over a minute of walking, and `standing_does_not_drift_
+        // downward` holds that to account. Snapping to a height the ground probe reports exactly
+        // cannot accumulate at all, whatever the sweep did.
         if self.on_ground
             && let Some(ground) = level.ground_height_below(self.position)
             && (self.position.y - ground).abs() < GROUND_SNAP_DIST

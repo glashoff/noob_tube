@@ -25,14 +25,7 @@ lightyear = { version = "0.29", features = ["udp", "netcode", "input_native"] }
 # and that reaches bevy_render. Keep the version in lockstep with bevy.
 bevy_remote = { version = "0.19.1", default-features = false, features = ["http"] }
 
-# Physics is queries-only: parry's shape casts plus rapier's broad-phase BVH.
-# PhysicsPipeline::step() is never called for gameplay. See README, "Two kinds of physics".
-# The `-glamx0.2` build is compiled against glam 0.32, the same version Bevy 0.19 uses, so
-# rapier's Vector/Pose ARE Bevy's Vec3/Isometry3d — no conversion at the boundary. Plain
-# rapier3d 0.35.3 pulls glam 0.33 and every vector would need translating.
-rapier3d = "=0.35.0-glamx0.2"
-
-# Avian, used for level collision, spatial queries and (from M-vehicles on) simulated bodies.
+# Physics: level collision, spatial queries, and (from vehicles on) simulated bodies.
 # `default-features = false` keeps the debug renderer, picking and mesh conversion out of the
 # headless server; `parry-f32` is what switches on the `Collider` type at all.
 avian3d = { version = "0.7", default-features = false, features = ["3d", "f32", "parry-f32"] }

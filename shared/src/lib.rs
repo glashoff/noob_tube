@@ -4,7 +4,6 @@
 //! must not depend on rendering, windowing or asset loading.
 
 
-pub mod collision;
 pub mod hitbox;
 pub mod lag_compensation;
 pub mod level;
@@ -38,15 +37,3 @@ pub const PROTOCOL_ID: u64 = 0x_4E_4F_4F_42_54_55_42_45; // "NOOBTUBE"
 /// server needs a real key handed out by a backend that issues connect tokens — see the netcode
 /// standard for what that involves.
 pub const PLACEHOLDER_PRIVATE_KEY: [u8; 32] = [0; 32];
-
-#[cfg(test)]
-mod tests {
-    /// rapier's math types must be Bevy's, or every call into the collision code would need
-    /// converting. This holds only while rapier is the `-glamx0.2` build; it breaks loudly if
-    /// someone bumps to a version compiled against a different glam.
-    #[test]
-    fn rapier_and_bevy_share_glam() {
-        let v: rapier3d::math::Vector = bevy::math::Vec3::new(1.0, 2.0, 3.0);
-        assert_eq!(v.x, 1.0);
-    }
-}
