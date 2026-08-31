@@ -5,6 +5,7 @@ mod debug_draw;
 mod harness;
 mod local_player;
 mod props;
+mod vehicle;
 mod remote_players;
 mod shot_effects;
 mod world;
@@ -39,6 +40,7 @@ fn main() {
             debug_draw::DebugDrawPlugin,
             crosshair::CrosshairPlugin,
             props::PropsPlugin,
+            vehicle::VehiclePlugin,
             shot_effects::ShotEffectsPlugin,
             remote_players::RemotePlayersPlugin,
             harness::HarnessPlugin,

@@ -13,11 +13,12 @@ use noob_tube_shared::level;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::physics::{Layer, Level, PhysicsPlugin};
 use avian3d::prelude::{
-    Collider, ColliderDensity, CollisionLayers, Forces, LayerMask, Position, RigidBody, Rotation,
-    WriteRigidBodyForces,
+    Collider, ColliderDensity, CollisionLayers, Forces, LayerMask, PhysicsSystems, Position,
+    RigidBody, Rotation, WriteRigidBodyForces,
 };
 use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::props::{self, Bobbing};
+use noob_tube_shared::vehicle::{self, VehicleKind};
 use noob_tube_shared::lag_compensation::HitboxHistory;
 use noob_tube_shared::shooting::{self, Health, ShotFired};
 use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin};
@@ -50,7 +51,13 @@ fn main() {
         // disagreed, every step near the difference would produce a correction the player sees.
         .add_systems(
             Startup,
-            (start_listening, publish_metadata, level::spawn_level, spawn_props),
+            (
+                start_listening,
+                publish_metadata,
+                level::spawn_level,
+                spawn_props,
+                spawn_vehicles,
+            ),
         )
         .add_systems(
             FixedUpdate,
@@ -59,12 +66,29 @@ fn main() {
             // looking at, not the ones a tick of movement later.
             // The props move with the players, and both after the shots are resolved: a shot is
             // tested against the world as its shooter left it, not one tick of everything later.
-            (resolve_shots, (simulation::step_players::<()>, move_props)).chain(),
+            // Suspension alongside the rest: it only applies forces, which the solver in
+            // `FixedPostUpdate` then consumes.
+            (
+                resolve_shots,
+                (
+                    simulation::step_players::<()>,
+                    move_props,
+                    vehicle::suspend_vehicles::<()>,
+                ),
+            )
+                .chain(),
         )
         // After the step, and in its own schedule so there is no doubt about the order: the
         // history has to hold the position at the *end* of a tick, because that is the one
         // replication sends and therefore the one a client interpolates towards.
-        .add_systems(FixedPostUpdate, record_positions)
+        // Explicitly after the solver, because Avian runs in this schedule too. Without the
+        // ordering the two are ambiguous, and a *dynamic* target — a loose crate, a vehicle —
+        // would have its history filled with the pose from before the step on some runs and after
+        // it on others. A kinematic crate hid that: nothing moves it except a system of ours.
+        .add_systems(
+            FixedPostUpdate,
+            record_positions.after(PhysicsSystems::StepSimulation),
+        )
         // Once per frame, not once per tick: several ticks can resolve between two frames, and
         // there is no reason to touch the network that often for something cosmetic.
         .add_systems(PostUpdate, broadcast_shots)
@@ -408,6 +432,33 @@ fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
         ));
     }
     info!("{} moving crates", props::MOVING_CRATES.len());
+}
+
+/// Startup: puts one vehicle in the world.
+///
+/// Replicated and interpolated by everyone, predicted by nobody — for now. There is no driver, so
+/// there is no input to predict from, and a body nobody steers is exactly the case where the server
+/// deciding alone is both cheaper and right. The moment someone is behind the wheel that changes,
+/// and it changes for that one client only.
+///
+/// It gets a [`HitboxHistory`] for the same reason the moving crate does: everyone else sees it in
+/// the past, so a shot at it has to be tested against the past. The hitbox itself needs no new code
+/// — a vehicle offers its collider and its pose, and `resolve_shots` never asks what kind of thing
+/// it hit.
+fn spawn_vehicles(net: Res<NetConfig>, mut commands: Commands) {
+    let kind = VehicleKind::Buggy;
+    // Standing at its own ride height, so it starts resting on its springs rather than dropping on
+    // to them in front of everyone at the start of the round.
+    let at = level::VEHICLE_START.extend(kind.spec().ride_height()).xzy();
+    commands.spawn((
+        Name::from("Buggy"),
+        Authored,
+        vehicle::vehicle_body(kind, at, Quat::IDENTITY),
+        HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
+        Replicate::to_clients(NetworkTarget::All),
+        InterpolationTarget::to_clients(NetworkTarget::All),
+    ));
+    info!("1 vehicle");
 }
 
 /// FixedUpdate: advances every prop to where this tick says it should be.

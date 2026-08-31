@@ -1021,6 +1021,50 @@ Verified live at 100 ms of ping, one player firing at a crate: the server report
 13 to 14 ticks and the crate having moved 0.12 to 0.43 m since — and the bracket it used came from
 the *crate's* history, since there was no second player to take one from.
 
+#### Vehicles
+
+A four-wheeled off-roader, in the shape Half-Life 2 and Halo both use: **the wheels are not
+collision shapes**. The whole vehicle is one dynamic box, and at four points on it a ray is cast
+straight down. Where the ray finds ground, a spring pushes the chassis up by how far it is
+compressed, a damper resists how fast that is changing, and a tyre model at the contact patch
+resists sliding sideways much harder than it resists rolling.
+
+That looks like a shortcut and is the opposite of one. Rolling cylinders catch on the seams between
+triangles, climb steps they should bounce off, and need a much shorter timestep to stay stable —
+and a rollback pays for all of that once per replayed tick. Four rays cost four rays, behave the
+same at any speed, and every property worth changing is a number in `VehicleSpec` rather than a
+solver setting.
+
+The spec is **not replicated**. `VehicleKind` travels once per entity and the numbers behind it are
+a constant both sides already have, in the same way the level's geometry is: client and server agree
+by being built from the same source. Nor are the wheels replicated — where a wheel sits is a pure
+function of the chassis pose and the ground under it, so a client that has the pose works it out
+with one ray each, at frame rate rather than tick rate. Sending four wheel states per vehicle per
+update to save four rays per frame would cost bandwidth to save nothing.
+
+Unlike a crate, a vehicle is not a borderline case for prediction: the driver's input goes into it
+and the result comes back out under the driver's own camera, so whoever is driving must predict it
+and everyone else interpolates — the same split as a player, for the same reason. Until there is a
+driver there is no input, so for now nobody predicts it. That is also why `suspend_vehicles` takes a
+query filter exactly as `step_players` does.
+
+Verified live. Parked, the chassis settles at 1.0661 m with all four struts compressed 0.1839 m and
+zero velocity — which is exactly what `mg/4k` predicts, so the spring constants are checked against
+the simulation rather than against themselves. Shoved at 12 m/s into a 12° ramp: the front struts
+take the transition (0.44 m against the rear pair's 0.19 m), it climbs to 3.46 m, leaves the ramp
+with all four wheels off the ground, lands front-first, absorbs it at 0.46–0.63 m of compression and
+settles back to 1.06 m. A client interpolating all of that stayed within 2–30 cm — which is the
+interpolation delay, not error — and matched the height and the tilt through the jump.
+
+**`record_positions` now runs explicitly after the solver.** Avian steps in `FixedPostUpdate` and so
+did the history recording, with no ordering between them: a *dynamic* target's history would be
+filled with the pose from before the step on some runs and after it on others. A kinematic crate hid
+this completely, because nothing but a system of ours ever moved one.
+
+Still missing, and each its own step: an engine and a steering wheel, a seat to get into, and the
+fact that a player walks straight through a vehicle — it sits on `Layer::Body`, which the movement
+queries deliberately do not see, exactly like a crate.
+
 #### Lag compensation
 
 Every shot is tested against the world the shooter was looking at, not the present one.

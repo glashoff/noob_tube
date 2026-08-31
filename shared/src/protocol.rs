@@ -17,6 +17,7 @@ use lightyear_avian3d::prelude::LightyearAvianPlugin;
 
 use crate::player::{Aim, Player, PlayerInput, PlayerState};
 use crate::props::Prop;
+use crate::vehicle::VehicleKind;
 use crate::shooting::{Health, ShotFired};
 use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
@@ -57,6 +58,10 @@ impl Plugin for ProtocolPlugin {
         // `LightyearAvianPlugin` registers below for every rigid body — so this is sent once per
         // entity rather than with every update, because half-extents do not change.
         app.component::<Prop>().replicate_once();
+        // Which vehicle it is, sent once. The handling behind it is a constant both sides already
+        // have — see [`VehicleKind`](crate::vehicle::VehicleKind) for why tuning is shared
+        // knowledge rather than replicated state.
+        app.component::<VehicleKind>().replicate_once();
         // Health is the server's alone. A client predicting whether its shot landed would have to
         // un-kill someone on screen when the server disagreed, and there is no graceful way to do
         // that — so this only ever arrives.

@@ -57,6 +57,12 @@ impl Plugin for SharedTypesPlugin {
             .register_type::<Player>()
             .register_type::<Health>()
             .register_type::<crate::props::Bobbing>()
-            .register_type::<crate::props::Prop>();
+            .register_type::<crate::props::Prop>()
+            // A vehicle's wheels are worth registering even though they never travel: they are
+            // derived every tick from the pose and the ground, so a live listing of them is how one
+            // sees what the suspension thinks it is doing.
+            .register_type::<crate::vehicle::Wheel>()
+            .register_type::<crate::vehicle::Wheels>()
+            .register_type::<crate::vehicle::VehicleKind>();
     }
 }

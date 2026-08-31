@@ -4,7 +4,7 @@
 //! numbers. This module only turns them into meshes.
 
 use bevy::prelude::*;
-use noob_tube_shared::level::{self, CRATES, CRATE_HALF_EXTENT, HALF_EXTENT};
+use noob_tube_shared::level::{self, CRATES, CRATE_HALF_EXTENT, HALF_EXTENT, RAMP_HALF_EXTENTS};
 use noob_tube_shared::types::Authored;
 
 pub struct WorldPlugin;
@@ -74,6 +74,18 @@ fn spawn_ground(
             ..default()
         })),
         Transform::IDENTITY,
+        ChildOf(level),
+    ));
+
+    // The ramp. Its pose is derived rather than written down, so that the visible slope and the
+    // one a vehicle drives up are the same slope — see `level::ramp_pose`.
+    let (ramp_at, ramp_facing) = level::ramp_pose();
+    commands.spawn((
+        Name::from("Ramp"),
+        Authored,
+        Mesh3d(meshes.add(Cuboid::from_size(RAMP_HALF_EXTENTS * 2.0))),
+        MeshMaterial3d(materials.add(Color::srgb(0.42, 0.40, 0.38))),
+        Transform::from_translation(ramp_at).with_rotation(ramp_facing),
         ChildOf(level),
     ));
 

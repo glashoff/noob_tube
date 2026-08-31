@@ -17,6 +17,7 @@ pub mod shooting;
 pub mod simulation;
 pub mod tuning;
 pub mod types;
+pub mod vehicle;
 #[cfg(feature = "remote")]
 pub mod remote;
 

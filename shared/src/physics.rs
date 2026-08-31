@@ -79,10 +79,20 @@ impl Plugin for PhysicsPlugin {
 /// the server's authority disagree about where a player can stand and every step near the
 /// difference is a stutter.
 pub fn level_geometry(collider: Collider, at: Vec3) -> impl Bundle {
+    level_geometry_facing(collider, at, Quat::IDENTITY)
+}
+
+/// The same, for geometry that is not axis-aligned: a ramp, a sloped roof, a leaning wall.
+///
+/// The rotation is [`Rotation`], not a `Transform`, for the same reason the position is
+/// [`Position`] — those are what Avian places a collider by, and a shape spawned with only a
+/// transform sits unrotated at the origin until a sync system has run.
+pub fn level_geometry_facing(collider: Collider, at: Vec3, facing: Quat) -> impl Bundle {
     (
         RigidBody::Static,
         collider,
         Position(at),
+        Rotation(facing),
         CollisionLayers::new(Layer::Level, LayerMask::ALL),
     )
 }
