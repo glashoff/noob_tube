@@ -5,6 +5,7 @@ mod debug_draw;
 mod harness;
 mod local_player;
 mod corrections;
+mod hud;
 mod props;
 mod vehicle;
 mod remote_players;
@@ -42,6 +43,7 @@ fn main() {
             local_player::LocalPlayerPlugin,
             debug_draw::DebugDrawPlugin,
             crosshair::CrosshairPlugin,
+            hud::HudPlugin,
             corrections::CorrectionsPlugin,
             props::PropsPlugin,
             vehicle::VehiclePlugin,

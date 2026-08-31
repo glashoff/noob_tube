@@ -38,10 +38,11 @@
 use avian3d::prelude::Position;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
+use std::collections::VecDeque;
 use lightyear::prelude::{Predicted, Rollback, RollbackSystems};
 use noob_tube_shared::player::PlayerState;
 
-use crate::local_player::{LocalPlayer, MovementTicks};
+use crate::local_player::{LocalPlayer, MovementTicks, ViewError};
 
 /// Everything this client simulates for itself that is not its own player: the loose crates today,
 /// a vehicle it is driving later.
@@ -49,6 +50,9 @@ type PredictedBody = (With<Predicted>, Without<PlayerState>);
 
 /// How often the running summary is logged, in seconds.
 const SUMMARY_EVERY: f32 = 10.0;
+
+/// How far back the figure on screen looks.
+const WINDOW: f32 = 1.0;
 
 pub struct CorrectionsPlugin;
 
@@ -88,6 +92,17 @@ pub struct Corrections {
     pub worst_body: f32,
     /// The furthest the drawn camera has ever been from where the simulation says the eye is.
     pub worst_lag: f32,
+    /// The same over the last second, and how much of it the rollback smoothing accounted for.
+    ///
+    /// A second rather than a running maximum because the question a player asks is "is it doing
+    /// this *now*", and an all-time worst answers that with something that happened once, on
+    /// connect, a quarter of an hour ago.
+    ///
+    /// Both figures come from the *same frame* — the worst one — rather than being two independent
+    /// maxima. Taken separately they can contradict each other outright: a share larger than the
+    /// whole, from two different moments in the same second.
+    pub lag_last_second: f32,
+    pub smoothing_last_second: f32,
     /// The furthest the camera has jumped in one rendered frame beyond what walking explains.
     ///
     /// This is the number a player actually sees, and the one that says whether smoothing works: a
@@ -118,6 +133,9 @@ pub struct Corrections {
     worst_frame_since: f32,
     #[reflect(ignore)]
     worst_lag_since: f32,
+    /// The last second of samples, oldest first, as (when, total lag, smoothing's share).
+    #[reflect(ignore)]
+    recent: VecDeque<(f32, f32, f32)>,
 }
 
 /// PreUpdate, inside the rollback and before it snaps back: where the predicted bodies were.
@@ -164,6 +182,7 @@ fn measure(
 fn watch_the_camera(
     mut corrections: ResMut<Corrections>,
     time: Res<Time>,
+    smoothing: Res<ViewError>,
     camera: Single<&GlobalTransform, With<LocalPlayer>>,
 ) {
     // Nothing to compare against until there is a player: the camera sits at the origin before one
@@ -185,6 +204,21 @@ fn watch_the_camera(
         let lag = simulated.distance(eye);
         corrections.worst_lag = corrections.worst_lag.max(lag);
         corrections.worst_lag_since = corrections.worst_lag_since.max(lag);
+
+        let now = time.elapsed_secs();
+        corrections.recent.push_back((now, lag, smoothing.offset.length()));
+        while corrections.recent.front().is_some_and(|(when, ..)| now - when > WINDOW) {
+            corrections.recent.pop_front();
+        }
+        let worst = corrections
+            .recent
+            .iter()
+            .copied()
+            .max_by(|(_, a, _), (_, b, _)| a.total_cmp(b));
+        if let Some((_, lag, own)) = worst {
+            corrections.lag_last_second = lag;
+            corrections.smoothing_last_second = own;
+        }
     }
     corrections.eye = Some(eye);
 }

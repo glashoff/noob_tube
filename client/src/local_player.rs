@@ -464,7 +464,7 @@ fn count_ticks(mut ticks: ResMut<MovementTicks>) {
 ///
 /// 25 cm is about 45 ms of running. Measured corrections on a sane link are half a centimetre, so
 /// in practice everything is smoothed and nothing is ever clipped by this.
-const VIEW_LEASH: f32 = 0.25;
+pub const VIEW_LEASH: f32 = 0.25;
 
 /// Fraction of the outstanding view error still left one second later.
 ///
@@ -481,9 +481,9 @@ const VIEW_DECAY_PER_SECOND: f32 = 1e-4;
 /// the simulation by 1.9 m: the filter never released, so the camera simply ran a fifth of a second
 /// behind. Owning thirty lines is the cheaper way to own that number.
 #[derive(Resource, Default)]
-struct ViewError {
+pub struct ViewError {
     /// The offset added to the drawn position. Decays towards zero every frame.
-    offset: Vec3,
+    pub offset: Vec3,
     /// Where the view was drawn just before a rollback replaced the state under it.
     drawn: Option<Vec3>,
 }

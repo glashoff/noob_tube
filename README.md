@@ -1268,6 +1268,17 @@ Measured after, under the same storm: the trail is bounded at 21 cm where it had
 what still jumps is the part above the leash. On a sane link the errors are half a centimetre, so
 everything is smoothed, the jump is 0.0 cm and the trail is 0.0 cm.
 
+The figure is on screen while playing, bottom left, and not only in a log: how far the drawn player
+was from the simulated one, worst frame of the last second, amber past half the leash and red on it.
+A number that exists only in a log after the fact cannot be compared with "that felt wrong just
+then". F3 hides it.
+
+It is one number rather than a breakdown, and that was a correction. It showed the total and "how
+much of it is smoothing" until a run reported a share *larger* than the whole: the smoothing offset
+and frame interpolation's one tick of delay point in different directions the moment the player
+turns, and vectors at an angle do not add like numbers. The colour carries the smoothing part
+instead, where it cannot be read as arithmetic.
+
 None of this touches the simulation. Both the frame blend and the smoothing write into the live
 `PlayerState` in `PostUpdate`, and `RunFixedMainLoop` restores the simulated value before the next
 tick — so a shot still leaves from where the simulation says the player is, because the shooting
