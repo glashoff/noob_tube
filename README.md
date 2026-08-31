@@ -860,7 +860,54 @@ Finding this needed one fix first. `resolve_shots` aimed with the replicated `Ai
 `step_players` writes at the *end* of a tick — so every shot went off with the previous tick's
 angles, 15.6 ms of mouse movement stale. Invisible until a client tried to reproduce it, at which
 point the two would have drawn different lines. The angles now come from the same tick's input on
-both sides.
+both sides, and `shooting::fire` is the one place a held trigger becomes a ray — called by the
+server to score the shot and by the shooter's client to draw it, for the same reason `step_players`
+is one system and not two.
+
+#### Does the server know where the shooter was?
+
+The obvious worry: the client predicts its own movement, so the server might disagree about where
+the shot came from, and then the shot is not scored the way the shooter saw it. The usual answer to
+that is to let the client send its own position with every shot.
+
+It turns out not to be a prediction problem at all. The server does not *guess* where the shooter
+is — it **simulates** the shooter, from the shooter's own inputs, and is the authority on the
+result. The client runs the same code over the same inputs. The two can only disagree when an input
+never arrives at all.
+
+Measured by having both sides log the eye position of every shot and matching them by tick, while
+running, turning, jumping and firing at once:
+
+| ping | loss | jitter | input redundancy | shots on matching ticks | worst disagreement |
+|---|---|---|---|---|---|
+| 100 ms | 0 | 0 | 5 | 57 / 57 | **0.000 cm** |
+| 300 ms | 15% | 40 ms | 5 | 57 / 57 | **0.000 cm** |
+| 300 ms | 50% | 40 ms | 5 | 56 / 56 | **0.000 cm** |
+| 300 ms | 50% | 40 ms | **1** | 0 / 56 | — |
+
+Bit-identical, with zero rollbacks, up to half the packets being dropped. `input_redundancy` is what
+buys that: every input message repeats the last five packets' worth of ticks, so an input has to be
+lost five times running to be lost at all.
+
+The last row is the interesting failure, and it is not the one expected. With the redundancy turned
+off, the two never disagree about a *position* — they disagree about which **tick** the shot happens
+on. The input carrying the trigger's first press is lost, the server keeps doing the last thing it
+was told for two more ticks, and from then on the cooldown keeps both sides firing every nine ticks
+but permanently two ticks apart. Every shot still happens; each one is 31 ms out of step. So
+`input_redundancy` is not only about movement not stuttering — it is what keeps the trigger itself
+in step.
+
+Which leaves the part of the worry that is real, and it is the *other* end of the shot. What the
+shooter saw of **everyone else** is off by the whole round trip, and that error was measured at 0.6
+to 1.8 m. That is what the shot already reports, as the view bracket above — the client does send
+what it saw, for the half of the problem where it matters by two orders of magnitude.
+
+This is also what the genre does. Source (Counter-Strike, TF2), Overwatch, Valorant and Apex are all
+server-authoritative with client-side prediction and target rewind; the shooter's own position is
+the server's, never the client's. The other family — client-reported hit registration, where the
+client says "I hit them" and the server checks whether that was plausible — appears in parts of the
+Call of Duty and Battlefield lineages. It feels better on a bad connection and is far more
+exploitable, and it buys nothing here that redundancy has not already bought.
 
 It goes **unreliably**, on a channel of its own. A tracer lives for 50 ms, so a retransmitted one
 arrives after the moment it belongs to, and drawing it then is worse than not drawing it. The

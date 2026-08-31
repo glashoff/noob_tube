@@ -98,6 +98,12 @@ pub struct NetConfig {
     /// next packet rather than costing movement. It is the cheapest redundancy in the whole
     /// protocol — inputs are a handful of bytes — and the reason a lossy link still walks in a
     /// straight line. Lightyear's default is 5.
+    ///
+    /// It keeps the *trigger* in step too, which is less obvious. A lost input does not cost a
+    /// shot: the server keeps doing the last thing it was told, so it fires a couple of ticks late,
+    /// and the cooldown then holds both sides firing at the same rate permanently out of step.
+    /// Measured at 50% packet loss, 5 keeps client and server firing on identical ticks and 1 does
+    /// not.
     pub input_redundancy: u16,
     /// How far in the past other players are drawn, as a multiple of the send interval.
     ///

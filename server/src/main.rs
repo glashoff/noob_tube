@@ -171,9 +171,12 @@ fn resolve_shots(
 
     let mut hits: Vec<(Entity, u64)> = Vec::new();
     for (shooter, state, action, player, controlled) in players.p0().iter() {
+        // The same predicate `shooting::fire` applies below, asked early so that a player who is
+        // not shooting does not pay for a rewind of everyone else.
         if !state.is_firing(&action.0) {
             continue;
         }
+        let input = action.0;
         // The moment this shooter's screen was showing when the trigger went down. `tick` is the
         // tick the input was *stamped for*, not the one the packet arrived on, so this is the same
         // answer however late the packet was.
@@ -258,23 +261,20 @@ fn resolve_shots(
             })
             .collect();
 
-        // The angles come from *this* tick's input, not from `Aim`. `Aim` is written at the end of
-        // a tick by `step_players`, so reading it here would aim every shot with the previous
-        // tick's angles — 15.6 ms of mouse movement stale, which during a flick is a visible
-        // offset, and which the client could not reproduce when predicting its own shot.
-        let input = action.0;
-        let (origin, direction) = shooting::aim_ray(state.eye_position(), input.yaw, input.pitch);
-        let shot = shooting::resolve(&world, origin, direction, targets);
+        // The same call the shooter's own client makes to draw its tracer, over the same input.
+        let Some(fired) = shooting::fire(&world, state, &input, targets) else {
+            continue;
+        };
         // Told to everyone, hit or miss: a shot that struck a wall beside you is as much a part of
         // knowing where the fire is coming from as one that struck you.
         pending.0.push(ShotFired {
             shooter: player.peer,
-            from: origin,
-            to: shot.point(origin, direction),
-            hit_player: shot.target.is_some(),
+            from: fired.origin,
+            to: fired.point(),
+            hit_player: fired.shot.target.is_some(),
         });
-        if let Some(hit) = shot.target {
-            debug!("peer {} hit at {:.1} m", player.peer, shot.distance);
+        if let Some(hit) = fired.shot.target {
+            debug!("peer {} hit at {:.1} m", player.peer, fired.shot.distance);
             hits.push((hit, player.peer));
         }
     }

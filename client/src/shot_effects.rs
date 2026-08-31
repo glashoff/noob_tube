@@ -157,16 +157,14 @@ fn predict_own_tracer(
         return;
     };
     let (action, state) = *mine;
-    let input = action.0;
-    if !state.is_firing(&input) {
-        return;
-    }
-    let (origin, direction) = shooting::aim_ray(state.eye_position(), input.yaw, input.pitch);
     let targets = others
         .iter()
         .map(|(entity, other)| (entity, other.position, other.crouching));
-    let shot = shooting::resolve(&world, origin, direction, targets);
-    spawn_tracer(&mut commands, &assets, origin, shot.point(origin, direction), true);
+    // The same call the server makes, over the same input, before either side steps the player.
+    let Some(fired) = shooting::fire(&world, state, &action.0, targets) else {
+        return;
+    };
+    spawn_tracer(&mut commands, &assets, fired.origin, fired.point(), true);
 }
 
 /// Update: draws every shot the server has told us about.

@@ -15,6 +15,7 @@ use rapier3d::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::collision::CollisionWorld;
+use crate::player::{PlayerInput, PlayerState};
 use crate::movement::{
     CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS, CAPSULE_Y_OFFSET, CROUCH_CAPSULE_HALF_HEIGHT,
     CROUCH_CAPSULE_Y_OFFSET,
@@ -140,6 +141,50 @@ pub fn resolve<T: IntoIterator<Item = (Entity, Vec3, bool)>>(
         Some((entity, distance)) => Shot { distance, target: Some(entity) },
         None => Shot { distance: reach, target: None },
     }
+}
+
+/// A shot that was actually taken: where it started, which way it went, and where it stopped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fired {
+    pub origin: Vec3,
+    pub direction: Vec3,
+    pub shot: Shot,
+}
+
+impl Fired {
+    /// Where it stopped.
+    pub fn point(&self) -> Vec3 {
+        self.shot.point(self.origin, self.direction)
+    }
+}
+
+/// Turns a held trigger into a shot, or into nothing.
+///
+/// The one place that decision is made, and it is made identically on both sides — the server to
+/// score the shot, the shooter's own client to draw it without waiting to be told. That is the same
+/// reason [`step_players`](crate::simulation::step_players) is one system rather than one per
+/// binary: two copies of a rule is precisely how a prediction stops matching, and the drift shows up
+/// as a shot landing somewhere the player did not aim rather than as a compile error.
+///
+/// Call it **before** [`PlayerState::apply_input`], which starts the cooldown and so makes the
+/// answer no. The angles come from `input`, not from the replicated [`Aim`](crate::player::Aim):
+/// `Aim` is written at the end of a tick, so reading it here would aim every shot with the previous
+/// tick's angles.
+pub fn fire<T: IntoIterator<Item = (Entity, Vec3, bool)>>(
+    world: &CollisionWorld,
+    state: &PlayerState,
+    input: &PlayerInput,
+    targets: T,
+) -> Option<Fired> {
+    if !state.is_firing(input) {
+        return None;
+    }
+    let (origin, direction) = aim_ray(state.eye_position(), input.yaw, input.pitch);
+    Some(Fired {
+        origin,
+        direction,
+        shot: resolve(world, origin, direction, targets),
+    })
 }
 
 /// What every client is told about a shot, so that a shot can be seen rather than only felt.
@@ -282,6 +327,34 @@ mod tests {
         assert_eq!(shot.distance, WEAPON_RANGE);
         let end = shot.point(origin, direction);
         assert!(end.y > origin.y, "an upward shot ended below where it started");
+    }
+
+    /// The whole of the trigger rule, in the one place both sides call.
+    #[test]
+    fn firing_needs_a_trigger_and_a_ready_weapon() {
+        let world = empty_world();
+        let state = PlayerState::default();
+        let idle = PlayerInput::default();
+        let held = PlayerInput { fire: true, ..PlayerInput::default() };
+
+        assert!(fire(&world, &state, &idle, []).is_none(), "fired without a trigger");
+        assert!(fire(&world, &state, &held, []).is_some(), "a ready weapon did not fire");
+
+        let cooling = PlayerState { fire_cooldown: 1, ..PlayerState::default() };
+        assert!(fire(&world, &cooling, &held, []).is_none(), "fired while cooling down");
+    }
+
+    /// The angles come from the input, not from anywhere the client could not reproduce. Getting
+    /// this wrong aims every shot one tick stale, which is invisible until a client predicts it.
+    #[test]
+    fn a_shot_goes_where_the_input_points() {
+        let held = PlayerInput { fire: true, yaw: 0.0, pitch: 0.0, ..PlayerInput::default() };
+        let fired = fire(&empty_world(), &PlayerState::default(), &held, []).expect("fired");
+        assert!((fired.direction - Vec3::NEG_Z).length() < 1e-5, "{:?}", fired.direction);
+
+        let turned = PlayerInput { yaw: core::f32::consts::FRAC_PI_2, ..held };
+        let fired = fire(&empty_world(), &PlayerState::default(), &turned, []).expect("fired");
+        assert!((fired.direction - Vec3::NEG_X).length() < 1e-5, "{:?}", fired.direction);
     }
 
     #[test]
