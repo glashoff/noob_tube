@@ -266,12 +266,26 @@ pub const BUGGY: VehicleSpec = VehicleSpec {
 /// [`step_players`](crate::simulation::step_players) skips them, which is the whole of "you cannot
 /// walk while driving".
 ///
-/// A marker rather than the vehicle's entity. A client already knows which vehicle it is driving —
-/// it is the only one it predicts — and an entity reference across the wire needs mapping, which is
-/// a whole mechanism to buy something nobody asked for.
+/// A marker rather than the vehicle's entity, because an entity reference across the wire needs
+/// mapping, and that is a whole mechanism to buy something [`Driven`] gives for a byte.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Reflect, Serialize, Deserialize)]
 #[reflect(Component)]
 pub struct Driving;
+
+/// On a vehicle: somebody is in it.
+///
+/// The other half of [`Driving`], and it exists because the shortcut it replaces stopped being
+/// true. A client used to know which vehicle it was driving by elimination — it was the only one it
+/// predicted — and then parked vehicles started being predicted too, so that a driver would not ram
+/// an immovable copy of one. From that moment "the vehicle I predict" and "the vehicle I drive" are
+/// different sets, and the input has to be aimed at the second.
+///
+/// Still not an entity reference. A client that has this needs only *predicted and driven*, and
+/// there can be at most one of those: a vehicle somebody else is driving is one this client
+/// interpolates.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Reflect, Serialize, Deserialize)]
+#[reflect(Component)]
+pub struct Driven;
 
 /// What the driver is asking for, this tick.
 ///

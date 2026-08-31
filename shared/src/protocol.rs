@@ -17,7 +17,7 @@ use lightyear_avian3d::prelude::LightyearAvianPlugin;
 
 use crate::player::{Aim, Player, PlayerInput, PlayerState};
 use crate::props::{Density, Prop};
-use crate::vehicle::{Driving, VehicleKind};
+use crate::vehicle::{Driven, Driving, VehicleKind};
 use crate::shooting::{Health, ShotFired};
 use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
@@ -70,6 +70,7 @@ impl Plugin for ProtocolPlugin {
         // goes; not predicted, because getting in is the server's decision and a client that
         // guessed wrong would climb into a seat someone else had taken.
         app.component::<Driving>().replicate();
+        app.component::<Driven>().replicate();
         // Health is the server's alone. A client predicting whether its shot landed would have to
         // un-kill someone on screen when the server disagreed, and there is no graceful way to do
         // that — so this only ever arrives.

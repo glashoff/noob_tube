@@ -23,24 +23,31 @@ use lightyear::prelude::{Predicted, client};
 use noob_tube_shared::physics::Layer;
 use noob_tube_shared::player::{PlayerInput, PlayerState};
 use noob_tube_shared::vehicle::{
-    self, probe_wheels, Controls, Driving, Righting, VehicleKind, Wheels, WHEELS,
+    self, probe_wheels, Controls, Driven, Driving, Righting, VehicleKind, Wheels, WHEELS,
 };
 
 /// A vehicle that has just arrived and has nothing to be seen as yet.
 type Arrived = (With<client::Remote>, Added<VehicleKind>);
-/// A vehicle this client has just been handed to drive, or has just given back.
-type NowDriven = (With<VehicleKind>, Added<Predicted>);
+/// A vehicle this client has just been asked to predict, whether or not it will be steering it.
+type NowPredicted = (With<VehicleKind>, Added<Predicted>);
 /// This client's own player, while they are behind a wheel.
 type OwnDriver = (With<Predicted>, With<Driving>);
-/// The one vehicle this client simulates for itself, which is the one it is driving.
-type OwnVehicle = (With<VehicleKind>, With<Predicted>);
+/// The one vehicle this client is *steering*, as opposed to the ones it merely predicts.
+///
+/// Both halves are needed and neither is enough. `Predicted` alone used to identify it, back when
+/// the only vehicle a client predicted was the one it drove; parked vehicles are predicted now too,
+/// so that a driver does not ram an immovable copy of one, and steering every vehicle it predicted
+/// would drive the whole car park by remote control. `Driven` alone is every occupied vehicle in
+/// the game, including other people's — but a vehicle somebody else is driving is one this client
+/// interpolates, so the two together can only ever match one entity.
+type OwnVehicle = (With<VehicleKind>, With<Predicted>, With<Driven>);
 
 pub struct VehiclePlugin;
 
 impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<Wheel>()
-            .add_systems(Update, (give_bodies, fit_for_driving, place_wheels).chain())
+            .add_systems(Update, (give_bodies, fit_for_the_solver, place_wheels).chain())
             .add_systems(
                 FixedUpdate,
                 // The same order the server uses: the controls are read before they are acted on,
@@ -131,17 +138,23 @@ fn give_bodies(
 
 /// Update: gives a vehicle the body it needs for whichever side of the line it is on.
 ///
-/// The line is prediction, and it moves at runtime: the server hands a vehicle to whoever climbs
-/// into it, so the same entity is interpolated one moment and predicted the next. Interpolated, it
-/// is [`RigidBody::Static`] and lightyear writes its pose. Predicted, it has to be simulated here —
-/// so it needs the mass and the centre of gravity the server gave it, and Avian has to be allowed
-/// to move it.
+/// The line is prediction, and it moves at runtime: while somebody is driving, the server hands
+/// them both the vehicle they are steering *and* every driverless one they might hit, so the same
+/// entity is interpolated one moment and predicted the next. Interpolated, it is
+/// [`RigidBody::Static`] and lightyear writes its pose. Predicted, it has to be simulated here — so
+/// it needs the mass and the centre of gravity the server gave it, and Avian has to be allowed to
+/// move it.
+///
+/// This does not care which of the two a vehicle is. A parked one needs its suspension stepped and
+/// its weight honoured exactly as much as a driven one does, because the whole point of predicting
+/// it is that the bumper meets the same box on both sides. What separates them is only where the
+/// input goes, and that is [`take_the_wheel`]'s business.
 ///
 /// Getting the swap wrong is silent in the worst way. A predicted vehicle left static would take
 /// the throttle and not move; an interpolated one left dynamic would fall through the replicated
 /// pose being written on top of it every update.
-fn fit_for_driving(
-    took_over: Query<(Entity, &VehicleKind), NowDriven>,
+fn fit_for_the_solver(
+    took_over: Query<(Entity, &VehicleKind), NowPredicted>,
     mut gave_up: RemovedComponents<Predicted>,
     kinds: Query<&VehicleKind>,
     mut commands: Commands,
@@ -158,7 +171,7 @@ fn fit_for_driving(
             // saves having to replicate a counter that is otherwise nobody's business.
             Righting::default(),
         ));
-        info!("driving a {kind:?}");
+        info!("simulating a {kind:?} for myself");
     }
     for entity in gave_up.read() {
         if kinds.get(entity).is_err() {
@@ -168,7 +181,7 @@ fn fit_for_driving(
             .entity(entity)
             .insert(RigidBody::Static)
             .remove::<(Controls, Righting)>();
-        info!("gave the wheel back");
+        info!("a vehicle went back to being interpolated");
     }
 }
 
@@ -181,10 +194,14 @@ fn fit_for_driving(
 /// The input comes from the `ActionState` rather than from this frame's keyboard, because that is
 /// what lightyear refills while replaying a rollback. Reading the keyboard here would replay twenty
 /// ticks of steering with whatever is being held *now*.
+///
+/// The query is [`OwnVehicle`] rather than everything predicted, and that is not a tidy-up. A
+/// client predicts the parked vehicles as well, so that its bumper meets the same box the server's
+/// does; feeding them this input would have the throttle drive every vehicle on the map.
 fn take_the_wheel(
     time: Res<Time<Fixed>>,
     driver: Option<Single<&ActionState<PlayerInput>, OwnDriver>>,
-    mut vehicles: Query<(&VehicleKind, &mut Controls), With<Predicted>>,
+    mut vehicles: Query<(&VehicleKind, &mut Controls), OwnVehicle>,
 ) {
     let Some(driver) = driver else {
         return;

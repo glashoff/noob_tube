@@ -1210,6 +1210,23 @@ crate and the rewound hitbox that goes with it. The crate's mass now travels on 
 `Density`, because a client that weighs a crate differently from the server pushes it somewhere
 else.
 
+The same treatment went to **parked vehicles**, which had the identical fault and a worse version of
+it: 208 rollbacks and a 140 cm correction, now none and nothing. Worse despite the gentler impact,
+because of mass — a 40 kg crate barely slows a 1200 kg buggy, so even the wrong answer was nearly
+right, while two vehicles of the same mass trade half their momentum and the client's "it is a wall"
+has nothing in common with the server's "they both move". It showed as the vehicle crawling forward
+at half a metre a second and shaking.
+
+That broke an invariant worth naming, because it had been load-bearing: *the only vehicle a client
+predicts is the one it drives*. Parked vehicles are predicted now too, so a client had to be told
+which one to steer, and `Driven` — the vehicle-side half of `Driving` — says it. Still not an entity
+reference across the wire: *predicted and driven* can only ever match one entity, because a vehicle
+somebody else is driving is one this client interpolates.
+
+**A vehicle with a driver in it is deliberately not in here**, and that is the harder problem rather
+than an oversight. It has an input behind it, that input belongs to a peer this client never hears
+from, and no amount of solver work substitutes for not knowing what somebody else is pressing.
+
 The stack is the honest remainder. Four boxes in contact are chaotic, two solvers stepping slightly
 different histories diverge every update, and no amount of prediction fixes that — but the
 disagreement is now a third of a metre instead of seven.

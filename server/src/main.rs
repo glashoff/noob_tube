@@ -18,7 +18,7 @@ use avian3d::prelude::{
 };
 use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::props::{self, Bobbing, Density};
-use noob_tube_shared::vehicle::{self, Controls, Driving, VehicleKind};
+use noob_tube_shared::vehicle::{self, Controls, Driven, Driving, VehicleKind};
 use noob_tube_shared::lag_compensation::HitboxHistory;
 use noob_tube_shared::shooting::{self, Health, ShotFired};
 use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin};
@@ -71,7 +71,7 @@ fn main() {
             (
                 // Getting in and out first: it decides who is walking this tick and who is driving,
                 // and both of the steps below depend on that answer.
-                (use_vehicles, crates_follow_the_drivers, take_the_wheel).chain(),
+                (use_vehicles, the_driverless_follow_the_drivers, take_the_wheel).chain(),
                 resolve_shots,
                 (
                     simulation::step_players::<()>,
@@ -559,7 +559,7 @@ fn use_vehicles(
             state.position = position.0 + rotation.0 * Vec3::new(-2.0, -0.6, 0.0);
             state.velocity = Vec3::ZERO;
             commands.entity(player).remove::<Driving>();
-            commands.entity(vehicle).remove::<Driver>();
+            commands.entity(vehicle).remove::<(Driver, Driven)>();
             // Nobody predicts it again: with no input behind it there is nothing to predict from.
             commands.entity(vehicle).insert((
                 PredictionTarget::to_clients(NetworkTarget::None),
@@ -581,6 +581,10 @@ fn use_vehicles(
         commands.entity(player).insert(Driving);
         commands.entity(vehicle).insert((
             Driver(player),
+            // The half of the seat that travels: everyone else needs to know this vehicle has
+            // somebody in it, and the driver's own client needs it to tell the vehicle it is
+            // steering from the parked ones it merely predicts.
+            Driven,
             Controls::default(),
             // The driver predicts it and everyone else interpolates it — the same split a player
             // gets, for the same reason: the input that moves it is theirs, so they are the one peer
@@ -592,29 +596,46 @@ fn use_vehicles(
     }
 }
 
-/// FixedUpdate: hands the loose crates to whoever is driving, and takes them back afterwards.
+/// FixedUpdate: hands everything driverless to whoever is driving, and takes it back afterwards.
 ///
-/// A driver has to predict the crates, and the reason is a measurement rather than a preference.
-/// An interpolated crate is `RigidBody::Static` on a client and stands at the pose it had a
-/// round trip ago, so a predicted vehicle drives into an immovable wall in the past while the
-/// server pushes straight through it: four seconds of that produced **245 rollbacks — one per
-/// server update — moving the vehicle by up to 7.4 m**. Predicted, both sides shove the same crate
-/// on the same tick and there is nothing to correct.
+/// Driverless means a loose crate or a vehicle with nobody in it: something a bumper can move that
+/// has no input of its own behind it. A driver has to predict all of it, and the reason is a
+/// measurement rather than a preference. Interpolated, such a thing is `RigidBody::Static` on a
+/// client and stands at the pose it had a round trip ago, so a predicted vehicle drives into an
+/// immovable copy of it in the past while the server pushes straight through the real one. Four
+/// seconds of that, at 100 ms of ping with 10 % loss:
+///
+/// | | rollbacks | worst correction |
+/// |---|---|---|
+/// | into one crate | 237 | 173 cm |
+/// | into a parked vehicle | 208 | 140 cm |
+///
+/// The parked vehicle is the worse of the two despite being hit more gently, and the reason is
+/// mass. A 40 kg crate barely slows a 1200 kg buggy, so even a wrong answer was nearly right; two
+/// vehicles of the same mass trade half their momentum, so the client's "it is a wall" and the
+/// server's "they both move" have nothing in common. It showed up as the vehicle crawling forward
+/// at half a metre a second and shaking.
 ///
 /// It is not a retraction of the rule that a crate is interpolated. The rule is that a peer
 /// predicts what it has the information to compute, and behind the wheel that is exactly what the
-/// driver has: the crate is moved by *their* bumper. The information they lack is somebody else's
-/// shot, which arrives as a correction — measured earlier at a median of 3.7 cm — and which the
-/// driver is in the worst position to care about, since nobody shoots from the driver's seat.
+/// driver has: these things are moved by *their* bumper. The information they lack is somebody
+/// else's shot, which arrives as a correction — measured earlier at a median of 3.7 cm — and which
+/// the driver is in the worst position to care about, since nobody shoots from the driver's seat.
 ///
-/// Everyone who is *not* driving keeps the interpolated crate, and with it a rewound hitbox that is
+/// Everyone who is *not* driving keeps the interpolated copy, and with it a rewound hitbox that is
 /// exactly where the server says it was. That is the half of the trade worth protecting.
 ///
+/// **A vehicle somebody else is driving is deliberately not in here.** It has an input behind it,
+/// and that input belongs to a peer this one never hears from, so there is nothing to predict from
+/// and `Without<Driver>` says so. Two driven vehicles colliding is a genuinely harder problem than
+/// this system solves and is not solved here.
+///
 /// Written only when the set of drivers changes. Replication components are not free to churn, and
-/// this would otherwise rewrite four crates sixty-four times a second to say the same thing.
-fn crates_follow_the_drivers(
+/// this would otherwise rewrite six entities sixty-four times a second to say the same thing.
+fn the_driverless_follow_the_drivers(
     drivers: Query<&Owner, With<Driving>>,
     crates: Query<Entity, With<Loose>>,
+    parked: Query<Entity, (With<VehicleKind>, Without<Driver>)>,
     mut last: Local<Vec<PeerId>>,
     mut commands: Commands,
 ) {
@@ -637,13 +658,13 @@ fn crates_follow_the_drivers(
             NetworkTarget::AllExcept(now.iter().copied().collect()),
         )
     };
-    for entity in crates.iter() {
+    for entity in crates.iter().chain(parked.iter()) {
         commands.entity(entity).insert((
             PredictionTarget::to_clients(predicted.clone()),
             InterpolationTarget::to_clients(interpolated.clone()),
         ));
     }
-    info!("{} driver(s) now predict the loose crates", now.len());
+    info!("{} driver(s) now predict everything driverless", now.len());
 }
 
 /// FixedUpdate: hands each vehicle the input of whoever is sitting in it.
