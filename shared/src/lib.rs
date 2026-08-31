@@ -5,11 +5,13 @@
 
 
 pub mod collision;
+pub mod hitbox;
 pub mod lag_compensation;
 pub mod level;
 pub mod metadata;
 pub mod movement;
 pub mod player;
+pub mod props;
 pub mod protocol;
 pub mod shooting;
 pub mod simulation;

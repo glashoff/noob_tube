@@ -10,16 +10,11 @@
 //! by a test that needs no network at all.
 
 use bevy::prelude::*;
-use rapier3d::parry::query::RayCast;
-use rapier3d::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::collision::CollisionWorld;
+use crate::hitbox::Hitbox;
 use crate::player::{PlayerInput, PlayerState};
-use crate::movement::{
-    CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS, CAPSULE_Y_OFFSET, CROUCH_CAPSULE_HALF_HEIGHT,
-    CROUCH_CAPSULE_Y_OFFSET,
-};
 
 /// How far a shot reaches. The arena is 500 m across, so this crosses most of it.
 pub const WEAPON_RANGE: f32 = 200.0;
@@ -70,29 +65,6 @@ pub fn aim_ray(eye: Vec3, yaw: f32, pitch: f32) -> (Vec3, Vec3) {
     (eye, direction.normalize_or_zero())
 }
 
-/// Distance along the ray at which it enters a player's capsule, if it does.
-///
-/// `feet` is the player's position, the same one movement works in.
-pub fn hit_distance(
-    origin: Vec3,
-    direction: Vec3,
-    feet: Vec3,
-    crouching: bool,
-    max_distance: f32,
-) -> Option<f32> {
-    let (half_height, y_offset) = if crouching {
-        (CROUCH_CAPSULE_HALF_HEIGHT, CROUCH_CAPSULE_Y_OFFSET)
-    } else {
-        (CAPSULE_HALF_HEIGHT, CAPSULE_Y_OFFSET)
-    };
-    let capsule = Capsule::new_y(half_height, CAPSULE_RADIUS);
-    let pose = Pose::from_translation(feet + Vec3::Y * y_offset);
-    let ray = Ray::new(origin.into(), direction.into());
-    // `solid` so a shot fired from inside a capsule counts as an immediate hit rather than passing
-    // through and striking the far wall of it.
-    capsule.cast_ray(&pose, &ray, max_distance, true)
-}
-
 /// Where a shot stopped, and in whom.
 ///
 /// Always a result, never a miss: a shot that hits nobody still ends somewhere — on a wall, or at
@@ -101,7 +73,7 @@ pub fn hit_distance(
 pub struct Shot {
     /// How far along the ray it stopped.
     pub distance: f32,
-    /// The player it stopped in, if it stopped in one.
+    /// The player or prop it stopped in, if it stopped in one.
     pub target: Option<Entity>,
 }
 
@@ -115,9 +87,10 @@ impl Shot {
 /// Where a shot stops, given the targets offered.
 ///
 /// The level is tested too and wins ties by being nearer: a target behind a crate is behind cover,
-/// not merely obscured. `targets` supplies each candidate's entity, feet and stance; the shooter
-/// must not be among them, or they shoot themselves at zero distance.
-pub fn resolve<T: IntoIterator<Item = (Entity, Vec3, bool)>>(
+/// not merely obscured. `targets` supplies each candidate's entity and the shape it presented at the
+/// moment being tested; the shooter must not be among them, or they shoot themselves at zero
+/// distance.
+pub fn resolve<T: IntoIterator<Item = (Entity, Hitbox)>>(
     world: &CollisionWorld,
     origin: Vec3,
     direction: Vec3,
@@ -129,8 +102,8 @@ pub fn resolve<T: IntoIterator<Item = (Entity, Vec3, bool)>>(
         .unwrap_or(WEAPON_RANGE);
 
     let mut best: Option<(Entity, f32)> = None;
-    for (entity, feet, crouching) in targets {
-        let Some(distance) = hit_distance(origin, direction, feet, crouching, reach) else {
+    for (entity, hitbox) in targets {
+        let Some(distance) = hitbox.cast_ray(origin, direction, reach) else {
             continue;
         };
         if best.is_none_or(|(_, nearest)| distance < nearest) {
@@ -170,7 +143,7 @@ impl Fired {
 /// answer no. The angles come from `input`, not from the replicated [`Aim`](crate::player::Aim):
 /// `Aim` is written at the end of a tick, so reading it here would aim every shot with the previous
 /// tick's angles.
-pub fn fire<T: IntoIterator<Item = (Entity, Vec3, bool)>>(
+pub fn fire<T: IntoIterator<Item = (Entity, Hitbox)>>(
     world: &CollisionWorld,
     state: &PlayerState,
     input: &PlayerInput,
@@ -211,6 +184,7 @@ pub struct ShotFired {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::movement::{CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS, CAPSULE_Y_OFFSET};
 
     /// A world with a floor and one crate, matching the level's own.
     fn world_with_cover() -> CollisionWorld {
@@ -237,6 +211,11 @@ mod tests {
 
     const TARGET: Entity = Entity::from_raw_u32(1).unwrap();
 
+    /// A standing player at `feet`, as a target.
+    fn standing(feet: Vec3) -> Hitbox {
+        Hitbox::Player { feet, crouching: false }
+    }
+
     /// Yaw 0 looks down -Z, the same convention movement uses. Getting this wrong would make every
     /// shot miss by exactly the angle nobody thinks to check.
     #[test]
@@ -255,7 +234,7 @@ mod tests {
     fn a_shot_down_the_middle_hits() {
         let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.0);
         let target = Vec3::new(0.0, 0.0, -10.0);
-        let hit = resolve(&empty_world(), origin, direction, [(TARGET, target, false)]);
+        let hit = resolve(&empty_world(), origin, direction, [(TARGET, standing(target))]);
         assert_eq!(hit.target, Some(TARGET), "a target straight ahead was not hit");
         let distance = hit.distance;
 
@@ -276,7 +255,7 @@ mod tests {
         let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.0);
         // A metre to the side, well clear of the 0.35 m radius.
         let target = Vec3::new(1.0, 0.0, -10.0);
-        assert!(resolve(&empty_world(), origin, direction, [(TARGET, target, false)]).target.is_none());
+        assert!(resolve(&empty_world(), origin, direction, [(TARGET, standing(target))]).target.is_none());
     }
 
     /// Cover has to work, or the level is decoration.
@@ -285,23 +264,31 @@ mod tests {
         let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.0);
         // The crate sits at z = -5; the target is behind it.
         let target = Vec3::new(0.0, 0.0, -10.0);
-        let shot = resolve(&world_with_cover(), origin, direction, [(TARGET, target, false)]);
+        let shot = resolve(&world_with_cover(), origin, direction, [(TARGET, standing(target))]);
         assert!(shot.target.is_none(), "shot through a crate");
         // And it stopped at the crate's near face, which is what the bullet hole is drawn on.
         assert!((shot.distance - 4.0).abs() < 0.01, "stopped at {}", shot.distance);
     }
 
-    /// A crouched player is a smaller target, which is the point of crouching.
+    /// A prop is a target like any other, and wins over a player standing behind it.
     #[test]
-    fn crouching_ducks_under_a_level_shot() {
-        // Aimed at standing eye height, ten metres out.
+    fn a_moving_prop_takes_the_shot_meant_for_someone_behind_it() {
+        let player = Entity::from_raw_u32(1).unwrap();
+        let prop = Entity::from_raw_u32(2).unwrap();
         let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.0);
-        let target = Vec3::new(0.0, 0.0, -10.0);
-        assert!(hit_distance(origin, direction, target, false, WEAPON_RANGE).is_some());
-        assert!(
-            hit_distance(origin, direction, target, true, WEAPON_RANGE).is_none(),
-            "a crouched player was hit by a shot at standing head height"
+        let hit = resolve(
+            &empty_world(),
+            origin,
+            direction,
+            [
+                (player, standing(Vec3::new(0.0, 0.0, -10.0))),
+                (prop, Hitbox::Prop {
+                    centre: Vec3::new(0.0, 1.59, -5.0),
+                    half_extents: Vec3::splat(0.5),
+                }),
+            ],
         );
+        assert_eq!(hit.target, Some(prop), "shot through a prop to the player behind it");
     }
 
     #[test]
@@ -313,7 +300,10 @@ mod tests {
             &empty_world(),
             origin,
             direction,
-            [(far, Vec3::new(0.0, 0.0, -20.0), false), (near, Vec3::new(0.0, 0.0, -5.0), false)],
+            [
+                (far, standing(Vec3::new(0.0, 0.0, -20.0))),
+                (near, standing(Vec3::new(0.0, 0.0, -5.0))),
+            ],
         );
         assert_eq!(hit.target, Some(near));
     }

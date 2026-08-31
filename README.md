@@ -928,6 +928,34 @@ Registering the channel is not enough to make it work: `add_direction` is what w
 connection's transport. Without it the server sent into a `ChannelNotFound`, logged once per shot
 and dropped, and every client drew nothing.
 
+#### Things that move and are not players
+
+A crate that rides up and down, to have something moving that is nobody's player. It is the case
+lag compensation has to cover for a lift, a swinging door, a train.
+
+**The animation runs on the server alone.** Clients receive `Hitbox` like any other replicated
+component and interpolate it; nothing on a client works out where the crate ought to be. That is
+deliberate even though the motion is a pure function of the tick and every client *could* compute
+it — the moment anything can stop, push or break the crate, a locally computed one is wrong, and the
+version that is wrong later is not worth being right now. It also means a crate goes down exactly
+the same path as a player, replicated and interpolated and rewound out of the same `HitboxHistory`,
+rather than being a second mechanism beside it.
+
+Making that possible was the one real generalisation. A target used to be a feet position and a
+`crouching` flag — a player and nothing else, with the shape hard-coded in the hit test. It is now a
+`Hitbox`, an enum of the movement capsule or an axis-aligned box, and the shape travels *with* the
+pose because it changes over time.
+
+What a crate is **not** is terrain. It stops bullets, because a shot tests every hitbox and takes
+the nearest, but it does not stop feet: the level's collision is a static BVH built once, with no
+way to move a collider in it. The crates therefore ride high enough to clear a standing player,
+which a test holds to account. Standing on a lift is a separate piece of work, and a bigger one than
+the netcode was.
+
+Verified live at 100 ms of ping, one player firing at a crate: the server reports rewinding it by
+13 to 14 ticks and the crate having moved 0.12 to 0.43 m since — and the bracket it used came from
+the *crate's* history, since there was no second player to take one from.
+
 #### Lag compensation
 
 Every shot is tested against the world the shooter was looking at, not the present one.
@@ -959,20 +987,26 @@ the frame the trigger went down, and quantised on the way.
 A shot with neither resolves against the present, which is the old behaviour. Each rung down is
 logged rather than silent.
 
-The server keeps the rest: `PositionHistory`, a short ring buffer of each player's position and
-stance, written in `FixedPostUpdate` so it holds the value at the *end* of a tick — the one
-replication sends and therefore the one a client interpolates towards. `resolve_shots` then samples
-each target at `shot tick − reported delay`, blending between two recorded ticks by the overstep,
-because the shooter's screen showed a position *between* two updates rather than a recorded one.
+The server keeps the rest: `HitboxHistory`, a short ring buffer of what each target *was*, written
+in `FixedPostUpdate` so it holds the value at the *end* of a tick — the one replication sends and
+therefore the one a client interpolates towards. `resolve_shots` then rebuilds each target at the
+moment the shot names, and passes those shapes rather than the present ones to the hit test.
+
+It stores a whole `Hitbox` and not just a position, because the shape changes too. Crouching was
+already an example before any prop existed: someone who ducked half a round trip ago must still be
+standing in the past the shooter aimed at. Rewinding a shape to the right place but the wrong size
+is only half a rewind.
 
 Per entity, not by world snapshot: a hitscan ray asks about each target separately anyway, and per
 entity means a player who joined a moment ago simply has a short history instead of a hole in a
 shared structure. The level is not rewound — geometry does not move, so a shot blocked by a crate
 now was blocked by it then.
 
-The client sends **one** bracket, not one per player, and that is enough: a player who is moving
-produces an update every send interval, so every moving player shares the same bracket, and a
-player who is not moving produces no updates at all, over which any bracket gives the same answer.
+The client sends **one** bracket, not one per target, and that is enough: anything that is moving
+produces an update every send interval, so everything moving shares the same bracket, and something
+that is not moving produces no updates at all, over which any bracket gives the same answer. It is
+read across every interpolated history, players *and* props — a lone player shooting at a moving
+crate has no other player to take a bracket from, and would otherwise report none at all.
 
 The bracket is read *before* interpolation runs again in the frame, on purpose. A player reacts to
 what is on the screen, and what is on the screen is the blend interpolation produced last frame.

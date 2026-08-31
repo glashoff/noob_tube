@@ -14,8 +14,9 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use lightyear::prelude::{
     ConfirmedHistory, Interpolated, InterpolationSystems, InterpolationTimeline, NetworkTimeline,
-    Predicted, interpolation_fraction,
+    Predicted, Tick, interpolation_fraction,
 };
+use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::player::{PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::simulation;
 use noob_tube_shared::types::Authored;
@@ -295,30 +296,21 @@ pub struct DrawnView(pub Option<ViewBracket>);
 /// not seen yet.
 fn note_drawn_view(
     timeline: Res<InterpolationTimeline>,
-    drawn: Query<&ConfirmedHistory<PlayerState>, With<Interpolated>>,
+    players: Query<&ConfirmedHistory<PlayerState>, With<Interpolated>>,
+    // Props are interpolated from their own component, so their histories are separate — and on a
+    // server with one player they are the *only* histories there are. Left out, a lone player
+    // shooting at a moving crate would report no bracket at all.
+    props: Query<&ConfirmedHistory<Hitbox>, With<Interpolated>>,
     mut view: ResMut<DrawnView>,
 ) {
     let current = timeline.now().tick();
     let overstep = timeline.overstep().to_f32();
     let mut best: Option<ViewBracket> = None;
-    for history in drawn.iter() {
-        // The newest sample at or before now, and the one after it: exactly the pair lightyear
-        // blends. Mirroring its choice is the whole point — a different pair would describe a
-        // screen nobody saw.
-        let previous = (0..history.len())
-            .take_while(|index| {
-                history.get_nth_tick(*index).is_some_and(|tick| tick <= current)
-            })
-            .last();
-        let Some(previous) = previous else { continue };
-        let Some((from, _)) = history.get_nth_state(previous) else {
-            continue;
-        };
-        // No sample after this one means the blend has run dry and lightyear is holding the last
-        // value. There is no bracket to report, only a position.
-        let Some((to, _)) = history.get_nth_state(previous + 1) else {
-            continue;
-        };
+    let brackets = players
+        .iter()
+        .filter_map(|history| bracket_ticks(history, current))
+        .chain(props.iter().filter_map(|history| bracket_ticks(history, current)));
+    for (from, to) in brackets {
         if best.is_some_and(|best| best.to >= to) {
             continue;
         }
@@ -331,6 +323,27 @@ fn note_drawn_view(
     view.0 = best;
 }
 
+/// The pair of confirmed ticks a history is being blended between at `current`.
+///
+/// The newest sample at or before now, and the one after it: exactly the pair lightyear picks.
+/// Mirroring its choice is the whole point — a different pair would describe a screen nobody saw.
+/// `None` when there is no sample after this one, which means the blend has run dry and lightyear
+/// is holding the last value: there is a position, but no bracket.
+///
+/// Generic over the component, so one answer serves a player's position and a prop's hitbox — two
+/// histories with no trait in common but the same shape.
+fn bracket_ticks<C: Send + Sync + 'static>(
+    history: &ConfirmedHistory<C>,
+    current: Tick,
+) -> Option<(Tick, Tick)> {
+    let previous = (0..history.len())
+        .take_while(|index| history.get_nth_tick(*index).is_some_and(|tick| tick <= current))
+        .last()?;
+    let (from, _) = history.get_nth_state(previous)?;
+    let (to, _) = history.get_nth_state(previous + 1)?;
+    Some((from, to))
+}
+
 /// Update: says once what the first shot actually reported.
 ///
 /// What the shooter reports is the whole of what the server can know about the screen it was aimed
@@ -339,7 +352,8 @@ fn note_drawn_view(
 fn report_drawn_view(
     input: Res<CurrentInput>,
     timeline: Res<InterpolationTimeline>,
-    drawn: Query<&ConfirmedHistory<PlayerState>, With<Interpolated>>,
+    players: Query<&ConfirmedHistory<PlayerState>, With<Interpolated>>,
+    props: Query<&ConfirmedHistory<Hitbox>, With<Interpolated>>,
     mut reported: Local<bool>,
 ) {
     if *reported || !input.0.fire {
@@ -356,9 +370,14 @@ fn report_drawn_view(
             // interpolation timeline has caught up with the newest sample that has arrived. Remote
             // players are being clamped rather than interpolated at that point, which is a problem
             // in its own right and worth saying so plainly.
-            let newest = drawn
+            let newest = players
                 .iter()
                 .filter_map(|history| history.get_nth_tick(history.len().checked_sub(1)?))
+                .chain(
+                    props
+                        .iter()
+                        .filter_map(|history| history.get_nth_tick(history.len().checked_sub(1)?)),
+                )
                 .max();
             warn!(
                 "first shot reports no view bracket: interpolation is at tick {} but the newest \

@@ -14,6 +14,7 @@ use lightyear::prelude::input::native::InputPlugin;
 use std::f32::consts::{PI, TAU};
 
 use crate::player::{Aim, Player, PlayerInput, PlayerState};
+use crate::hitbox::Hitbox;
 use crate::shooting::{Health, ShotFired};
 use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
@@ -50,6 +51,12 @@ impl Plugin for ProtocolPlugin {
             .add_interpolation_with(lerp_aim);
         // Sent once per entity: which peer this player belongs to never changes.
         app.component::<Player>().replicate_once();
+        // A prop's shape and where it is, in one component — for a crate the two are the same
+        // thing. Interpolated like a player and never predicted: nothing on a client simulates a
+        // prop, so there is nothing to predict, and the server is the only author.
+        app.component::<Hitbox>()
+            .replicate()
+            .add_interpolation_with(Hitbox::lerp);
         // Health is the server's alone. A client predicting whether its shot landed would have to
         // un-kill someone on screen when the server disagreed, and there is no graceful way to do
         // that — so this only ever arrives.

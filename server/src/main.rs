@@ -12,7 +12,9 @@ use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::level;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::collision::CollisionWorld;
-use noob_tube_shared::lag_compensation::{PositionHistory, Snapshot};
+use noob_tube_shared::hitbox::Hitbox;
+use noob_tube_shared::props::{self, Bobbing};
+use noob_tube_shared::lag_compensation::HitboxHistory;
 use noob_tube_shared::shooting::{self, Health, ShotFired};
 use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin};
 use noob_tube_shared::types::Authored;
@@ -42,13 +44,15 @@ fn main() {
         // The same geometry the client collides against, built from the same numbers. If the two
         // disagreed, every step near the difference would produce a correction the player sees.
         .insert_resource(level::collision_world())
-        .add_systems(Startup, (start_listening, publish_metadata))
+        .add_systems(Startup, (start_listening, publish_metadata, spawn_props))
         .add_systems(
             FixedUpdate,
             // Before the step, which consumes the trigger by starting the cooldown, and which
             // moves everyone. A shot has to be resolved against the positions its shooter was
             // looking at, not the ones a tick of movement later.
-            (resolve_shots, simulation::step_players::<()>).chain(),
+            // The props move with the players, and both after the shots are resolved: a shot is
+            // tested against the world as its shooter left it, not one tick of everything later.
+            (resolve_shots, (simulation::step_players::<()>, move_props)).chain(),
         )
         // After the step, and in its own schedule so there is no doubt about the order: the
         // history has to hold the position at the *end* of a tick, because that is the one
@@ -83,7 +87,7 @@ enum Rewind {
 
 impl Rewind {
     /// The player's position and stance at that moment, out of a history.
-    fn apply(&self, history: &PositionHistory) -> Option<Snapshot> {
+    fn apply(&self, history: &HitboxHistory) -> Option<Hitbox> {
         match *self {
             Rewind::Bracket(view) => history.sample_bracket(view.from, view.to, view.factor),
             Rewind::Delay((tick, overstep)) => history.sample(tick, overstep),
@@ -145,7 +149,10 @@ fn resolve_shots(
     world: Res<CollisionWorld>,
     net: Res<NetConfig>,
     timeline: Res<LocalTimeline>,
-    histories: Query<&PositionHistory>,
+    histories: Query<&HitboxHistory>,
+    // Props are targets too, and unlike a player they carry their hitbox rather than deriving one
+    // from a `PlayerState` that does not exist.
+    props: Query<(Entity, &Hitbox)>,
     // How far behind the present each client's view of everyone else is. Lightyear puts this on the
     // connection entity when an input message reports it, which is what `ControlledBy::owner`
     // points at. It is absent until the first message arrives, and absent forever if the client
@@ -163,10 +170,11 @@ fn resolve_shots(
     let tick = timeline.tick();
     // Everyone who could be hit, gathered once rather than once per shooter. This is the present;
     // each shooter rewinds it to its own moment below.
-    let present: Vec<(Entity, Vec3, bool)> = players
+    let present: Vec<(Entity, Hitbox)> = players
         .p0()
         .iter()
-        .map(|(entity, state, ..)| (entity, state.position, state.crouching))
+        .map(|(entity, state, ..)| (entity, Hitbox::of(state)))
+        .chain(props.iter().map(|(entity, hitbox)| (entity, *hitbox)))
         .collect();
 
     let mut hits: Vec<(Entity, u64)> = Vec::new();
@@ -224,16 +232,16 @@ fn resolve_shots(
         }
 
         // Everyone but the shooter. Left in, they would hit themselves at zero distance.
-        let targets: Vec<(Entity, Vec3, bool)> = present
+        let targets: Vec<(Entity, Hitbox)> = present
             .iter()
             .copied()
-            .filter(|(entity, ..)| *entity != shooter)
-            .map(|(entity, now, crouching)| {
+            .filter(|(entity, _)| *entity != shooter)
+            .map(|(entity, now)| {
                 let Some(rewind) = rewind else {
-                    return (entity, now, crouching);
+                    return (entity, now);
                 };
                 let Ok(history) = histories.get(entity) else {
-                    return (entity, now, crouching);
+                    return (entity, now);
                 };
                 let Some(past) = rewind.apply(history) else {
                     // A player who joined moments ago simply has no such past, which is normal and
@@ -248,16 +256,16 @@ fn resolve_shots(
                             history.oldest().map(|tick| tick.0),
                         );
                     }
-                    return (entity, now, crouching);
+                    return (entity, now);
                 };
                 trace!(
                     "peer {} rewound a target {} ticks to {}: it moved {:.2} m since",
                     player.peer,
                     tick - rewind.oldest_tick(),
                     rewind.describe(),
-                    (now - past.position).length(),
+                    (now.centre() - past.centre()).length(),
                 );
-                (entity, past.position, past.crouching)
+                (entity, past)
             })
             .collect();
 
@@ -323,6 +331,44 @@ fn broadcast_shots(
     }
 }
 
+/// Startup: puts the moving crates in the world.
+///
+/// Server-side entities with nothing clever about them: they carry the rule they move by, the shape
+/// that rule produces, and a history to be rewound out of — the same three things a player has, and
+/// the same replication.
+fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
+    for (index, prop) in props::MOVING_CRATES.into_iter().enumerate() {
+        commands.spawn((
+            Name::from(format!("Moving crate {index}")),
+            Authored,
+            prop,
+            prop.hitbox_at(0.0),
+            HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
+            Replicate::to_clients(NetworkTarget::All),
+            // Interpolated by everyone and predicted by nobody. There is no input behind a prop to
+            // predict from, and no client simulates one.
+            InterpolationTarget::to_clients(NetworkTarget::All),
+        ));
+    }
+    info!("{} moving crates", props::MOVING_CRATES.len());
+}
+
+/// FixedUpdate: advances every prop to where this tick says it should be.
+///
+/// From the tick, not by accumulating: a server that stalled for a moment comes back where the
+/// crate belongs rather than that much behind, and the history then agrees with the rule that made
+/// it.
+fn move_props(
+    timeline: Res<LocalTimeline>,
+    net: Res<NetConfig>,
+    mut props: Query<(&Bobbing, &mut Hitbox)>,
+) {
+    let seconds = timeline.tick().0 as f32 * net.tick_duration().as_secs_f32();
+    for (prop, mut hitbox) in props.iter_mut() {
+        *hitbox = prop.hitbox_at(seconds);
+    }
+}
+
 /// FixedPostUpdate: writes this tick's finished position into each player's history.
 ///
 /// The tick recorded is the server's own, which is also the tick a client's inputs are stamped for
@@ -330,17 +376,17 @@ fn broadcast_shots(
 /// land on the position the shooter actually saw rather than near it.
 fn record_positions(
     timeline: Res<LocalTimeline>,
-    mut players: Query<(&PlayerState, &mut PositionHistory)>,
+    mut players: Query<(&PlayerState, &mut HitboxHistory)>,
+    mut props: Query<(&Hitbox, &mut HitboxHistory), Without<PlayerState>>,
 ) {
     let tick = timeline.tick();
     for (state, mut history) in players.iter_mut() {
-        history.record(
-            tick,
-            Snapshot {
-                position: state.position,
-                crouching: state.crouching,
-            },
-        );
+        history.record(tick, Hitbox::of(state));
+    }
+    // A prop carries its hitbox rather than deriving one, because there is no `PlayerState` behind
+    // it to derive from — the shape *is* the state.
+    for (hitbox, mut history) in props.iter_mut() {
+        history.record(tick, *hitbox);
     }
 }
 
@@ -442,7 +488,7 @@ fn on_peer_connected(
         Aim::default(),
         Health::default(),
         // The past this player can be shot in. Server-side only, like the spawn index.
-        PositionHistory::with_capacity(net.lag_comp_history_ticks.into()),
+        HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
         // Where this client's inputs are written once they arrive.
         ActionState::<PlayerInput>::default(),
         // Replicate is the other half of ReplicationSender: that says the channel may send, this

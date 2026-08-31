@@ -4,6 +4,7 @@ mod crosshair;
 mod debug_draw;
 mod harness;
 mod local_player;
+mod props;
 mod remote_players;
 mod shot_effects;
 mod world;
@@ -36,6 +37,7 @@ fn main() {
             local_player::LocalPlayerPlugin,
             debug_draw::DebugDrawPlugin,
             crosshair::CrosshairPlugin,
+            props::PropsPlugin,
             shot_effects::ShotEffectsPlugin,
             remote_players::RemotePlayersPlugin,
             harness::HarnessPlugin,

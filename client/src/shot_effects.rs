@@ -20,6 +20,7 @@ use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::{MessageReceiver, Predicted, Rollback, client};
 use noob_tube_shared::collision::CollisionWorld;
+use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::player::{Player, PlayerInput, PlayerState};
 use noob_tube_shared::shooting::{self, ShotFired};
 use noob_tube_shared::simulation;
@@ -149,6 +150,8 @@ fn predict_own_tracer(
     // Everyone else, at the position they are being *drawn* at. That is the honest local answer to
     // where the shot goes, and it is the same view the server reconstructs to resolve the hit.
     others: Query<Target, Drawn>,
+    // Props are targets too, and they carry their hitbox rather than deriving one.
+    props: Query<(Entity, &Hitbox), Drawn>,
     world: Option<Res<CollisionWorld>>,
     assets: Option<Res<ShotAssets>>,
     mut commands: Commands,
@@ -159,7 +162,8 @@ fn predict_own_tracer(
     let (action, state) = *mine;
     let targets = others
         .iter()
-        .map(|(entity, other)| (entity, other.position, other.crouching));
+        .map(|(entity, other)| (entity, Hitbox::of(other)))
+        .chain(props.iter().map(|(entity, hitbox)| (entity, *hitbox)));
     // The same call the server makes, over the same input, before either side steps the player.
     let Some(fired) = shooting::fire(&world, state, &action.0, targets) else {
         return;
