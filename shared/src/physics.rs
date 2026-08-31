@@ -415,3 +415,4 @@ mod tests {
         assert!(results.windows(2).all(|w| w[0] == w[1]), "{results:?}");
     }
 }
+

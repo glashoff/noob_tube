@@ -4,26 +4,64 @@
 //! which is the case lag compensation has to cover for anything that is not a player — a lift, a
 //! swinging door, a train.
 //!
-//! **The animation runs on the server alone.** Clients receive [`Hitbox`] like any other replicated
-//! component and interpolate it; nothing on a client works out where the crate ought to be. That is
-//! deliberate even though the motion is a pure function of the tick and every client *could* compute
-//! it: the moment anything can stop, push or break the crate, a locally computed one is wrong, and
-//! the version that is wrong later is not worth being right now. It also means the crate goes down
-//! exactly the same path as a player — replicated, interpolated, and rewound out of a
-//! [`HitboxHistory`](crate::lag_compensation::HitboxHistory) — instead of a second mechanism beside
-//! it.
+//! **The animation runs on the server alone.** A crate is a kinematic Avian body whose [`Position`]
+//! the server writes each tick; clients receive that position like any other replicated component
+//! and interpolate it. Nothing on a client works out where the crate ought to be. That is deliberate
+//! even though the motion is a pure function of the tick and every client *could* compute it: the
+//! moment anything can stop, push or break the crate, a locally computed one is wrong, and the
+//! version that is wrong later is not worth being right now.
 //!
 //! What it is *not* is terrain. It stops bullets, because a shot tests every hitbox and takes the
-//! nearest, but it does not stop feet: the level's collision geometry is a static BVH built once,
-//! with no way to move a collider in it. Standing on a lift is a separate piece of work.
+//! nearest, but it does not stop feet: it sits on [`Layer::Body`](crate::physics::Layer::Body),
+//! which the level queries do not see. Standing on a lift is a separate piece of work.
+//!
+//! ### Why kinematic rather than dynamic
+//!
+//! A kinematic body moves where it is put and nothing pushes it back. That is what an animation is.
+//! A dynamic crate — one that falls, and that a player could shove — is the next thing this becomes,
+//! and the change is one variant of [`RigidBody`]; everything around it, replication included,
+//! already works the way it would need to.
 
+use avian3d::prelude::*;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::hitbox::Hitbox;
 
+/// A box-shaped prop, as everyone sees it.
+///
+/// Only the size is in here, because only the size is constant: where it *is* travels as
+/// [`Position`], which lightyear replicates and interpolates for every Avian body. Sent once per
+/// entity rather than per update — re-sending half-extents sixty times a second for a value that
+/// never changes is exactly the sort of thing the old design did by putting both in one component.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
+#[reflect(Component)]
+pub struct Prop {
+    /// Half the size of the box.
+    pub half_extents: Vec3,
+}
+
+impl Prop {
+    /// The shape a shot meets, for a prop standing at `centre`.
+    pub fn hitbox_at(&self, centre: Vec3) -> Hitbox {
+        Hitbox::Prop { centre, half_extents: self.half_extents }
+    }
+
+    /// The collider that shape corresponds to.
+    ///
+    /// Avian sizes a cuboid by its full side lengths, where the hitbox is written in half-extents.
+    pub fn collider(&self) -> Collider {
+        Collider::cuboid(
+            self.half_extents.x * 2.0,
+            self.half_extents.y * 2.0,
+            self.half_extents.z * 2.0,
+        )
+    }
+}
+
 /// A prop that slides back and forth along one axis, forever.
 ///
-/// Server-only, and never replicated: what reaches a client is the [`Hitbox`] this produces.
+/// Server-only, and never replicated: what reaches a client is the [`Position`] this produces.
 #[derive(Component, Clone, Copy, Debug, Reflect)]
 #[reflect(Component)]
 pub struct Bobbing {
@@ -38,16 +76,19 @@ pub struct Bobbing {
 }
 
 impl Bobbing {
-    /// Where the prop is at a moment, as the shape a shot would meet.
+    /// Where the prop is at a moment.
     ///
     /// A pure function of the time, not an accumulation, so the crate cannot drift: a server that
-    /// paused for a second comes back where it should be rather than a second behind.
-    pub fn hitbox_at(&self, seconds: f32) -> Hitbox {
+    /// paused for a second comes back where it should be rather than a second behind. That is also
+    /// what lets its history agree with the rule that made it.
+    pub fn position_at(&self, seconds: f32) -> Vec3 {
         let phase = core::f32::consts::TAU * seconds / self.period.max(f32::MIN_POSITIVE);
-        Hitbox::Prop {
-            centre: self.centre + self.reach * phase.sin(),
-            half_extents: self.half_extents,
-        }
+        self.centre + self.reach * phase.sin()
+    }
+
+    /// The shape it presents, which never changes.
+    pub fn prop(&self) -> Prop {
+        Prop { half_extents: self.half_extents }
     }
 }
 
@@ -84,7 +125,7 @@ mod tests {
 
     #[test]
     fn it_starts_in_the_middle_and_reaches_both_ends() {
-        let at = |t: f32| CRATE.hitbox_at(t).centre();
+        let at = |t: f32| CRATE.position_at(t);
         assert_eq!(at(0.0), CRATE.centre);
         assert!((at(CRATE.period * 0.25).y - (CRATE.centre.y + 1.5)).abs() < 1e-4);
         assert!((at(CRATE.period * 0.75).y - (CRATE.centre.y - 1.5)).abs() < 1e-4);
@@ -95,9 +136,9 @@ mod tests {
     /// drifting away from where its history says it was.
     #[test]
     fn a_whole_period_later_it_is_back() {
-        let start = CRATE.hitbox_at(0.4);
-        let later = CRATE.hitbox_at(0.4 + CRATE.period * 5.0);
-        assert!((start.centre() - later.centre()).length() < 1e-3);
+        let start = CRATE.position_at(0.4);
+        let later = CRATE.position_at(0.4 + CRATE.period * 5.0);
+        assert!((start - later).length() < 1e-3);
     }
 
     /// It must clear a standing player at its lowest, or it is a crate you can walk through.
@@ -110,5 +151,18 @@ mod tests {
                 "a crate dips to {lowest} m, into a standing player",
             );
         }
+    }
+
+    /// The collider and the hitbox have to be the same box, or a shot passes through what it looks
+    /// like it hit. They are written in different units, which is exactly how that goes wrong.
+    #[test]
+    fn the_collider_and_the_hitbox_are_the_same_box() {
+        let prop = MOVING_CRATES[0].prop();
+        let aabb = prop.collider().aabb(Vec3::ZERO, Quat::IDENTITY);
+        let Hitbox::Prop { half_extents, .. } = prop.hitbox_at(Vec3::ZERO) else {
+            panic!("a prop's hitbox is not a prop");
+        };
+        assert!((aabb.max - half_extents).length() < 1e-5, "{:?} vs {half_extents:?}", aabb.max);
+        assert!((aabb.min + half_extents).length() < 1e-5, "{:?} vs {half_extents:?}", aabb.min);
     }
 }

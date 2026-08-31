@@ -36,6 +36,9 @@ rapier3d = "=0.35.0-glamx0.2"
 # `default-features = false` keeps the debug renderer, picking and mesh conversion out of the
 # headless server; `parry-f32` is what switches on the `Collider` type at all.
 avian3d = { version = "0.7", default-features = false, features = ["3d", "f32", "parry-f32"] }
+# Replication and rollback for Avian bodies. Its `3d` feature switches on `avian3d/serialize`,
+# which is what makes Position and Rotation sendable at all.
+lightyear_avian3d = { version = "0.29", default-features = false, features = ["std", "3d", "f32"] }
 
 [profile.dev]
 opt-level = 1

@@ -16,10 +16,12 @@
 //! not need to be paid for on the wire.
 
 use bevy::light::NotShadowCaster;
+use avian3d::prelude::Position;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::{MessageReceiver, Predicted, Rollback, client};
 use noob_tube_shared::physics::Level;
+use noob_tube_shared::props::Prop;
 use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::player::{Player, PlayerInput, PlayerState};
 use noob_tube_shared::shooting::{self, ShotFired};
@@ -151,7 +153,7 @@ fn predict_own_tracer(
     // where the shot goes, and it is the same view the server reconstructs to resolve the hit.
     others: Query<Target, Drawn>,
     // Props are targets too, and they carry their hitbox rather than deriving one.
-    props: Query<(Entity, &Hitbox), Drawn>,
+    props: Query<(Entity, &Position, &Prop), Drawn>,
     level: Level,
     assets: Option<Res<ShotAssets>>,
     mut commands: Commands,
@@ -163,7 +165,7 @@ fn predict_own_tracer(
     let targets = others
         .iter()
         .map(|(entity, other)| (entity, Hitbox::of(other)))
-        .chain(props.iter().map(|(entity, hitbox)| (entity, *hitbox)));
+        .chain(props.iter().map(|(entity, position, prop)| (entity, prop.hitbox_at(position.0))));
     // The same call the server makes, over the same input, before either side steps the player.
     let Some(fired) = shooting::fire(&level, state, &action.0, targets) else {
         return;

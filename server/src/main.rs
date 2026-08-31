@@ -11,9 +11,10 @@ use noob_tube_shared::simulation;
 use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::level;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState, ViewBracket};
-use noob_tube_shared::physics::{Level, PhysicsPlugin};
+use noob_tube_shared::physics::{Layer, Level, PhysicsPlugin};
+use avian3d::prelude::{CollisionLayers, LayerMask, Position, RigidBody};
 use noob_tube_shared::hitbox::Hitbox;
-use noob_tube_shared::props::{self, Bobbing};
+use noob_tube_shared::props::{self, Bobbing, Prop};
 use noob_tube_shared::lag_compensation::HitboxHistory;
 use noob_tube_shared::shooting::{self, Health, ShotFired};
 use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin};
@@ -153,9 +154,9 @@ fn resolve_shots(
     net: Res<NetConfig>,
     timeline: Res<LocalTimeline>,
     histories: Query<&HitboxHistory>,
-    // Props are targets too, and unlike a player they carry their hitbox rather than deriving one
-    // from a `PlayerState` that does not exist.
-    props: Query<(Entity, &Hitbox)>,
+    // Props are targets too. Their hitbox comes from the pose Avian holds and the shape they were
+    // spawned with, rather than from a `PlayerState` that does not exist.
+    props: Query<(Entity, &Position, &Prop)>,
     // How far behind the present each client's view of everyone else is. Lightyear puts this on the
     // connection entity when an input message reports it, which is what `ControlledBy::owner`
     // points at. It is absent until the first message arrives, and absent forever if the client
@@ -177,7 +178,7 @@ fn resolve_shots(
         .p0()
         .iter()
         .map(|(entity, state, ..)| (entity, Hitbox::of(state)))
-        .chain(props.iter().map(|(entity, hitbox)| (entity, *hitbox)))
+        .chain(props.iter().map(|(entity, position, prop)| (entity, prop.hitbox_at(position.0))))
         .collect();
 
     let mut hits: Vec<(Entity, u64)> = Vec::new();
@@ -336,16 +337,25 @@ fn broadcast_shots(
 
 /// Startup: puts the moving crates in the world.
 ///
-/// Server-side entities with nothing clever about them: they carry the rule they move by, the shape
-/// that rule produces, and a history to be rewound out of — the same three things a player has, and
-/// the same replication.
+/// A kinematic Avian body: it moves where the server puts it and nothing pushes back, which is what
+/// an animation is. It carries the rule it moves by (server-side), the shape it presents (sent once)
+/// and a history to be rewound out of — the same three things a player has.
+///
+/// [`Layer::Body`] rather than `Layer::Level` is what keeps it from becoming terrain. The level
+/// queries a player's feet make only see `Layer::Level`, so a crate stops bullets without stopping
+/// anyone walking under it.
 fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
-    for (index, prop) in props::MOVING_CRATES.into_iter().enumerate() {
+    for (index, crate_) in props::MOVING_CRATES.into_iter().enumerate() {
+        let prop = crate_.prop();
         commands.spawn((
             Name::from(format!("Moving crate {index}")),
             Authored,
+            crate_,
             prop,
-            prop.hitbox_at(0.0),
+            RigidBody::Kinematic,
+            prop.collider(),
+            CollisionLayers::new(Layer::Body, LayerMask::ALL),
+            Position(crate_.position_at(0.0)),
             HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
             Replicate::to_clients(NetworkTarget::All),
             // Interpolated by everyone and predicted by nobody. There is no input behind a prop to
@@ -364,11 +374,11 @@ fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
 fn move_props(
     timeline: Res<LocalTimeline>,
     net: Res<NetConfig>,
-    mut props: Query<(&Bobbing, &mut Hitbox)>,
+    mut props: Query<(&Bobbing, &mut Position)>,
 ) {
     let seconds = timeline.tick().0 as f32 * net.tick_duration().as_secs_f32();
-    for (prop, mut hitbox) in props.iter_mut() {
-        *hitbox = prop.hitbox_at(seconds);
+    for (prop, mut position) in props.iter_mut() {
+        position.0 = prop.position_at(seconds);
     }
 }
 
@@ -380,16 +390,17 @@ fn move_props(
 fn record_positions(
     timeline: Res<LocalTimeline>,
     mut players: Query<(&PlayerState, &mut HitboxHistory)>,
-    mut props: Query<(&Hitbox, &mut HitboxHistory), Without<PlayerState>>,
+    mut props: Query<(&Position, &Prop, &mut HitboxHistory), Without<PlayerState>>,
 ) {
     let tick = timeline.tick();
     for (state, mut history) in players.iter_mut() {
         history.record(tick, Hitbox::of(state));
     }
-    // A prop carries its hitbox rather than deriving one, because there is no `PlayerState` behind
-    // it to derive from — the shape *is* the state.
-    for (hitbox, mut history) in props.iter_mut() {
-        history.record(tick, *hitbox);
+    // A prop's hitbox is its replicated pose and its constant shape put together, where a player's
+    // comes out of a `PlayerState`. Both are derived at the same moment in the tick, which is what
+    // makes the two histories comparable.
+    for (position, prop, mut history) in props.iter_mut() {
+        history.record(tick, prop.hitbox_at(position.0));
     }
 }
 

@@ -10,13 +10,13 @@
 //! second of mouse movement is far worse than the position error it would be fixing.
 
 use bevy::input::mouse::AccumulatedMouseMotion;
+use avian3d::prelude::Position;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use lightyear::prelude::{
     ConfirmedHistory, Interpolated, InterpolationSystems, InterpolationTimeline, NetworkTimeline,
     Predicted, Tick, interpolation_fraction,
 };
-use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::player::{PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::simulation;
 use noob_tube_shared::types::Authored;
@@ -297,10 +297,10 @@ pub struct DrawnView(pub Option<ViewBracket>);
 fn note_drawn_view(
     timeline: Res<InterpolationTimeline>,
     players: Query<&ConfirmedHistory<PlayerState>, With<Interpolated>>,
-    // Props are interpolated from their own component, so their histories are separate — and on a
+    // Props are interpolated from their Avian pose, so their histories are separate — and on a
     // server with one player they are the *only* histories there are. Left out, a lone player
     // shooting at a moving crate would report no bracket at all.
-    props: Query<&ConfirmedHistory<Hitbox>, With<Interpolated>>,
+    props: Query<&ConfirmedHistory<Position>, With<Interpolated>>,
     mut view: ResMut<DrawnView>,
 ) {
     let current = timeline.now().tick();
@@ -330,7 +330,7 @@ fn note_drawn_view(
 /// `None` when there is no sample after this one, which means the blend has run dry and lightyear
 /// is holding the last value: there is a position, but no bracket.
 ///
-/// Generic over the component, so one answer serves a player's position and a prop's hitbox — two
+/// Generic over the component, so one answer serves a player's state and a prop's pose — two
 /// histories with no trait in common but the same shape.
 fn bracket_ticks<C: Send + Sync + 'static>(
     history: &ConfirmedHistory<C>,
@@ -353,7 +353,7 @@ fn report_drawn_view(
     input: Res<CurrentInput>,
     timeline: Res<InterpolationTimeline>,
     players: Query<&ConfirmedHistory<PlayerState>, With<Interpolated>>,
-    props: Query<&ConfirmedHistory<Hitbox>, With<Interpolated>>,
+    props: Query<&ConfirmedHistory<Position>, With<Interpolated>>,
     mut reported: Local<bool>,
 ) {
     if *reported || !input.0.fire {

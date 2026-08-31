@@ -8,6 +8,7 @@ license.workspace = true
 avian3d = { workspace = true }
 bevy = { workspace = true }
 lightyear = { workspace = true }
+lightyear_avian3d = { workspace = true }
 rapier3d = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }

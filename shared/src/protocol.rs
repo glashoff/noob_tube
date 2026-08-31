@@ -13,8 +13,10 @@ use lightyear::prelude::*;
 use lightyear::prelude::input::native::InputPlugin;
 use std::f32::consts::{PI, TAU};
 
+use lightyear_avian3d::prelude::LightyearAvianPlugin;
+
 use crate::player::{Aim, Player, PlayerInput, PlayerState};
-use crate::hitbox::Hitbox;
+use crate::props::Prop;
 use crate::shooting::{Health, ShotFired};
 use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
@@ -51,12 +53,10 @@ impl Plugin for ProtocolPlugin {
             .add_interpolation_with(lerp_aim);
         // Sent once per entity: which peer this player belongs to never changes.
         app.component::<Player>().replicate_once();
-        // A prop's shape and where it is, in one component — for a crate the two are the same
-        // thing. Interpolated like a player and never predicted: nothing on a client simulates a
-        // prop, so there is nothing to predict, and the server is the only author.
-        app.component::<Hitbox>()
-            .replicate()
-            .add_interpolation_with(Hitbox::lerp);
+        // A prop's shape, and only its shape. Where it *is* travels as Avian's `Position`, which
+        // `LightyearAvianPlugin` registers below for every rigid body — so this is sent once per
+        // entity rather than with every update, because half-extents do not change.
+        app.component::<Prop>().replicate_once();
         // Health is the server's alone. A client predicting whether its shot landed would have to
         // un-kill someone on screen when the server disagreed, and there is no graceful way to do
         // that — so this only ever arrives.
@@ -89,6 +89,16 @@ impl Plugin for ProtocolPlugin {
         .add_direction(NetworkDirection::ServerToClient);
         app.register_message::<ShotFired>()
             .add_direction(NetworkDirection::ServerToClient);
+
+        // Physics bodies, last: this registers `Position`, `Rotation`, `LinearVelocity` and
+        // `AngularVelocity` for replication, prediction and interpolation, and it needs the
+        // component registry the calls above create. `Position` is the authority and the visual
+        // pose it produces is written to `Transform` in `PostUpdate` — which is why
+        // [`PhysicsPlugin`](crate::physics::PhysicsPlugin) leaves Avian's own transform sync out.
+        //
+        // Players are not rigid bodies and are untouched by any of it: the registrations are
+        // filtered on `With<RigidBody>`.
+        app.add_plugins(LightyearAvianPlugin::default());
     }
 }
 

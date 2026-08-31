@@ -114,8 +114,9 @@ rollback state stays at four fields — `position`, `velocity`, `on_ground`, `cr
 replayed tick is bit-identical to the original.
 
 **Everything else — stateful, and that is now fine.** Crates that can be pushed, doors, vehicles,
-ragdolls: all of them want a solver, and `lightyear_avian3d` rolls one back. *(Level collision runs
-on Avian today; the networked-solver half is the next step, and nothing is a dynamic body yet.)* It snapshots the whole
+ragdolls: all of them want a solver, and `lightyear_avian3d` rolls one back. *(Level collision and
+replicated kinematic bodies run on Avian today. Nothing is a dynamic body yet, which is the only
+reason the solver has no work to do.)* It snapshots the whole
 persistent state — contact graph, constraint graph, islands, sleeping, warm-start impulses, the
 collider BVHs — locally, per tick. Only `Position`, `Rotation`, `LinearVelocity` and
 `AngularVelocity` ever cross the network; a client re-derives the rest by running the same solver

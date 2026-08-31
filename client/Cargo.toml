@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 noob_tube_shared = { workspace = true }
+avian3d = { workspace = true }
 bevy = { workspace = true, features = ["default"] }
 lightyear = { workspace = true }
 # In-process inspector window. Its egui and bevy_egui versions are tied to this exact release,

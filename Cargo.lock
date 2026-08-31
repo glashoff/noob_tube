@@ -5910,6 +5910,7 @@ checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
 name = "noob_tube_client"
 version = "0.1.0"
 dependencies = [
+ "avian3d",
  "bevy",
  "bevy-inspector-egui",
  "bevy_brp_extras",
@@ -5921,6 +5922,7 @@ dependencies = [
 name = "noob_tube_server"
 version = "0.1.0"
 dependencies = [
+ "avian3d",
  "bevy",
  "lightyear",
  "noob_tube_shared",
@@ -5934,6 +5936,7 @@ dependencies = [
  "bevy",
  "bevy_remote",
  "lightyear",
+ "lightyear_avian3d",
  "rapier3d",
  "serde",
  "toml",
