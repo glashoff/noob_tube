@@ -12,11 +12,17 @@
 //! It also means the wheels move at frame rate rather than at tick rate, over the *interpolated*
 //! pose — so they follow the body exactly, with none of the stepping that a replicated wheel
 //! position would have.
+//!
+//! When there is a model, our own four cylinders are hidden and the model's own wheels are moved
+//! instead — see [`find_the_models_wheels`] and [`swing_the_models_wheels`]. The numbers are the
+//! same ones; only the thing being drawn changes.
 
 use avian3d::prelude::{
     CenterOfMass, ColliderDensity, CollisionLayers, LayerMask, PhysicsSystems, Position, RigidBody,
     Rotation, SpatialQuery, SpeculativeMargin,
 };
+use bevy::camera::primitives::Aabb;
+use bevy::math::Vec3A;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::{Predicted, client};
@@ -24,7 +30,8 @@ use noob_tube_shared::physics::Layer;
 use noob_tube_shared::player::{Player, PlayerInput, PlayerState};
 use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::vehicle::{
-    self, Controls, Driven, Driving, Righting, VehicleKind, WHEELS, Wheels, probe_wheels,
+    self, Controls, Driven, Driving, FRONT_WHEELS, Righting, VehicleKind, WHEELS, Wheels,
+    probe_wheels,
 };
 
 /// The visual model, under the asset directory.
@@ -45,6 +52,17 @@ const MODEL_GROUND: f32 = 0.446;
 /// Which way the model faces. Its windscreen and steering wheel are at −X and its antenna at +X, so
 /// its nose points along −X where everything in this game points along −Z: a quarter turn.
 const MODEL_YAW: f32 = -core::f32::consts::FRAC_PI_2;
+
+/// What the model calls the three parts of a wheel assembly, as the prefix of a node's name.
+///
+/// The only thing about the file that is taken on trust rather than measured. Everything else —
+/// which corner a part belongs to, how big the tyre is, where an arm is bolted — is worked out from
+/// where the geometry actually is, so that re-exporting the model cannot quietly move a wheel to
+/// the wrong strut. A name, though, is the one thing geometry cannot tell you: a tyre and the hub
+/// inside it are two boxes in the same place.
+const MODEL_TYRE: &str = "Tire";
+const MODEL_AXLE: &str = "Axel";
+const MODEL_ARM: &str = "Suspension";
 
 /// A vehicle that has just arrived and has nothing to be seen as yet.
 type Arrived = (With<client::Remote>, Added<VehicleKind>);
@@ -68,9 +86,18 @@ pub struct VehiclePlugin;
 impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<Wheel>()
+            .register_type::<ModelWheel>()
+            .register_type::<Rolling>()
             .add_systems(
                 Update,
-                (give_bodies, fit_for_the_solver, place_wheels).chain(),
+                (
+                    give_bodies,
+                    fit_for_the_solver,
+                    place_wheels,
+                    find_the_models_wheels,
+                    swing_the_models_wheels,
+                )
+                    .chain(),
             )
             .add_systems(
                 FixedUpdate,
@@ -100,6 +127,76 @@ impl Plugin for VehiclePlugin {
 #[derive(Component, Clone, Copy, Debug, Reflect)]
 #[reflect(Component)]
 struct Wheel(usize);
+
+/// A part of the model that hangs from a strut rather than sitting on the body.
+///
+/// The model arrives as one rigid scene: its tyres, its stub axles and its suspension arms are
+/// nodes of the same tree as its bodywork, all drawn at the pose the artist modelled. Hiding our
+/// own cylinders behind it therefore cost the suspension travel — the springs still worked, and
+/// none of it showed. This is what puts it back: it says which strut each of those nodes belongs
+/// to, so that the compression [`place_wheels`] already computes can be handed to the picture.
+#[derive(Component, Clone, Copy, Debug, Reflect)]
+#[reflect(Component)]
+struct ModelWheel {
+    /// The vehicle this hangs from. Stored rather than walked to: the model's nodes are three deep
+    /// under the chassis, and the walk would run every frame for an answer that never changes.
+    chassis: Entity,
+    /// Which strut, indexing [`VehicleSpec::mounts`](noob_tube_shared::vehicle::VehicleSpec::mounts).
+    corner: usize,
+    /// The point this part turns about, in the model's own units.
+    ///
+    /// Needed because the geometry is baked where it stands rather than around its own origin — a
+    /// Sketchfab export has no local transforms at all — so rotating a node about the origin would
+    /// swing a wheel through the bodywork rather than turning it on its hub.
+    pivot: Vec3,
+    /// What it is, which is what decides how it moves.
+    part: Part,
+}
+
+/// The three things a wheel assembly is made of.
+#[derive(Clone, Copy, Debug, Reflect)]
+enum Part {
+    /// The tyre: it rises and falls with the strut, steers if it is a front one, and rolls.
+    ///
+    /// The radius travels with it because it is not quite the radius the struts assume — this
+    /// model's tyre comes out 2 cm larger once scaled, which would leave the tread that far under
+    /// the floor for as long as the vehicle is on the ground. Trimming it to the spec's radius is
+    /// what makes the drawn contact patch the one the simulation is using.
+    Tyre { radius: f32 },
+    /// The stub axle behind the wheel. It goes wherever the wheel goes and does not roll: it is
+    /// what the wheel turns *on*, and it is inside the hub where nobody could see it turn anyway.
+    Axle,
+    /// The suspension arm. Bolted to the body at one end and holding the wheel at the other, so it
+    /// does not travel — it swings, by whatever angle keeps its far end on the wheel.
+    ///
+    /// The lever is how far the wheel is from that bolt, along the model's own X. Its sign carries
+    /// which end of the vehicle the arm is on, so the swing needs no case of its own.
+    Arm { lever: f32 },
+}
+
+/// On a model, until its wheels have been found.
+///
+/// The scene spawns some frames after the entity that asks for it, and there is no ordering that
+/// makes it otherwise — the glTF has to be read off disk first. So the parts are looked for rather
+/// than waited on, and this is removed the moment they turn up. Without it the search would walk
+/// every vehicle's whole node tree every frame for the rest of the round.
+#[derive(Component)]
+struct Unfitted;
+
+/// How far a vehicle's wheels have turned.
+///
+/// Cosmetic and client-only, and derived from how far the chassis has actually moved rather than
+/// from its velocity — because for a vehicle this client does not simulate those are two different
+/// numbers. An interpolated one is *placed* each frame, between two poses the server sent, and the
+/// distance between two placements is the only speed it really has.
+#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
+#[reflect(Component)]
+struct Rolling {
+    /// Radians, unbounded and never wrapped. A quaternion does not care how many turns it is given.
+    angle: f32,
+    /// Where the chassis was when that was last advanced, or `None` on its first frame.
+    was: Option<Vec3>,
+}
 
 /// Update: gives an arrived vehicle a body, four wheels, and something to be hit.
 ///
@@ -153,6 +250,7 @@ fn give_bodies(
             // is where the answer for it belongs.
             CollisionLayers::new(Layer::Body, LayerMask::ALL),
             Wheels::default(),
+            Rolling::default(),
         ));
         if modelled {
             // Scaled by its length, so the model and the shape a shot is tested against are the
@@ -161,6 +259,9 @@ fn give_bodies(
             let scale = spec.half_extents.z * 2.0 / MODEL_LENGTH;
             commands.entity(entity).with_child((
                 Name::from("Buggy model"),
+                // Its own wheels are still to be found — see `find_the_models_wheels`, which is
+                // what takes this off again once they have been.
+                Unfitted,
                 WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(MODEL))),
                 Transform::from_xyz(0.0, MODEL_GROUND * scale - spec.ride_height(), 0.0)
                     .with_rotation(Quat::from_rotation_y(MODEL_YAW))
@@ -364,20 +465,235 @@ fn carry_driver(
 /// space — the parent's transform does the rest, including the interpolation.
 fn place_wheels(
     space: SpatialQuery,
-    mut vehicles: Query<(Entity, &VehicleKind, &Position, &Rotation, &mut Wheels)>,
+    mut vehicles: Query<(
+        Entity,
+        &VehicleKind,
+        &Position,
+        &Rotation,
+        &mut Wheels,
+        &mut Rolling,
+    )>,
     mut wheels: Query<(&Wheel, &ChildOf, &mut Transform)>,
 ) {
-    for (entity, kind, position, rotation, mut found) in vehicles.iter_mut() {
-        found.0 = probe_wheels(kind.spec(), position.0, rotation.0, &space, entity);
+    for (entity, kind, position, rotation, mut found, mut rolling) in vehicles.iter_mut() {
+        let spec = kind.spec();
+        found.0 = probe_wheels(spec, position.0, rotation.0, &space, entity);
+        // And how far they have turned while getting there, which only the model's own tyres are
+        // detailed enough to show — a cylinder looks identical whichever way round it is. Measured
+        // from the ground the vehicle has covered along its own nose, so reversing unwinds it and
+        // sliding sideways with the wheels locked does not turn them at all.
+        //
+        // Anything longer than the vehicle in one frame did not happen by driving: it is the jump
+        // from wherever an entity was spawned to wherever replication says it belongs, which
+        // arrives a frame or two into its life and would otherwise spin its wheels a dozen times on
+        // the spot. Not moved, so not rolled.
+        let step = rolling.was.map_or(Vec3::ZERO, |was| position.0 - was);
+        rolling.was = Some(position.0);
+        if step.length_squared() < (spec.half_extents.z * 2.0).powi(2) {
+            rolling.angle += step.dot(rotation.0 * Vec3::NEG_Z) / spec.wheel_radius;
+        }
     }
 
     for (wheel, parent, mut transform) in wheels.iter_mut() {
-        let Ok((_, kind, .., found)) = vehicles.get(parent.parent()) else {
+        let Ok((_, kind, _, _, found, _)) = vehicles.get(parent.parent()) else {
             continue;
         };
         let spec = kind.spec();
         let drop = spec.rest_length - found.0[wheel.0].compression;
         transform.translation = spec.mounts[wheel.0] + Vec3::NEG_Y * drop;
+    }
+}
+
+/// Update: finds the model's own wheels, and works out which strut each of them belongs to.
+///
+/// It reads the answer out of the geometry rather than off a list: a part's corner comes from where
+/// it sits (see [`corner_of`]) and its size from the bounding box the glTF loader has already
+/// measured from the vertices. The alternative, a table of node names against corners, would be
+/// silently wrong the first time somebody re-exported the model with its parts renamed, and wrong
+/// in the way that is hardest to see — three wheels right and one crossed over.
+///
+/// It runs until it finds something rather than being triggered, because there is nothing to
+/// trigger on. The scene arrives whenever the file has been read, and a vehicle exists well before
+/// that.
+fn find_the_models_wheels(
+    models: Query<(Entity, &ChildOf), With<Unfitted>>,
+    children: Query<&Children>,
+    named: Query<&Name>,
+    bounds: Query<&Aabb>,
+    mut commands: Commands,
+) {
+    for (model, mounted_on) in models.iter() {
+        // Everything named like part of a wheel, with the corner it turned out to be on.
+        let mut found: Vec<(Entity, &'static str, usize, Aabb)> = Vec::new();
+        for node in children.iter_descendants(model) {
+            let Ok(name) = named.get(node) else {
+                continue;
+            };
+            let Some(kind) = [MODEL_TYRE, MODEL_AXLE, MODEL_ARM]
+                .into_iter()
+                .find(|prefix| name.starts_with(*prefix))
+            else {
+                continue;
+            };
+            let Some(box_) = enclosing(node, &children, &bounds) else {
+                continue;
+            };
+            found.push((node, kind, corner_of(Vec3::from(box_.center)), box_));
+        }
+        // Nothing at all: the scene has not spawned yet, which is the ordinary case for a
+        // vehicle's first frames. Try again next frame rather than deciding it has no wheels.
+        if found.is_empty() {
+            continue;
+        }
+
+        // The tyres first, because an arm's swing is measured to the wheel it holds.
+        let mut centres = [None; WHEELS];
+        for (_, kind, corner, box_) in &found {
+            if *kind == MODEL_TYRE {
+                centres[*corner] = Some(Vec3::from(box_.center));
+            }
+        }
+        let mut fitted = 0;
+        for (node, kind, corner, box_) in found {
+            let centre = Vec3::from(box_.center);
+            let half = Vec3::from(box_.half_extents);
+            let (pivot, part) = match kind {
+                // A tyre turns on its own centre, and is round in the model's X–Y plane because its
+                // axle lies along the model's Z.
+                MODEL_TYRE => (centre, Part::Tyre { radius: half.y }),
+                MODEL_AXLE => (centre, Part::Axle),
+                // An arm turns on the end that is bolted to the body, which is the one nearer the
+                // middle of the vehicle.
+                _ => {
+                    let inboard = centre.x - half.x * centre.x.signum();
+                    let Some(wheel) = centres[corner] else {
+                        continue;
+                    };
+                    let lever = wheel.x - inboard;
+                    if lever == 0.0 {
+                        continue;
+                    }
+                    (Vec3::new(inboard, centre.y, centre.z), Part::Arm { lever })
+                }
+            };
+            commands.entity(node).insert(ModelWheel {
+                chassis: mounted_on.parent(),
+                corner,
+                pivot,
+                part,
+            });
+            fitted += 1;
+        }
+        commands.entity(model).remove::<Unfitted>();
+        info!("hung {fitted} of the model's parts on the struts");
+    }
+}
+
+/// Which strut a part of the model belongs to, from where it sits in the model's own space.
+///
+/// Turned into chassis space first, where front is −Z and right is +X and the mounts are written in
+/// that order — front left, front right, rear left, rear right. Going through [`MODEL_YAW`] rather
+/// than reading the model's axes directly is what lets a model exported facing some other way be
+/// sorted correctly by changing one constant.
+fn corner_of(centre: Vec3) -> usize {
+    let at = Quat::from_rotation_y(MODEL_YAW) * centre;
+    (if at.z < 0.0 { 0 } else { 2 }) + usize::from(at.x > 0.0)
+}
+
+/// The box a glTF node's geometry takes up, in that node's own space.
+///
+/// A named node holds no geometry itself. Under it the file has a node per mesh, and under *that*
+/// the loader hangs one entity per primitive carrying the bounding box it measured from the
+/// vertices — so this has to look at everything below, not just the children.
+///
+/// It reads those boxes as if they were already in the named node's frame, which they are only
+/// because this model has no local transforms at all — a Sketchfab export bakes every node's pose
+/// into its vertices, and every one of this file's forty-two nodes was checked to be sitting at the
+/// identity. A model that did use them would need each box carried up through its own `Transform`,
+/// and would be drawn with its wheels in the wrong place until it was.
+///
+/// `None` while the meshes have yet to arrive, which is not an error — it is what "the scene is
+/// still loading" looks like from here.
+fn enclosing(node: Entity, children: &Query<&Children>, bounds: &Query<&Aabb>) -> Option<Aabb> {
+    let mut min = Vec3A::splat(f32::INFINITY);
+    let mut max = Vec3A::splat(f32::NEG_INFINITY);
+    for part in children.iter_descendants(node) {
+        let Ok(box_) = bounds.get(part) else {
+            continue;
+        };
+        min = min.min(box_.center - box_.half_extents);
+        max = max.max(box_.center + box_.half_extents);
+    }
+    min.cmple(max)
+        .all()
+        .then(|| Aabb::from_min_max(min.into(), max.into()))
+}
+
+/// Update: moves the model's wheels to where the struts say they are.
+///
+/// The model is drawn at the pose the artist modelled, and that pose is the vehicle standing on its
+/// springs under its own weight. So what a wheel needs is not its height but the *difference*
+/// between this strut's compression and the compression it has standing still: zero at rest, which
+/// is why a parked vehicle looks exactly as it did before any of this existed, and why nothing has
+/// to be measured out of the file a second time to place it.
+///
+/// All of it is arithmetic in the model's own units, left to the model root's scale and yaw to turn
+/// into metres. That is what keeps it independent of how big the vehicle is — divide by the scale
+/// once, at the top, and nothing below has to know.
+///
+/// Runs on every vehicle, predicted or interpolated, because none of it applies a force or moves
+/// anything but a mesh. [`place_wheels`] has already done the ray casts either way.
+fn swing_the_models_wheels(
+    vehicles: Query<(&VehicleKind, &Wheels, &Rolling, Option<&Controls>)>,
+    mut parts: Query<(&ModelWheel, &mut Transform)>,
+) {
+    for (part, mut transform) in parts.iter_mut() {
+        let Ok((kind, wheels, rolling, controls)) = vehicles.get(part.chassis) else {
+            continue;
+        };
+        let spec = kind.spec();
+        let scale = spec.half_extents.z * 2.0 / MODEL_LENGTH;
+        // Upwards is positive: a strut squashed harder than the vehicle's own weight squashes it
+        // has pushed its wheel up into the arch.
+        let travel = (wheels.0[part.corner].compression - spec.static_compression()) / scale;
+        // Only the front wheels turn, and they are the first mounts. The angle is the simulation's
+        // own, with its own sign, because it is the same rotation about the same axis: a yaw is a
+        // yaw whatever else stands between the model and the chassis.
+        let steer = match (part.corner < FRONT_WHEELS, controls) {
+            (true, Some(controls)) => -controls.steer,
+            _ => 0.0,
+        };
+        let (rotation, trim, lift) = match part.part {
+            Part::Tyre { radius } => {
+                // Trimmed to the radius the struts assume, and only in the plane the tyre is round
+                // in — its width is nobody's business, since nothing is ever collided against it.
+                let round = spec.wheel_radius / scale / radius;
+                (
+                    // Rolling first, then steering: a wheel spins on an axle that the steering
+                    // turns, not the other way about.
+                    Quat::from_rotation_y(steer) * Quat::from_rotation_z(rolling.angle),
+                    Vec3::new(round, round, 1.0),
+                    travel,
+                )
+            }
+            Part::Axle => (Quat::from_rotation_y(steer), Vec3::ONE, travel),
+            // The bolt stays where it is and the arm swings about it, so this one gets no lift of
+            // its own: the rotation is the whole of its movement.
+            Part::Arm { lever } => (
+                Quat::from_rotation_z((travel / lever).clamp(-1.0, 1.0).asin()),
+                Vec3::ONE,
+                0.0,
+            ),
+        };
+        // About the part's own pivot rather than the model's origin, which is merely where the
+        // vertices happen to be measured from. Bevy composes a transform as scale, then rotation,
+        // then translation, so this is the translation that leaves the pivot where it was asked to
+        // be and turns everything else around it.
+        *transform = Transform {
+            translation: part.pivot + Vec3::Y * lift - rotation * (trim * part.pivot),
+            rotation,
+            scale: trim,
+        };
     }
 }
 
@@ -412,4 +728,57 @@ pub(crate) fn sit_in_the_seat(
     };
     state.position = position.0 + rotation.0 * Vec3::new(0.0, -0.4, 0.0);
     state.velocity = Vec3::ZERO;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noob_tube_shared::vehicle::BUGGY;
+
+    /// Where the model's four tyres sit, in its own units, as the glTF measures them.
+    ///
+    /// A fixture rather than a lookup, because the file is not in the repository and a test that
+    /// skipped itself when it was missing would pass everywhere and check nothing. These are the
+    /// same four numbers [`MODEL_LENGTH`] and [`MODEL_GROUND`] were read out beside, and replacing
+    /// the model means measuring all of them again.
+    const TYRES: [(Vec3, usize); WHEELS] = [
+        (Vec3::new(-0.6714, -0.2245, 0.3749), 0),
+        (Vec3::new(-0.6714, -0.2245, -0.3755), 1),
+        (Vec3::new(0.6272, -0.2245, 0.3755), 2),
+        (Vec3::new(0.6272, -0.2245, -0.3747), 3),
+    ];
+
+    /// Each of the model's wheels has to land on the strut it is drawn over.
+    ///
+    /// This is the one piece of the fitting that fails quietly. A model whose wheels are hung on
+    /// the wrong corners still draws four wheels in four arches, and only moves the wrong one when
+    /// the vehicle leans; three right and one crossed over is the shape of the mistake, and
+    /// standing still it is invisible. It is [`MODEL_YAW`] that decides it, and a wrong yaw is easy
+    /// to arrive at because three of the four quarter turns put the vehicle's nose somewhere
+    /// plausible.
+    #[test]
+    fn the_models_wheels_land_on_the_struts_they_belong_to() {
+        for (centre, strut) in TYRES {
+            assert_eq!(
+                corner_of(centre),
+                strut,
+                "the tyre at {centre:?} was hung on another corner",
+            );
+        }
+    }
+
+    /// And the struts have to be written in the order the rule sorts them into: front left, front
+    /// right, rear left, rear right. The rule reads the signs; this is what says which mount each
+    /// pair of signs means.
+    #[test]
+    fn the_corner_rule_agrees_with_the_order_the_struts_are_written_in() {
+        let into_the_model = Quat::from_rotation_y(-MODEL_YAW);
+        for (index, mount) in BUGGY.mounts.iter().enumerate() {
+            assert_eq!(
+                corner_of(into_the_model * *mount),
+                index,
+                "strut {index} at {mount:?} was sorted onto another corner",
+            );
+        }
+    }
 }

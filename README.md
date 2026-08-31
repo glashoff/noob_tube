@@ -1405,10 +1405,47 @@ always had, with its four cylinders visible — checked, because that is the sta
 developer's first checkout is in. The choice is made from the filesystem rather than from the asset
 server, which would answer asynchronously, some frames after the vehicle already needed a body.
 
-The model brings its own wheels, so ours are spawned and placed as before but hidden. That costs the
-suspension travel on screen, which is a real loss — landing a jump compresses 0.46 to 0.63 m and now
-none of it shows. Putting the model's tyre mesh on our own wheel entities would give it back, and is
-the next thing here.
+The model brings its own wheels, so ours are spawned and placed as before but hidden.
+
+#### Giving the suspension back its travel
+
+Hiding our cylinders took the suspension off the screen: the springs still worked, and nothing
+showed it. The model's own wheels are moved instead — not ours redrawn with its tyre, because its
+wheels sit 14 cm inboard and 12 cm closer together than our struts, and putting a tyre where the
+strut is would stand it outside the arch.
+
+That turns out to want nothing new. The model is drawn at the pose the artist modelled, and that
+pose *is* the vehicle standing on its springs under its own weight, so a wheel does not need its
+height — it needs the difference between its strut's compression and the compression it has parked.
+That difference is zero at rest, which is why a parked vehicle looks exactly as it did before any of
+this existed, and it is checked: on a parked vehicle every one of the twelve parts asks for a
+movement of 0.0000, and the transform each of them ends up with matches the strut arithmetic to
+1e-8.
+
+Three parts per corner, and each does something different. The **tyre** rises and falls, steers if
+it is a front one, and rolls. The **stub axle** goes with it and does not roll — it is what the
+wheel turns on, and it is inside the hub. The **suspension arm** is bolted to the body at one end,
+so it does not travel at all: it swings, by exactly the angle that keeps its far end on the wheel,
+about the end the file says is bolted down.
+
+Which strut a part belongs to is read out of the geometry, never off a list of node names. The
+bounding boxes the glTF loader has already measured say where each part sits; turning that through
+the model's yaw says which corner it is. A table of names against corners would be silently wrong
+the first time somebody re-exported the model, and wrong in the way that is hardest to see — three
+wheels right and one crossed over is invisible standing still and only shows when the vehicle leans.
+There is a test for exactly that, against the four tyre positions as measured out of this file.
+
+The tyre is trimmed to the radius the struts assume, which is 2 cm smaller than the model's own once
+scaled; without it the tread would sit that far under the floor for as long as the vehicle is on the
+ground. Rolling is measured from how far the chassis has actually moved rather than from its
+velocity, because for a vehicle this client does not simulate those are two different numbers — an
+interpolated one is *placed* each frame, and the distance between two placements is the only speed
+it really has. A step longer than the vehicle is not driving but the jump from where an entity
+spawned to where replication says it belongs, and is ignored; without that every vehicle spun its
+wheels a dozen times on the spot in its first frame, which is measured — 30 radians for a 12 m jump.
+
+What it does not yet do is turn the front arms with the steering, or spin a wheel that is locked
+under braking rather than rolling.
 
 Two things had to change around it. Bevy's asset root defaults to `assets/` beside the executable,
 which for a cargo build is `target/debug/assets` — a directory `cargo clean` deletes; it is
