@@ -22,7 +22,9 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::{Predicted, client};
 use noob_tube_shared::physics::Layer;
 use noob_tube_shared::player::{PlayerInput, PlayerState};
-use noob_tube_shared::vehicle::{self, probe_wheels, Controls, Driving, VehicleKind, Wheels, WHEELS};
+use noob_tube_shared::vehicle::{
+    self, probe_wheels, Controls, Driving, Righting, VehicleKind, Wheels, WHEELS,
+};
 
 /// A vehicle that has just arrived and has nothing to be seen as yet.
 type Arrived = (With<client::Remote>, Added<VehicleKind>);
@@ -43,7 +45,12 @@ impl Plugin for VehiclePlugin {
                 FixedUpdate,
                 // The same order the server uses: the controls are read before they are acted on,
                 // and the driver is put in the seat after the vehicle has moved.
-                (take_the_wheel, vehicle::drive_vehicles::<With<Predicted>>).chain(),
+                (
+                    take_the_wheel,
+                    vehicle::drive_vehicles::<With<Predicted>>,
+                    vehicle::right_flipped_vehicles::<With<Predicted>>,
+                )
+                    .chain(),
             )
             // Explicitly after the solver, because Avian runs in this schedule too. Without the
             // ordering the two are ambiguous and the driver is placed at the vehicle's pose from
@@ -143,6 +150,10 @@ fn fit_for_driving(
             ColliderDensity(spec.density()),
             CenterOfMass(Vec3::NEG_Y * spec.centre_of_mass_drop),
             Controls::default(),
+            // Starts at zero on both sides. A vehicle handed over while it is already on its roof
+            // waits out the delay again on this client, which costs a second and a half once and
+            // saves having to replicate a counter that is otherwise nobody's business.
+            Righting::default(),
         ));
         info!("driving a {kind:?}");
     }
@@ -153,7 +164,7 @@ fn fit_for_driving(
         commands
             .entity(entity)
             .insert(RigidBody::Static)
-            .remove::<Controls>();
+            .remove::<(Controls, Righting)>();
         info!("gave the wheel back");
     }
 }

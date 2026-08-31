@@ -77,6 +77,7 @@ fn main() {
                     simulation::step_players::<()>,
                     move_props,
                     vehicle::drive_vehicles::<()>,
+                    vehicle::right_flipped_vehicles::<()>,
                 ),
             )
                 .chain(),

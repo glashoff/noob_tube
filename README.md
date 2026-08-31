@@ -1141,6 +1141,32 @@ on some runs the driver was placed at the vehicle's pose from *before* the step.
 vehicle's speed is 20 cm, and it arrived as a correction on every update — the same ambiguity that
 had already been fixed for `record_positions`, in the same schedule, for the same reason.
 
+#### Getting back on its wheels
+
+A vehicle on its side is not a hard problem to drive out of, it is an impossible one. The entire
+model acts through the wheels, and the wheels find no ground; the only thing still touching the
+world is a box that slides. Left alone, the round has one fewer vehicle in it from the first badly
+taken ramp onwards.
+
+So a vehicle that has been past 78 degrees of lean for a second and a half stands itself back up.
+The delay is the whole difference between helping and interfering — a barrel roll passes through
+upside down on its way to landing on its wheels, and righting it there takes the roll away from the
+driver who earned it.
+
+What does it is a spring and a damper on the attitude, the same shape as a strut: an angular
+acceleration toward upright, proportional to the lean, minus a term against the spin it produces
+itself. Deliberately not a snap to an upright pose — a teleport is a rollback's worst case, and two
+sides that snap on slightly different ticks disagree by the whole of the flip. It says nothing about
+yaw either, so a vehicle that lands facing a wall is stood up still facing the wall.
+
+The first version did nothing at all, and the arithmetic says why. A buggy on its roof lies on a
+face, and turning it means lifting 1200 kg over the edge it rests on: 10.6 kN·m, against the
+4.9 kN·m a torque gentle enough to look like a vehicle can produce. The fix is not a bigger torque
+but a hand underneath — six tenths of a g of lift while it is getting up, which takes most of its
+weight off the ground and drops what the turn has to overcome to a third. Below gravity, so it never
+leaves the ground; it just goes light on its edge. Measured in the test world, it is back on its
+wheels 1.1 seconds after the delay expires and settled at its ride height a second after that.
+
 Still missing: standing on a vehicle rather than being inside it, passengers, a camera that gets out
 of the way of walls, and running people over.
 

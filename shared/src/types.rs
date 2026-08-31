@@ -65,6 +65,7 @@ impl Plugin for SharedTypesPlugin {
             .register_type::<crate::vehicle::Wheels>()
             .register_type::<crate::vehicle::VehicleKind>()
             .register_type::<crate::vehicle::Controls>()
+            .register_type::<crate::vehicle::Righting>()
             .register_type::<crate::vehicle::Driving>();
     }
 }

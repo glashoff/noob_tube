@@ -36,6 +36,14 @@ pub const WHEELS: usize = 4;
 /// How many of them steer, and they are the first ones in [`VehicleSpec::mounts`].
 pub const FRONT_WHEELS: usize = 2;
 
+/// How far from upright a vehicle has to be before it counts as flipped, as the cosine of the
+/// angle between its own up and the world's.
+///
+/// A fifth means about 78 degrees, which is well past anything the level can put it on: the ramp
+/// leans it twelve degrees, and two wheels up a crate is under forty. Only a vehicle that is
+/// genuinely on its side or its roof is beyond this, and there is no way back from either.
+pub const FLIPPED_COSINE: f32 = 0.2;
+
 /// Which vehicle this is.
 ///
 /// The numbers behind it are a constant both sides already have, not something sent per entity.
@@ -117,6 +125,29 @@ pub struct VehicleSpec {
     /// tapers to nothing, which is what a gearbox and drag do in a real vehicle and what stops a
     /// constant force from accelerating for ever.
     pub top_speed: f32,
+    /// Seconds a vehicle lies past [`FLIPPED_COSINE`] before it is helped back on to its wheels.
+    ///
+    /// Not zero, and not for politeness: a vehicle in the middle of a barrel roll is past the
+    /// threshold for a fraction of a second on its way to landing on its wheels by itself, and
+    /// righting it then would take the roll away from the driver who earned it.
+    pub righting_delay: f32,
+    /// Radians per second squared, per radian of lean, once the delay has passed.
+    ///
+    /// An angular *acceleration* rather than a torque, so the number means the same thing for a
+    /// buggy and for a truck: Avian divides a torque by the inertia this vehicle happens to have,
+    /// and that inertia is derived from the chassis box.
+    pub righting_stiffness: f32,
+    /// Per second, against the spin the righting itself produces. Without it the vehicle rolls
+    /// past upright and comes back, which is a vehicle rocking on its roof rather than getting up.
+    pub righting_damping: f32,
+    /// Metres per second squared upward while it is getting up, against gravity.
+    ///
+    /// Not decoration. A vehicle on its roof is lying on a face, and turning it means lifting its
+    /// mass over the edge it rests on — 10.6 kN·m for this one, which is more than any torque
+    /// gentle enough to look like a vehicle rather than a catapult. Taking most of its weight off
+    /// the ground first drops that to a third and lets the rest be a nudge. Below gravity, so it
+    /// never lifts off; what it does is make the vehicle light on its edge.
+    pub righting_lift: f32,
 }
 
 impl VehicleSpec {
@@ -190,6 +221,14 @@ pub const BUGGY: VehicleSpec = VehicleSpec {
     max_steer: 0.55,
     steer_rate: 3.0,
     top_speed: 25.0,
+    // Long enough to let a roll finish on its own, short enough that a driver on their roof does
+    // not reach for the menu. Upside down is pi radians of lean, so the stiffness starts it at
+    // about 13 rad/s squared and the damping settles it at around four radians a second.
+    righting_delay: 1.5,
+    righting_stiffness: 8.0,
+    righting_damping: 4.0,
+    // Six tenths of a g. Enough to make the roll cheap, not enough to leave the ground.
+    righting_lift: 6.0,
 };
 
 /// On a player: they are in a vehicle rather than on their feet.
@@ -271,6 +310,22 @@ pub struct Wheel {
 #[reflect(Component)]
 pub struct Wheels(pub [Wheel; WHEELS]);
 
+/// How long this vehicle has been lying on its side or its roof.
+///
+/// State, and the only state in the vehicle besides the steering angle. It cannot be derived from
+/// the pose because it is a *duration*, and the whole point of it is that a vehicle mid-roll and a
+/// vehicle stuck on its roof look identical for the first half second.
+///
+/// Not replicated. A client that predicts a vehicle counts for itself and reaches the same answer
+/// from the same poses, and a client that only interpolates one never asks — it is shown the
+/// result of the server's righting as ordinary movement, which is what it is.
+#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
+#[reflect(Component)]
+pub struct Righting {
+    /// Seconds past [`FLIPPED_COSINE`], reset to zero the moment it is back within it.
+    pub flipped_for: f32,
+}
+
 /// Everything a vehicle needs to exist as a physical body.
 ///
 /// The pose is `Position`/`Rotation` rather than a `Transform`, because those are what Avian and
@@ -282,6 +337,7 @@ pub fn vehicle_body(kind: VehicleKind, at: Vec3, facing: Quat) -> impl Bundle {
         kind,
         Wheels::default(),
         Controls::default(),
+        Righting::default(),
         RigidBody::Dynamic,
         spec.collider(),
         ColliderDensity(spec.density()),
@@ -448,6 +504,54 @@ pub fn drive_vehicles<F: QueryFilter + 'static>(
     }
 }
 
+/// FixedUpdate: puts a vehicle that has ended up on its roof back on its wheels.
+///
+/// A vehicle on its side is not a hard problem to drive out of, it is an impossible one: the wheels
+/// find no ground, so the whole model — spring, damper, tyre — has nothing to act through, and the
+/// only thing still touching the world is a box that slides. Without this the buggy is lost the
+/// first time somebody takes the ramp badly, and the round has one fewer vehicle in it.
+///
+/// The correction is an angular acceleration toward upright with a damper against itself, which is
+/// the same spring-and-damper shape as a strut and behaves the same way: it accelerates hardest
+/// when the lean is worst, and it settles rather than rocking. Deliberately *not* a snap to an
+/// upright pose — a teleport is a rollback's worst case, and a client and a server that snap on
+/// slightly different ticks disagree by the whole of the flip.
+///
+/// It says nothing about yaw. [`Quat::from_rotation_arc`] gives the shortest turn that takes one
+/// direction to another, so a vehicle that lands facing a wall is stood up still facing the wall.
+/// Which way it points is the driver's business.
+pub fn right_flipped_vehicles<F: QueryFilter + 'static>(
+    time: Res<Time<Fixed>>,
+    mut vehicles: Query<(&VehicleKind, &mut Righting, Forces), F>,
+) {
+    let dt = time.delta_secs();
+
+    for (kind, mut righting, mut body) in vehicles.iter_mut() {
+        let spec = kind.spec();
+        let up = body.rotation().0 * Vec3::Y;
+
+        if up.y > FLIPPED_COSINE {
+            righting.flipped_for = 0.0;
+            continue;
+        }
+        righting.flipped_for += dt;
+        if righting.flipped_for < spec.righting_delay {
+            continue;
+        }
+
+        // The shortest turn from where its roof points to where the sky is. Exactly upside down is
+        // the degenerate case — every axis is equally short — and glam already picks one there
+        // rather than returning something with a zero axis.
+        let (axis, angle) = Quat::from_rotation_arc(up, Vec3::Y).to_axis_angle();
+        let spin = body.angular_velocity();
+        body.apply_angular_acceleration(
+            axis * angle * spec.righting_stiffness - spin * spec.righting_damping,
+        );
+        // And most of its weight, so the turn has an edge to pivot on rather than a face to drag.
+        body.apply_linear_acceleration(Vec3::Y * spec.righting_lift);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,7 +571,7 @@ mod tests {
         app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / HZ,
         )));
-        app.add_systems(FixedUpdate, drive_vehicles::<()>);
+        app.add_systems(FixedUpdate, (drive_vehicles::<()>, right_flipped_vehicles::<()>));
         app
     }
 
@@ -505,6 +609,97 @@ mod tests {
 
     fn speed(app: &App, car: Entity) -> Vec3 {
         app.world().get::<LinearVelocity>(car).expect("a velocity").0
+    }
+
+    /// Puts a vehicle down at the given attitude and lets it settle.
+    fn park_facing(app: &mut App, at: Vec3, facing: Quat) -> Entity {
+        let car = app
+            .world_mut()
+            .spawn(vehicle_body(VehicleKind::Buggy, at, facing))
+            .id();
+        app.update();
+        car
+    }
+
+    /// How far its own up is from the world's, in degrees.
+    fn lean(app: &App, car: Entity) -> f32 {
+        let up = app.world().get::<Rotation>(car).expect("a rotation").0 * Vec3::Y;
+        up.y.clamp(-1.0, 1.0).acos().to_degrees()
+    }
+
+    /// The whole point: a vehicle on its roof has no way back on its own, because the wheels find
+    /// no ground and the entire model acts through the wheels.
+    #[test]
+    fn on_its_roof_it_gets_itself_back_up() {
+        let mut app = driving_app();
+        let spec = VehicleKind::Buggy.spec();
+        let car = park_facing(
+            &mut app,
+            Vec3::Y * (spec.ride_height() + 0.5),
+            Quat::from_rotation_z(core::f32::consts::PI),
+        );
+        run(&mut app, 6.0);
+
+        assert!(lean(&app, car) < 10.0, "still leaning {:.1} degrees over", lean(&app, car));
+        let y = pose(&app, car).y;
+        assert!(
+            (y - spec.ride_height()).abs() < 0.1,
+            "back up but sitting at {y:.3} m rather than {:.3} m",
+            spec.ride_height()
+        );
+    }
+
+    /// And on its side, which is what actually happens: a vehicle rarely lands squarely upside
+    /// down, it drops onto a flank and stays there.
+    #[test]
+    fn on_its_side_it_gets_itself_back_up() {
+        let mut app = driving_app();
+        let spec = VehicleKind::Buggy.spec();
+        let car = park_facing(
+            &mut app,
+            Vec3::Y * (spec.ride_height() + 0.5),
+            Quat::from_rotation_z(core::f32::consts::FRAC_PI_2),
+        );
+        run(&mut app, 6.0);
+
+        assert!(lean(&app, car) < 10.0, "still leaning {:.1} degrees over", lean(&app, car));
+    }
+
+    /// It must not touch a vehicle that is merely tilted. The ramp leans it twelve degrees and a
+    /// wheel up a kerb rather more; righting either would be a hand on the wheel nobody asked for.
+    #[test]
+    fn a_leaning_vehicle_is_left_alone() {
+        let mut app = driving_app();
+        let spec = VehicleKind::Buggy.spec();
+        let tilt = Quat::from_rotation_z(0.6);
+        let car = park_facing(&mut app, tilt * Vec3::Y * spec.ride_height(), tilt);
+        app.update();
+
+        let before = lean(&app, car);
+        run(&mut app, 3.0);
+        let righting = app.world().get::<Righting>(car).expect("a righting");
+        assert_eq!(righting.flipped_for, 0.0, "a {before:.0}-degree lean counted as flipped");
+    }
+
+    /// The delay is the difference between helping and interfering: a vehicle that is upside down
+    /// for a moment on its way through a roll has to be left to finish it.
+    #[test]
+    fn it_waits_before_it_intervenes() {
+        let mut app = driving_app();
+        let spec = VehicleKind::Buggy.spec();
+        let car = park_facing(
+            &mut app,
+            Vec3::Y * (spec.ride_height() + 0.5),
+            Quat::from_rotation_z(core::f32::consts::PI),
+        );
+        run(&mut app, spec.righting_delay - 0.2);
+
+        assert!(
+            lean(&app, car) > 90.0,
+            "it started standing itself up after {:.1} s, before the {:.1} s delay",
+            spec.righting_delay - 0.2,
+            spec.righting_delay,
+        );
     }
 
     /// [`VehicleSpec::ride_height`] assumes every strut hangs from the same height, which is what
