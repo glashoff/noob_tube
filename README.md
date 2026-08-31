@@ -971,9 +971,21 @@ locally computed one is wrong, and the version that is wrong later is not worth 
 also means a crate goes down exactly the same path as a player, replicated and interpolated and
 rewound out of the same `HitboxHistory`, rather than being a second mechanism beside it.
 
-Kinematic rather than dynamic on purpose: a kinematic body moves where it is put and nothing pushes
-back, which is what an animation is. Making it dynamic — one a player could shove — is one variant
-of `RigidBody` away, and everything around it already works the way that would need.
+There are two kinds of crate, and the difference is one variant of `RigidBody`. A **bobbing** crate
+is kinematic: it goes where the server puts it and nothing pushes back, which is what an animation
+is, and it is the moving target lag compensation is measured against. A **loose** crate is dynamic:
+it falls, it stacks, and a shot shoves it — the first thing in this game the solver actually does
+work for.
+
+Loose crates are 40 kg, which is a number worth stating. Avian derives mass from a collider's volume
+and its density, and the default density of 1 makes a cubic-metre box weigh a kilogram; a shot then
+launched it at forty metres a second, out of the level. Wood is around 40 kg per cubic metre packed
+loosely, and at that weight the same shot shoves the crate a few centimetres.
+
+Verified live: four crates dropped a little above their resting heights settle at 0.50, 1.50, 2.50
+and 3.50 m, drift 0.00 cm over the following second — they go to sleep, which is itself part of the
+solver state lightyear rolls back — and the client agrees with the server to 0.0 cm. A burst into
+the bottom of the stack moves it by up to 10 cm, and the shove propagates up through the contacts.
 
 Making all of this possible took two generalisations, both of the same shape. A target used to be a
 feet position and a `crouching` flag: a player and nothing else, with the shape hard-coded in the

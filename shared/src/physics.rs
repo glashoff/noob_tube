@@ -34,6 +34,13 @@ use crate::movement::{
     CROUCH_CAPSULE_Y_OFFSET, GROUND_SNAP_DIST, SKIN,
 };
 
+/// Downward acceleration on a dynamic body, in metres per second squared.
+///
+/// Not [`movement::GRAVITY`](crate::movement::GRAVITY), which is a game-feel number tuned for how a
+/// player's jump should arc and is deliberately far heavier than the world's. A crate falls at the
+/// rate a crate falls.
+pub const WORLD_GRAVITY: f32 = -9.81;
+
 /// What a collider is, for the purpose of deciding which queries should see it.
 ///
 /// [`Level`] asks only about [`Layer::Level`]. Without that filter every ground probe and every

@@ -4,6 +4,12 @@
 //! which is the case lag compensation has to cover for anything that is not a player — a lift, a
 //! swinging door, a train.
 //!
+//! There are two kinds now, and the difference is one variant of [`RigidBody`]. A **bobbing** crate
+//! is kinematic: it goes where the server puts it and nothing pushes back, which is what an
+//! animation is. A **loose** crate is dynamic: it falls, it stacks, and a shot moves it. The second
+//! is the first thing in this game the physics solver actually does work for, and the reason it is
+//! affordable at all is that `lightyear_avian3d` can roll a solver back.
+//!
 //! **The animation runs on the server alone.** A crate is a kinematic Avian body whose [`Position`]
 //! the server writes each tick; clients receive that position like any other replicated component
 //! and interpolate it. Nothing on a client works out where the crate ought to be. That is deliberate
@@ -85,6 +91,33 @@ impl Bobbing {
     }
 }
 
+/// Where the loose crates start, and how big they are.
+///
+/// Stacked with a small offset rather than squarely on top of each other, so they settle into a
+/// leaning pile instead of a column that could plausibly be one box: a screenshot has to show that
+/// the solver did something. They are dropped from a little above their resting height for the same
+/// reason — the first second of the round shows them fall.
+pub const LOOSE_HALF_EXTENT: f32 = 0.5;
+pub const LOOSE_CRATES: [Vec3; 4] = [
+    Vec3::new(-8.0, 0.6, -6.0),
+    Vec3::new(-8.0, 1.7, -6.0),
+    Vec3::new(-7.85, 2.8, -6.15),
+    Vec3::new(-8.1, 3.9, -5.9),
+];
+
+/// The shape every loose crate has.
+pub fn loose_prop() -> Prop {
+    Prop { half_extents: Vec3::splat(LOOSE_HALF_EXTENT) }
+}
+
+/// How heavy a loose crate is, in kilograms per cubic metre.
+///
+/// Avian derives mass from the collider's volume and this, and its default of 1 makes a cubic-metre
+/// box weigh a kilogram — a shot then launches it at forty metres a second. Softwood packed loosely
+/// is around this, so a crate of a cubic metre comes out at forty kilograms and a hit shoves it
+/// rather than firing it across the map.
+pub const LOOSE_DENSITY: f32 = 40.0;
+
 /// The moving crates the level starts with.
 ///
 /// They ride high enough that their lowest point clears a standing player, because a crate you can
@@ -132,6 +165,23 @@ mod tests {
         let start = CRATE.position_at(0.4);
         let later = CRATE.position_at(0.4 + CRATE.period * 5.0);
         assert!((start - later).length() < 1e-3);
+    }
+
+    /// A loose crate has to start clear of the floor and of the one below it, or the solver's first
+    /// act is to push apart an overlap — which looks like an explosion and is nobody's intent.
+    #[test]
+    fn the_loose_crates_start_apart() {
+        let size = LOOSE_HALF_EXTENT;
+        assert!(LOOSE_CRATES[0].y > size, "the bottom crate starts inside the floor");
+        for pair in LOOSE_CRATES.windows(2) {
+            let gap = (pair[1] - pair[0]).abs();
+            assert!(
+                gap.x > size * 2.0 || gap.y > size * 2.0 || gap.z > size * 2.0,
+                "two loose crates start overlapping: {:?} and {:?}",
+                pair[0],
+                pair[1],
+            );
+        }
     }
 
     /// It must clear a standing player at its lowest, or it is a crate you can walk through.

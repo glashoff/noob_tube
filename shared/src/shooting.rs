@@ -24,6 +24,12 @@ pub const WEAPON_DAMAGE: u8 = 34;
 pub const FIRE_INTERVAL_TICKS: u8 = 8;
 /// Health a player spawns with.
 pub const MAX_HEALTH: u8 = 100;
+/// Momentum a hit hands to a dynamic body, in newton-seconds.
+///
+/// A real rifle round carries under 10 Ns, which would barely rock a crate of a few dozen
+/// kilograms — accurate, and invisible. This is deliberately theatrical: a shot should visibly
+/// shove a crate, because a physics object that only falls once is indistinguishable from scenery.
+pub const WEAPON_IMPULSE: f32 = 40.0;
 
 /// How much of a player is left.
 ///

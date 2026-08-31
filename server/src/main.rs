@@ -12,7 +12,10 @@ use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::level;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::physics::{Layer, Level, PhysicsPlugin};
-use avian3d::prelude::{Collider, CollisionLayers, LayerMask, Position, RigidBody, Rotation};
+use avian3d::prelude::{
+    Collider, ColliderDensity, CollisionLayers, Forces, LayerMask, Position, RigidBody, Rotation,
+    WriteRigidBodyForces,
+};
 use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::props::{self, Bobbing};
 use noob_tube_shared::lag_compensation::HitboxHistory;
@@ -168,6 +171,9 @@ fn resolve_shots(
     // right to: the reads below finish before any write starts, but nothing in the signature says
     // so. The set makes that ordering explicit instead of asserted.
     mut players: ParamSet<(Query<Shooter>, Query<Wounded>)>,
+    // Dynamic props take a shove where they are hit. Reading the pose and writing the velocity,
+    // which is why it cannot share a query with anything that also wants them.
+    mut forces: Query<Forces>,
     mut pending: ResMut<PendingShots>,
     // Latches the one line below that says whether any of this is actually happening.
     mut reported: Local<bool>,
@@ -291,6 +297,15 @@ fn resolve_shots(
         if let Some(hit) = fired.shot.target {
             debug!("peer {} hit at {:.1} m", player.peer, fired.shot.distance);
             hits.push((hit, player.peer));
+            // A shove where it landed, not at the centre, so a corner hit spins the crate. Nothing
+            // happens to a player or a kinematic crate: neither has a `Forces` to write to, and
+            // `get_mut` simply does not match them.
+            if let Ok(mut body) = forces.get_mut(hit) {
+                body.apply_linear_impulse_at_point(
+                    fired.direction * shooting::WEAPON_IMPULSE,
+                    fired.point(),
+                );
+            }
         }
     }
 
@@ -348,6 +363,26 @@ fn broadcast_shots(
 /// queries a player's feet make only see `Layer::Level`, so a crate stops bullets without stopping
 /// anyone walking under it.
 fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
+    // Loose crates: dynamic, so they fall, stack and take a shove. The first thing here the
+    // solver actually works for.
+    let loose = props::loose_prop();
+    for (index, at) in props::LOOSE_CRATES.into_iter().enumerate() {
+        commands.spawn((
+            Name::from(format!("Loose crate {index}")),
+            Authored,
+            loose,
+            RigidBody::Dynamic,
+            loose.collider(),
+            ColliderDensity(props::LOOSE_DENSITY),
+            CollisionLayers::new(Layer::Body, LayerMask::ALL),
+            Position(at),
+            HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
+            Replicate::to_clients(NetworkTarget::All),
+            InterpolationTarget::to_clients(NetworkTarget::All),
+        ));
+    }
+    info!("{} loose crates", props::LOOSE_CRATES.len());
+
     for (index, crate_) in props::MOVING_CRATES.into_iter().enumerate() {
         let prop = crate_.prop();
         commands.spawn((
