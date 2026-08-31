@@ -21,6 +21,7 @@ use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::{Predicted, client};
 use noob_tube_shared::physics::Layer;
+use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::player::{Player, PlayerInput, PlayerState};
 use noob_tube_shared::vehicle::{
     self, probe_wheels, Controls, Driven, Driving, Righting, VehicleKind, Wheels, WHEELS,
@@ -155,17 +156,28 @@ fn give_bodies(
 /// the throttle and not move; an interpolated one left dynamic would fall through the replicated
 /// pose being written on top of it every update.
 fn fit_for_the_solver(
+    net: Res<NetConfig>,
     took_over: Query<(Entity, &VehicleKind), NowPredicted>,
     mut gave_up: RemovedComponents<Predicted>,
     kinds: Query<&VehicleKind>,
     mut commands: Commands,
 ) {
+    // What a predicted chassis is allowed to notice. Everything, or the level alone — see
+    // [`VehiclePrediction::World`]: a client can compute where the level is without being told, and
+    // cannot compute what somebody else's bumper is about to do, so this is the line drawn in the
+    // one place the solver reads it.
+    let against = if net.predict_vehicles.simulates_contacts() {
+        LayerMask::ALL
+    } else {
+        Layer::Level.into()
+    };
     for (entity, kind) in took_over.iter() {
         let spec = kind.spec();
         commands.entity(entity).insert((
             RigidBody::Dynamic,
             ColliderDensity(spec.density()),
             CenterOfMass(Vec3::NEG_Y * spec.centre_of_mass_drop),
+            CollisionLayers::new(Layer::Body, against),
             Controls::default(),
             // Starts at zero on both sides. A vehicle handed over while it is already on its roof
             // waits out the delay again on this client, which costs a second and a half once and
@@ -180,7 +192,13 @@ fn fit_for_the_solver(
         }
         commands
             .entity(entity)
-            .insert(RigidBody::Static)
+            // Back to noticing everything. Interpolated, it is not simulated here at all, and the
+            // filter only decides what a shot's shape test and other people's feet can see — which
+            // is everything, as it is on the server.
+            .insert((
+                RigidBody::Static,
+                CollisionLayers::new(Layer::Body, LayerMask::ALL),
+            ))
             .remove::<(Controls, Righting)>();
         info!("a vehicle went back to being interpolated");
     }

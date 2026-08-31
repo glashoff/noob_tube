@@ -181,22 +181,27 @@ lag_compensation = true
 # present for that shot, rather than quietly testing against a position nobody was ever in.
 lag_comp_history_ticks = 35
 
-# Whether a driver predicts the vehicle they are steering. Server only — a client needs no knob,
-# because prediction is decided by which replication targets the server writes.
+# How much of a vehicle a driver's own client works out for itself. Both ends read it and they
+# must agree — the server decides who gets a prediction target, the client decides what its
+# predicted chassis may collide with, and neither can see the other's copy.
 #
-# On, your input reaches the picture immediately and the vehicle is yours to compute. Off, it goes
-# to the server and comes back — about 130 ms at ping_ms = 100 with send_hz = 64 and interp_ratio =
-# 2, being half a ping up, half a ping down, and the interpolation buffer.
+#   "full"  — the vehicle and everything driverless it might hit. Loose crates and parked vehicles
+#             are handed to the driver for the duration, so both sides shove the same box on the
+#             same tick. The most responsive, and the most fragile: a vehicle somebody *else* is
+#             driving has no answer here, because its input belongs to a peer this client never
+#             hears from.
 #
-# Neither is obviously right, which is why it is a knob. Prediction costs a vehicle that disagrees
-# with the server whenever it touches something the client could not compute; another player's car
-# is the case with no answer, because its input belongs to a peer this client never hears from.
-# Not predicting costs input delay on the throttle and the steering — but the buggy takes 183 ms to
-# reach full lock and two seconds to reach 20 m/s by itself, so 130 ms lands on something already
-# slow. What it buys is that vehicles and crates go back to being rewound exactly, and that no two
-# peers ever disagree about where anything is.
+#   "world" — the vehicle against the level and nothing else. The chassis stops colliding with
+#             crates and with other vehicles locally; the server still collides with all of it and
+#             the correction arrives with the next update. This changes *when* you pay: "full" pays
+#             a small permanent disagreement on every contact, gentle ones included, while this
+#             pays nothing at all while driving and pays it in one lump when you crash — which is
+#             the moment a player expects to be thrown around anyway. The wheels still find crates:
+#             a suspension ray is a query, not a solver contact, and the server casts the same one.
 #
-# Turning it off takes the loose crates with it: they are handed to drivers only so a *predicted*
-# bumper meets the same box the server does, and with nothing predicted there is nothing to hand
-# over.
-predict_vehicles = true
+#   "off"   — nobody predicts anything. Measured at 176 ms later at ping_ms = 100, of which half is
+#             the interpolation delay and half is losing the head start prediction ran with. Note
+#             that this is not finished: a predicted driver carried by an unpredicted vehicle still
+#             produces about 35 rollbacks a second, and making that clean means not predicting the
+#             driver either.
+predict_vehicles = "full"

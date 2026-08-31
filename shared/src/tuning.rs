@@ -51,6 +51,64 @@ pub const DEFAULT_CONFIG_PATH: &str = "noob_tube.toml";
 
 /// Everything about the network that is worth changing without a rebuild.
 ///
+/// How much of a vehicle a driver's own client works out for itself.
+///
+/// A ladder rather than a switch, because the interesting setting is the middle one. What a client
+/// can compute without being told is its own input and the shape of the level; what it cannot is
+/// anything a *different* player influences. [`World`](Self::World) draws the line exactly there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VehiclePrediction {
+    /// The driver predicts the vehicle and everything driverless it might hit — loose crates and
+    /// parked vehicles are handed to them for the duration, so both sides shove the same box on the
+    /// same tick.
+    ///
+    /// The most responsive and the most fragile. Anything it hits that *is* driven by somebody else
+    /// has no answer here at all, because that input belongs to a peer this client never hears from.
+    #[default]
+    Full,
+    /// The driver predicts the vehicle against the level and nothing else.
+    ///
+    /// The chassis stops colliding with crates and with other vehicles on the driver's own client;
+    /// the server still collides with all of it and the correction arrives with the next update.
+    /// The trade is deliberate and it is about *when* you pay. Full prediction pays a small,
+    /// permanent disagreement on every contact, gentle ones included. This pays nothing at all
+    /// while driving — which is nearly all of the time — and pays it in one lump when you crash,
+    /// which is the moment a player expects to be thrown around anyway.
+    ///
+    /// The wheels still find crates: a suspension ray is a query, not a solver contact, and the
+    /// server casts the same one. Only the chassis stops noticing them.
+    World,
+    /// Nobody predicts anything. The vehicle is interpolated like any other scenery, and the input
+    /// goes to the server and comes back — measured at 176 ms later at 100 ms of ping.
+    Off,
+}
+
+impl VehiclePrediction {
+    /// Whether a driver's own client simulates the vehicle at all.
+    pub fn simulates_the_vehicle(self) -> bool {
+        !matches!(self, VehiclePrediction::Off)
+    }
+
+    /// Whether that simulation is allowed to touch anything but the level.
+    pub fn simulates_contacts(self) -> bool {
+        matches!(self, VehiclePrediction::Full)
+    }
+}
+
+impl core::str::FromStr for VehiclePrediction {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "full" => Ok(Self::Full),
+            "world" => Ok(Self::World),
+            "off" => Ok(Self::Off),
+            other => Err(format!("expected full, world or off, not {other:?}")),
+        }
+    }
+}
+
 /// `deny_unknown_fields` is deliberate. A misspelled key that silently does nothing is the same
 /// failure as a conditioner that was never applied: the run looks fine and every number from it is
 /// wrong. Better to refuse to start.
@@ -182,29 +240,14 @@ pub struct NetConfig {
     /// Too short is not silent: the server logs a rewind it could not satisfy rather than quietly
     /// testing against a position the shooter never saw.
     pub lag_comp_history_ticks: u16,
-    /// Whether a driver predicts the vehicle they are steering.
+    /// How much of a vehicle a driver's own client works out for itself. See
+    /// [`VehiclePrediction`], which carries the reasoning; this is only where it is read from.
     ///
-    /// **Server-side, and the whole of the switch.** Prediction is decided by which replication
-    /// targets the server writes, so a client needs no knob of its own: off, no vehicle is ever a
-    /// `PredictionTarget`, nothing on a client matches `With<Predicted>`, and every system that
-    /// simulates a vehicle locally simply stops matching.
-    ///
-    /// On, a driver's input reaches the picture immediately and the vehicle is theirs to compute.
-    /// Off, it goes to the server and comes back — about 130 ms at 100 ms of ping with the default
-    /// send rate — and the client only ever draws what it is told.
-    ///
-    /// The trade is not obvious in either direction, which is why it is a knob rather than a
-    /// decision. Prediction costs a vehicle that disagrees with the server whenever it touches
-    /// something the client could not compute: another player's car is the case that has no answer
-    /// here, because its input belongs to a peer this client never hears from. Not predicting costs
-    /// input delay on the throttle and the steering — but a buggy takes 183 ms to reach full lock
-    /// and two seconds to reach 20 m/s on its own, so 130 ms lands on something already slow.
-    ///
-    /// Turning it off takes the loose crates with it: they are handed to drivers only so that a
-    /// *predicted* vehicle meets the same box the server does, and with nothing predicted there is
-    /// nothing to hand over. Vehicles and crates then go back to being rewound exactly, which is
-    /// the half of it that prediction cannot give.
-    pub predict_vehicles: bool,
+    /// **Both ends read it, and they must agree.** The server decides who gets a `PredictionTarget`
+    /// and a client decides what its predicted chassis is allowed to collide with; neither can see
+    /// the other's copy. Nothing here enforces it, in the same way nothing enforces the link
+    /// conditioner being set on every process.
+    pub predict_vehicles: VehiclePrediction,
 }
 
 impl Default for NetConfig {
@@ -232,7 +275,7 @@ impl Default for NetConfig {
             // ~550 ms at 64 Hz: past any playable connection, and cheap.
             lag_comp_history_ticks: 35,
             // The behaviour everything so far was measured against.
-            predict_vehicles: true,
+            predict_vehicles: VehiclePrediction::Full,
             // Beside SERVER_PORT, which is UDP; the two do not collide.
             meta_port: crate::SERVER_PORT + 1,
         }

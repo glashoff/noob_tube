@@ -594,12 +594,12 @@ fn use_vehicles(
             // gets, for the same reason: the input that moves it is theirs, so they are the one peer
             // that can compute where it will be without being told. Unless the switch says
             // otherwise, in which case nobody computes it and everybody is told.
-            PredictionTarget::to_clients(if net.predict_vehicles {
+            PredictionTarget::to_clients(if net.predict_vehicles.simulates_the_vehicle() {
                 NetworkTarget::Single(owner.0)
             } else {
                 NetworkTarget::None
             }),
-            InterpolationTarget::to_clients(if net.predict_vehicles {
+            InterpolationTarget::to_clients(if net.predict_vehicles.simulates_the_vehicle() {
                 NetworkTarget::AllExceptSingle(owner.0)
             } else {
                 NetworkTarget::All
@@ -653,9 +653,11 @@ fn the_driverless_follow_the_drivers(
     mut last: Local<Vec<PeerId>>,
     mut commands: Commands,
 ) {
-    // With prediction off there is no predicted bumper for any of this to agree with, so nobody
-    // gets handed anything and every crate stays interpolated — and rewound exactly.
-    let now: Vec<PeerId> = if net.predict_vehicles {
+    // Only the fullest setting hands anything over. With the vehicle predicted against the level
+    // alone its chassis does not collide with a crate at all, so there is nothing for a predicted
+    // crate to agree with; with nothing predicted there is no bumper either. In both cases the
+    // crates stay interpolated — and rewound exactly, which is what that buys.
+    let now: Vec<PeerId> = if net.predict_vehicles.simulates_contacts() {
         drivers.iter().map(|owner| owner.0).collect()
     } else {
         Vec::new()

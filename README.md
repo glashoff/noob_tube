@@ -1289,6 +1289,32 @@ predict.** For this mode to be clean the driver has to stop being predicted too 
 that runs into an assumption further in — a client identifies its own player *by* it being the
 predicted one. Which is where this stops, deliberately, rather than being hacked past.
 
+`predict_vehicles` is therefore a ladder rather than a switch, and the middle rung is the
+interesting one. `"world"` predicts the vehicle against the level and nothing else: the chassis
+stops colliding with crates and with other vehicles on the driver's own client, while the server
+still collides with all of it. The wheels still find crates — a suspension ray is a query, not a
+solver contact, and the server casts the same one — so only the chassis stops noticing them.
+
+Measured at 100 ms of ping with 10 % loss, three seconds of open road and then four seconds ramming
+a parked vehicle:
+
+| | open road | into a parked vehicle |
+|---|---|---|
+| `"full"` | 0 rollbacks | 0 rollbacks, 0 cm |
+| `"world"` | 0 rollbacks | 54, worst 87 cm |
+| `"off"` | 85 rollbacks | 110 rollbacks |
+
+Which shows the shape of the trade exactly: `"world"` costs nothing at all while driving, which is
+nearly all of the time, and pays it in one lump during the second of contact. `"off"` is worst
+everywhere, including on an empty road with nothing to hit, for the passenger reason above.
+
+**What it does not show is the case `"world"` exists for.** A parked vehicle is something `"full"`
+can predict, so this table is `"world"` paying its cost with none of its benefit; the case it is
+meant for is a vehicle *another player* is driving, where `"full"` has no answer at all. Measuring
+that needs two clients. An attempt to stand one in — stripping the prediction target off a parked
+vehicle to leave it interpolated the way a driven one is — did not work, because the client went on
+predicting it, so that row is missing rather than estimated.
+
 Still missing: standing on a vehicle rather than being inside it, passengers, a camera that gets out
 of the way of walls, and running people over.
 
