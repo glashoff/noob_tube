@@ -32,6 +32,7 @@ fn main() {
         .insert_resource(net.input_timeline())
         .insert_resource(net)
         .add_plugins((
+            noob_tube_shared::physics::PhysicsPlugin,
             world::WorldPlugin,
             noob_tube_shared::types::SharedTypesPlugin,
             local_player::LocalPlayerPlugin,

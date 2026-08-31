@@ -8,7 +8,7 @@ use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::collision::CollisionWorld;
+use crate::physics::Level;
 use crate::movement::*;
 
 /// One tick's worth of player intent.
@@ -159,7 +159,7 @@ impl PlayerState {
     }
 
     /// Advances one tick.
-    pub fn apply_input(&mut self, input: &PlayerInput, world: &CollisionWorld, dt: f32) {
+    pub fn apply_input(&mut self, input: &PlayerInput, level: &Level, dt: f32) {
         // Before the stance changes, so a shot uses the stance it was aimed from.
         if self.is_firing(input) {
             self.fire_cooldown = crate::shooting::FIRE_INTERVAL_TICKS;
@@ -167,7 +167,7 @@ impl PlayerState {
             self.fire_cooldown = self.fire_cooldown.saturating_sub(1);
         }
 
-        self.update_stance(input, world);
+        self.update_stance(input, level);
 
         let speed = if self.crouching {
             CROUCH_SPEED
@@ -208,7 +208,7 @@ impl PlayerState {
         }
 
         let wanted = self.velocity * dt;
-        let moved = world.sweep_capsule(self.position, wanted, self.crouching);
+        let moved = level.sweep_capsule(self.position, wanted, self.crouching);
         self.position += moved;
 
         // Where the sweep refused to take us, the velocity in that direction is spent — otherwise
@@ -223,7 +223,8 @@ impl PlayerState {
         // The ground probe reaches GROUND_SNAP_DIST below the feet, and one tick into a jump the
         // player has not cleared that yet. Counting that as grounded would let a held jump key
         // re-trigger every tick, pinning the player just above the floor.
-        self.on_ground = self.velocity.y <= 0.0 && world.is_grounded(self.position, self.crouching);
+        self.on_ground =
+            self.velocity.y <= 0.0 && level.is_grounded(self.position, self.crouching);
 
         // Hold the capsule one skin above the surface while grounded, never on it and never in
         // it. The sweep leaves it a fraction of a millimetre low each tick and never puts that
@@ -232,7 +233,7 @@ impl PlayerState {
         // contact at distance zero and the slide loop makes no progress at all. A whole skin of
         // clearance keeps every cast in the well-behaved regime.
         if self.on_ground
-            && let Some(ground) = world.ground_height_below(self.position)
+            && let Some(ground) = level.ground_height_below(self.position)
             && (self.position.y - ground).abs() < GROUND_SNAP_DIST
         {
             self.position.y = ground + SKIN;
@@ -241,11 +242,11 @@ impl PlayerState {
     }
 
     /// Crouching starts the moment the key is held; standing back up has to wait for headroom.
-    fn update_stance(&mut self, input: &PlayerInput, world: &CollisionWorld) {
+    fn update_stance(&mut self, input: &PlayerInput, level: &Level) {
         self.crouching = if input.crouch {
             true
         } else {
-            !world.can_stand_up(self.position) && self.crouching
+            !level.can_stand_up(self.position) && self.crouching
         };
     }
 }
@@ -253,37 +254,30 @@ impl PlayerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn floor_world() -> CollisionWorld {
-        let mut world = CollisionWorld::new();
-        world.add_trimesh(
-            // Big enough that a test can walk for a minute without reaching the edge — at
-            // 5.5 m/s that is 330 m, and falling off would look exactly like a physics bug.
-            vec![
-                Vec3::new(-1000.0, 0.0, -1000.0),
-                Vec3::new(1000.0, 0.0, -1000.0),
-                Vec3::new(1000.0, 0.0, 1000.0),
-                Vec3::new(-1000.0, 0.0, 1000.0),
-            ],
-            vec![[0, 1, 2], [0, 2, 3]],
-        );
-        world.rebuild();
-        world
-    }
+    use crate::physics::test_support::{ask, floor_app};
+    use bevy::prelude::App;
 
     const DT: f32 = 1.0 / 64.0;
 
-    fn run(state: &mut PlayerState, input: &PlayerInput, world: &CollisionWorld, ticks: usize) {
-        for _ in 0..ticks {
-            state.apply_input(input, world, DT);
-        }
+    /// Advances a player `ticks` times against the app's level, and hands back where it ended up.
+    ///
+    /// The whole run happens inside one query rather than one per tick, because a `Level` is a
+    /// system parameter: getting one costs a system run, and these tests advance tens of thousands
+    /// of ticks between them.
+    fn run(app: &mut App, state: PlayerState, input: PlayerInput, ticks: usize) -> PlayerState {
+        ask(app, move |level| {
+            let mut state = state;
+            for _ in 0..ticks {
+                state.apply_input(&input, level, DT);
+            }
+            state
+        })
     }
 
     #[test]
     fn standing_still_stays_on_the_floor() {
-        let world = floor_world();
-        let mut state = PlayerState::default();
-        run(&mut state, &PlayerInput::default(), &world, 64);
+        let mut app = floor_app();
+        let state = run(&mut app, PlayerState::default(), PlayerInput::default(), 64);
         assert!(state.on_ground);
         assert!(state.position.y.abs() < 0.05, "{:?}", state.position);
         // Gravity must not accumulate while grounded.
@@ -292,11 +286,10 @@ mod tests {
 
     #[test]
     fn walking_forward_reaches_max_speed() {
-        let world = floor_world();
-        let mut state = PlayerState::default();
+        let mut app = floor_app();
         let input = PlayerInput { forward: true, ..default_input() };
         // MOVE_ACCEL_TIME is 0.3 s; a full second is comfortably enough.
-        run(&mut state, &input, &world, 64);
+        let state = run(&mut app, PlayerState::default(), input, 64);
         let speed = Vec3::new(state.velocity.x, 0.0, state.velocity.z).length();
         assert!((speed - MAX_SPEED).abs() < 0.01, "speed was {speed}");
         // Yaw 0 means forward is -Z, matching Bevy's convention.
@@ -305,54 +298,48 @@ mod tests {
 
     #[test]
     fn diagonals_are_not_faster() {
-        let world = floor_world();
-        let mut state = PlayerState::default();
+        let mut app = floor_app();
         let input = PlayerInput { forward: true, right: true, ..default_input() };
-        run(&mut state, &input, &world, 64);
+        let state = run(&mut app, PlayerState::default(), input, 64);
         let speed = Vec3::new(state.velocity.x, 0.0, state.velocity.z).length();
         assert!((speed - MAX_SPEED).abs() < 0.01, "diagonal speed was {speed}");
     }
 
     #[test]
     fn jumping_leaves_the_ground_and_lands_again() {
-        let world = floor_world();
-        let mut state = PlayerState::default();
+        let mut app = floor_app();
         let jump = PlayerInput { jump: true, ..default_input() };
 
-        state.apply_input(&jump, &world, DT);
+        let state = run(&mut app, PlayerState::default(), jump, 1);
         assert!(!state.on_ground, "did not leave the ground");
         assert!(state.position.y > 0.0);
 
         // JUMP_VELOCITY 6.5 against GRAVITY -20 gives roughly 0.65 s of flight.
-        run(&mut state, &default_input(), &world, 64);
+        let state = run(&mut app, state, default_input(), 64);
         assert!(state.on_ground, "never landed");
         assert!(state.position.y.abs() < 0.05, "{:?}", state.position);
     }
 
     #[test]
     fn crouching_slows_the_player_down() {
-        let world = floor_world();
-        let mut state = PlayerState::default();
+        let mut app = floor_app();
         let input = PlayerInput { forward: true, crouch: true, ..default_input() };
-        run(&mut state, &input, &world, 64);
+        let state = run(&mut app, PlayerState::default(), input, 64);
         assert!(state.crouching);
         let speed = Vec3::new(state.velocity.x, 0.0, state.velocity.z).length();
         assert!((speed - CROUCH_SPEED).abs() < 0.01, "crouch speed was {speed}");
         assert_eq!(state.eye_height(), CROUCH_EYE_HEIGHT);
     }
 
-    /// Standing still must not sink. The capsule settles a fraction of a tick's gravity into the
-    /// floor on the first step — the cast finds no overlap when it starts exactly on the surface —
-    /// but that must be a one-off, not a slow descent through the level.
+    /// Standing still must not sink. The capsule may settle a fraction of a tick's gravity into the
+    /// floor on the first step, but that must be a one-off, not a slow descent through the level.
     #[test]
     fn standing_does_not_drift_downward() {
-        let world = floor_world();
-        let mut state = PlayerState::default();
-
-        run(&mut state, &PlayerInput::default(), &world, 64);
+        let mut app = floor_app();
+        let state = run(&mut app, PlayerState::default(), PlayerInput::default(), 64);
         let after_one_second = state.position.y;
 
-        run(&mut state, &PlayerInput::default(), &world, 64 * 60);
+        let state = run(&mut app, state, PlayerInput::default(), 64 * 60);
         let after_a_minute = state.position.y;
 
         assert!(
@@ -365,27 +352,25 @@ mod tests {
     /// Walking across the floor must not sink either — the sweep runs a longer path each tick.
     #[test]
     fn walking_does_not_drift_downward() {
-        let world = floor_world();
-        let mut state = PlayerState::default();
+        let mut app = floor_app();
         let input = PlayerInput { forward: true, ..default_input() };
 
-        run(&mut state, &input, &world, 64);
+        let state = run(&mut app, PlayerState::default(), input, 64);
         let early = state.position.y;
-        run(&mut state, &input, &world, 64 * 30);
+        let state = run(&mut app, state, input, 64 * 30);
         let late = state.position.y;
 
         assert!((late - early).abs() < 1e-6, "sank from {early} to {late} while walking");
     }
 
-    /// Walking has to keep working, not just start working. The drift tests above only ever
-    /// checked height, which is how a total stall went unnoticed.
+    /// Walking has to keep working, not just start working. The drift tests above only ever checked
+    /// height, which is how a total stall went unnoticed.
     #[test]
     fn walking_keeps_covering_ground() {
-        let world = floor_world();
-        let mut state = PlayerState::default();
+        let mut app = floor_app();
         let input = PlayerInput { forward: true, ..default_input() };
 
-        run(&mut state, &input, &world, 64 * 10);
+        let state = run(&mut app, PlayerState::default(), input, 64 * 10);
         let after_ten_seconds = -state.position.z;
 
         // Ten seconds at 5.5 m/s, less the acceleration ramp, is comfortably over 50 m.
@@ -398,13 +383,12 @@ mod tests {
     /// The whole point of keeping this deterministic.
     #[test]
     fn identical_runs_produce_identical_state() {
-        let world = floor_world();
-        let input = PlayerInput { forward: true, right: true, jump: true, yaw: 0.7, ..default_input() };
+        let mut app = floor_app();
+        let input =
+            PlayerInput { forward: true, right: true, jump: true, yaw: 0.7, ..default_input() };
 
-        let mut a = PlayerState::default();
-        let mut b = PlayerState::default();
-        run(&mut a, &input, &world, 40);
-        run(&mut b, &input, &world, 40);
+        let a = run(&mut app, PlayerState::default(), input, 40);
+        let b = run(&mut app, PlayerState::default(), input, 40);
         assert_eq!(a, b);
     }
 

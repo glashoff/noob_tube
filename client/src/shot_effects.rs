@@ -11,7 +11,7 @@
 //! leave a mark. A shot that struck a player leaves neither hole nor blood yet; it puts a marker on
 //! the shooter's crosshair instead, which is the feedback that actually matters.
 //!
-//! The message carries no surface normal. Every client holds the same [`CollisionWorld`] the server
+//! The message carries no surface normal. Every client holds the same [`Level`] the server
 //! does, built from the same numbers, so the normal a bullet hole needs is a raycast away and does
 //! not need to be paid for on the wire.
 
@@ -19,7 +19,7 @@ use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::{MessageReceiver, Predicted, Rollback, client};
-use noob_tube_shared::collision::CollisionWorld;
+use noob_tube_shared::physics::Level;
 use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::player::{Player, PlayerInput, PlayerState};
 use noob_tube_shared::shooting::{self, ShotFired};
@@ -152,11 +152,11 @@ fn predict_own_tracer(
     others: Query<Target, Drawn>,
     // Props are targets too, and they carry their hitbox rather than deriving one.
     props: Query<(Entity, &Hitbox), Drawn>,
-    world: Option<Res<CollisionWorld>>,
+    level: Level,
     assets: Option<Res<ShotAssets>>,
     mut commands: Commands,
 ) {
-    let (Some(mine), Some(world), Some(assets)) = (mine, world, assets) else {
+    let (Some(mine), Some(assets)) = (mine, assets) else {
         return;
     };
     let (action, state) = *mine;
@@ -165,7 +165,7 @@ fn predict_own_tracer(
         .map(|(entity, other)| (entity, Hitbox::of(other)))
         .chain(props.iter().map(|(entity, hitbox)| (entity, *hitbox)));
     // The same call the server makes, over the same input, before either side steps the player.
-    let Some(fired) = shooting::fire(&world, state, &action.0, targets) else {
+    let Some(fired) = shooting::fire(&level, state, &action.0, targets) else {
         return;
     };
     spawn_tracer(&mut commands, &assets, fired.origin, fired.point(), true);
@@ -174,7 +174,7 @@ fn predict_own_tracer(
 /// Update: draws every shot the server has told us about.
 fn draw_shots(
     mut inbox: Query<&mut MessageReceiver<ShotFired>>,
-    world: Option<Res<CollisionWorld>>,
+    level: Level,
     mine: Option<Single<&Player, With<Predicted>>>,
     assets: Res<ShotAssets>,
     mut holes: ResMut<Holes>,
@@ -198,9 +198,7 @@ fn draw_shots(
                 }
                 continue;
             }
-            if let Some(world) = world.as_deref() {
-                spawn_hole(&mut commands, &assets, world, &shot, &mut holes);
-            }
+            spawn_hole(&mut commands, &assets, &level, &shot, &mut holes);
         }
     }
 }
@@ -248,13 +246,13 @@ fn spawn_tracer(commands: &mut Commands, assets: &ShotAssets, from: Vec3, to: Ve
 fn spawn_hole(
     commands: &mut Commands,
     assets: &ShotAssets,
-    world: &CollisionWorld,
+    level: &Level,
     shot: &ShotFired,
     holes: &mut Holes,
 ) {
     let direction = (shot.to - shot.from).normalize_or_zero();
     let reach = shot.from.distance(shot.to) + 0.1;
-    let Some((_, normal)) = world.raycast_normal(shot.from, direction, reach) else {
+    let Some((_, normal)) = level.raycast_normal(shot.from, direction, reach) else {
         return;
     };
     // The normal can point either way along the surface; a decal wants the side it was shot from.

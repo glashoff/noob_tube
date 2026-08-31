@@ -95,36 +95,54 @@ All candidates below were checked against Bevy 0.19 and already support it.
 | Concern | Choice | Rationale |
 |---|---|---|
 | Netcode | **lightyear 0.29** | Ships prediction, rollback and interpolation — the same model `webgame` implements by hand. `bevy_replicon 0.43` only replicates; prediction would have to be written from scratch. |
-| Collision | **rapier3d 0.35, queries only** | Shape casts against level meshes, with no solver and no simulation step. See [Two kinds of physics](#two-kinds-of-physics). |
-| Ragdolls | **rapier3d, second world** | Client-side cosmetic only. Rigid bodies with angle-limited joints, simulated in a world of its own. |
+| Collision | **Avian 0.7** | Level geometry as static bodies; the player is a kinematic capsule that never enters the solver. See [Two kinds of physics](#two-kinds-of-physics). |
+| Ragdolls | **Avian, client-side** | Cosmetic only. Dynamic bodies with angle-limited joints, never replicated and never rolled back. |
 | Assets | glTF/GLB, loaded natively | Bevy reads GLB including skeletal animation. Bevy cannot read FBX, so `Swat.fbx` needs converting. |
 
 ### Two kinds of physics
 
 The project needs physics twice, under opposite constraints. Keeping the two apart is the single
-most important structural decision here.
+most important structural decision here. What changed is *where* the line runs: it used to separate
+two libraries, and it now separates the player from everything else.
 
-**Gameplay collision — stateless, shared, rollback-safe.** Player movement collides against level
-meshes using nothing but shape casts. Rapier is two halves: parry for geometry queries, plus a
-solver and pipeline for simulation. Only the first half is used — `PhysicsPipeline::step()` is
-never called, so no solver state exists that a rollback would have to restore. The level BVH is
-built once and never changes, so it needs no snapshotting either. The entire rollback state stays
-at four fields per player: `position`, `velocity`, `on_ground`, `crouching`.
+**The player — stateless, shared, rollback-safe.** Movement is a design, not a simulation result.
+Quake-style acceleration, air control and ground snapping are formulas, and a solver that negotiated
+over them would be negotiating over the feel of the game. So the player is never a rigid body: it is
+a capsule that Avian sweeps and slides on demand, through
+[`physics::Level`](shared/src/physics.rs). Nothing about it persists between ticks, so the entire
+rollback state stays at four fields — `position`, `velocity`, `on_ground`, `crouching` — and a
+replayed tick is bit-identical to the original.
 
-This uses `rapier3d` directly, **not** `bevy_rapier3d`. The Bevy plugin brings ECS integration,
-collider components and a running simulation — all of it dead weight to work around. It also has a
-Bevy dependency, and `shared/` has to run on the headless server.
+**Everything else — stateful, and that is now fine.** Crates that can be pushed, doors, vehicles,
+ragdolls: all of them want a solver, and `lightyear_avian3d` rolls one back. *(Level collision runs
+on Avian today; the networked-solver half is the next step, and nothing is a dynamic body yet.)* It snapshots the whole
+persistent state — contact graph, constraint graph, islands, sleeping, warm-start impulses, the
+collider BVHs — locally, per tick. Only `Position`, `Rotation`, `LinearVelocity` and
+`AngularVelocity` ever cross the network; a client re-derives the rest by running the same solver
+over the same poses.
 
-**Ragdolls — stateful, client-only, cosmetic.** When a player dies, the body falls under its own
-simulation. This carries state by definition, and that is fine: it never touches gameplay, is never
-replicated, and is never rolled back. Determinism is irrelevant — two clients may see the same
-corpse land differently and nothing breaks.
+That derivation is why the line still exists. Solver state *converges*, it does not match: after a
+rollback two peers agree on positions and only approximately on contact impulses. For a crate that
+is invisible. For the player it is the stutter this whole project is built to avoid.
 
-This runs in a **second rapier world**, separate from the gameplay one, existing only on the client
-and only for corpses. It has its own `RigidBodySet` and pipeline, and here `step()` actually runs.
-The level colliders go in as a static copy. The gameplay world stays query-only, so the separation
-between stateful and stateless physics is preserved — it now runs between two worlds rather than
-between two libraries, and needs no second dependency.
+**Why Avian and not rapier.** The first version used `rapier3d` directly as a query library, with
+`PhysicsPipeline::step()` never called. It worked, and its one limitation ended it: the level BVH is
+built once and cannot be refit, so no collider in it can ever move. A lift, a swinging door or a
+vehicle is not expressible at all. Avian's collider trees update incrementally as bodies move, keeps
+static geometry in a tree of its own, and — through `lightyear_avian3d` — comes with the rollback
+integration that made the solver affordable in the first place.
+
+`shared/tests/avian_matches_rapier.rs` holds the migration to account while both are in the tree:
+every query the movement code makes is asked of both engines. Rays agree to the last decimal place.
+Capsule sweeps agree horizontally and differ vertically by design, because Avian's move-and-slide
+runs depenetration passes that hold the capsule a skin width clear of a surface where rapier's let
+it rest.
+
+**Ragdolls — client-only, cosmetic.** When a player dies the body falls under its own simulation.
+That carries state by definition, and it does not matter: it never touches gameplay, is never
+replicated, and is never rolled back. Two clients may see the same corpse land differently and
+nothing breaks. These are ordinary Avian dynamic bodies without a prediction marker — the second
+physics world the earlier design needed is simply gone.
 
 One rigid body per hit capsule, joined by angle-limited joints:
 

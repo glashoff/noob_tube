@@ -12,7 +12,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::collision::CollisionWorld;
+use crate::physics::Level;
 use crate::hitbox::Hitbox;
 use crate::player::{PlayerInput, PlayerState};
 
@@ -91,13 +91,13 @@ impl Shot {
 /// moment being tested; the shooter must not be among them, or they shoot themselves at zero
 /// distance.
 pub fn resolve<T: IntoIterator<Item = (Entity, Hitbox)>>(
-    world: &CollisionWorld,
+    level: &Level,
     origin: Vec3,
     direction: Vec3,
     targets: T,
 ) -> Shot {
     // Anything past the wall is not a target, so the wall sets the budget for the whole search.
-    let reach = world
+    let reach = level
         .raycast(origin, direction, WEAPON_RANGE)
         .unwrap_or(WEAPON_RANGE);
 
@@ -144,7 +144,7 @@ impl Fired {
 /// `Aim` is written at the end of a tick, so reading it here would aim every shot with the previous
 /// tick's angles.
 pub fn fire<T: IntoIterator<Item = (Entity, Hitbox)>>(
-    world: &CollisionWorld,
+    level: &Level,
     state: &PlayerState,
     input: &PlayerInput,
     targets: T,
@@ -156,7 +156,7 @@ pub fn fire<T: IntoIterator<Item = (Entity, Hitbox)>>(
     Some(Fired {
         origin,
         direction,
-        shot: resolve(world, origin, direction, targets),
+        shot: resolve(level, origin, direction, targets),
     })
 }
 
@@ -167,7 +167,7 @@ pub fn fire<T: IntoIterator<Item = (Entity, Hitbox)>>(
 /// drawing it then would be worse than not drawing it at all.
 ///
 /// Deliberately small. There is no surface normal in here, because every client already holds the
-/// same [`CollisionWorld`] built from the same numbers and can cast the ray itself to find one.
+/// same [`Level`] built from the same numbers and can cast the ray itself to find one.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShotFired {
     /// Which peer fired, so a client can tell its own shots from everyone else's.
@@ -185,28 +185,19 @@ pub struct ShotFired {
 mod tests {
     use super::*;
     use crate::movement::{CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS, CAPSULE_Y_OFFSET};
+    use crate::physics::test_support::{ask, bare_app, floor_app, ready};
+    use crate::physics::level_geometry;
+    use avian3d::prelude::Collider;
+    use bevy::prelude::App;
 
-    /// A world with a floor and one crate, matching the level's own.
-    fn world_with_cover() -> CollisionWorld {
-        let mut world = CollisionWorld::new();
-        world.add_trimesh(
-            vec![
-                Vec3::new(-100.0, 0.0, -100.0),
-                Vec3::new(100.0, 0.0, -100.0),
-                Vec3::new(100.0, 0.0, 100.0),
-                Vec3::new(-100.0, 0.0, 100.0),
-            ],
-            vec![[0, 1, 2], [0, 2, 3]],
-        );
-        world.add_cuboid(Vec3::new(0.0, 1.0, -5.0), Vec3::splat(1.0));
-        world.rebuild();
-        world
-    }
-
-    fn empty_world() -> CollisionWorld {
-        let mut world = CollisionWorld::new();
-        world.rebuild();
-        world
+    /// A level with a floor and one crate, matching the level's own.
+    fn app_with_cover() -> App {
+        let mut app = floor_app();
+        app.world_mut().spawn(level_geometry(
+            Collider::cuboid(2.0, 2.0, 2.0),
+            Vec3::new(0.0, 1.0, -5.0),
+        ));
+        ready(app)
     }
 
     const TARGET: Entity = Entity::from_raw_u32(1).unwrap();
@@ -234,7 +225,9 @@ mod tests {
     fn a_shot_down_the_middle_hits() {
         let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.0);
         let target = Vec3::new(0.0, 0.0, -10.0);
-        let hit = resolve(&empty_world(), origin, direction, [(TARGET, standing(target))]);
+        let hit = ask(&mut bare_app(), move |level| {
+            resolve(level, origin, direction, [(TARGET, standing(target))])
+        });
         assert_eq!(hit.target, Some(TARGET), "a target straight ahead was not hit");
         let distance = hit.distance;
 
@@ -255,7 +248,10 @@ mod tests {
         let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.0);
         // A metre to the side, well clear of the 0.35 m radius.
         let target = Vec3::new(1.0, 0.0, -10.0);
-        assert!(resolve(&empty_world(), origin, direction, [(TARGET, standing(target))]).target.is_none());
+        let hit = ask(&mut bare_app(), move |level| {
+            resolve(level, origin, direction, [(TARGET, standing(target))])
+        });
+        assert!(hit.target.is_none());
     }
 
     /// Cover has to work, or the level is decoration.
@@ -264,7 +260,9 @@ mod tests {
         let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.0);
         // The crate sits at z = -5; the target is behind it.
         let target = Vec3::new(0.0, 0.0, -10.0);
-        let shot = resolve(&world_with_cover(), origin, direction, [(TARGET, standing(target))]);
+        let shot = ask(&mut app_with_cover(), move |level| {
+            resolve(level, origin, direction, [(TARGET, standing(target))])
+        });
         assert!(shot.target.is_none(), "shot through a crate");
         // And it stopped at the crate's near face, which is what the bullet hole is drawn on.
         assert!((shot.distance - 4.0).abs() < 0.01, "stopped at {}", shot.distance);
@@ -276,18 +274,20 @@ mod tests {
         let player = Entity::from_raw_u32(1).unwrap();
         let prop = Entity::from_raw_u32(2).unwrap();
         let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.0);
-        let hit = resolve(
-            &empty_world(),
-            origin,
-            direction,
-            [
-                (player, standing(Vec3::new(0.0, 0.0, -10.0))),
-                (prop, Hitbox::Prop {
-                    centre: Vec3::new(0.0, 1.59, -5.0),
-                    half_extents: Vec3::splat(0.5),
-                }),
-            ],
-        );
+        let hit = ask(&mut bare_app(), move |level| {
+            resolve(
+                level,
+                origin,
+                direction,
+                [
+                    (player, standing(Vec3::new(0.0, 0.0, -10.0))),
+                    (prop, Hitbox::Prop {
+                        centre: Vec3::new(0.0, 1.59, -5.0),
+                        half_extents: Vec3::splat(0.5),
+                    }),
+                ],
+            )
+        });
         assert_eq!(hit.target, Some(prop), "shot through a prop to the player behind it");
     }
 
@@ -296,15 +296,17 @@ mod tests {
         let near = Entity::from_raw_u32(1).unwrap();
         let far = Entity::from_raw_u32(2).unwrap();
         let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.0);
-        let hit = resolve(
-            &empty_world(),
-            origin,
-            direction,
-            [
-                (far, standing(Vec3::new(0.0, 0.0, -20.0))),
-                (near, standing(Vec3::new(0.0, 0.0, -5.0))),
-            ],
-        );
+        let hit = ask(&mut bare_app(), move |level| {
+            resolve(
+                level,
+                origin,
+                direction,
+                [
+                    (far, standing(Vec3::new(0.0, 0.0, -20.0))),
+                    (near, standing(Vec3::new(0.0, 0.0, -5.0))),
+                ],
+            )
+        });
         assert_eq!(hit.target, Some(near));
     }
 
@@ -312,7 +314,7 @@ mod tests {
     #[test]
     fn a_shot_into_the_open_ends_at_its_range() {
         let (origin, direction) = aim_ray(Vec3::new(0.0, 1.59, 0.0), 0.0, 0.5);
-        let shot = resolve(&empty_world(), origin, direction, []);
+        let shot = ask(&mut bare_app(), move |level| resolve(level, origin, direction, []));
         assert_eq!(shot.target, None);
         assert_eq!(shot.distance, WEAPON_RANGE);
         let end = shot.point(origin, direction);
@@ -322,16 +324,21 @@ mod tests {
     /// The whole of the trigger rule, in the one place both sides call.
     #[test]
     fn firing_needs_a_trigger_and_a_ready_weapon() {
-        let world = empty_world();
         let state = PlayerState::default();
         let idle = PlayerInput::default();
         let held = PlayerInput { fire: true, ..PlayerInput::default() };
-
-        assert!(fire(&world, &state, &idle, []).is_none(), "fired without a trigger");
-        assert!(fire(&world, &state, &held, []).is_some(), "a ready weapon did not fire");
-
         let cooling = PlayerState { fire_cooldown: 1, ..PlayerState::default() };
-        assert!(fire(&world, &cooling, &held, []).is_none(), "fired while cooling down");
+
+        let (without, ready_weapon, cooling) = ask(&mut bare_app(), move |level| {
+            (
+                fire(level, &state, &idle, []),
+                fire(level, &state, &held, []),
+                fire(level, &cooling, &held, []),
+            )
+        });
+        assert!(without.is_none(), "fired without a trigger");
+        assert!(ready_weapon.is_some(), "a ready weapon did not fire");
+        assert!(cooling.is_none(), "fired while cooling down");
     }
 
     /// The angles come from the input, not from anywhere the client could not reproduce. Getting
@@ -339,12 +346,16 @@ mod tests {
     #[test]
     fn a_shot_goes_where_the_input_points() {
         let held = PlayerInput { fire: true, yaw: 0.0, pitch: 0.0, ..PlayerInput::default() };
-        let fired = fire(&empty_world(), &PlayerState::default(), &held, []).expect("fired");
-        assert!((fired.direction - Vec3::NEG_Z).length() < 1e-5, "{:?}", fired.direction);
-
         let turned = PlayerInput { yaw: core::f32::consts::FRAC_PI_2, ..held };
-        let fired = fire(&empty_world(), &PlayerState::default(), &turned, []).expect("fired");
-        assert!((fired.direction - Vec3::NEG_X).length() < 1e-5, "{:?}", fired.direction);
+
+        let (ahead, aside) = ask(&mut bare_app(), move |level| {
+            (
+                fire(level, &PlayerState::default(), &held, []).expect("fired"),
+                fire(level, &PlayerState::default(), &turned, []).expect("fired"),
+            )
+        });
+        assert!((ahead.direction - Vec3::NEG_Z).length() < 1e-5, "{:?}", ahead.direction);
+        assert!((aside.direction - Vec3::NEG_X).length() < 1e-5, "{:?}", aside.direction);
     }
 
     #[test]

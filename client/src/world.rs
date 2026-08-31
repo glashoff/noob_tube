@@ -11,7 +11,8 @@ pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.register_type::<Level>().add_systems(Startup, spawn_ground);
+        app.register_type::<LevelRoot>()
+            .add_systems(Startup, (spawn_ground, level::spawn_level));
     }
 }
 
@@ -22,13 +23,14 @@ impl Plugin for WorldPlugin {
 ///
 /// One rule comes with it. Child transforms are relative to this entity, so as long as it stays at
 /// the identity, world and local coordinates agree — and they have to, because the collision
-/// geometry in `CollisionWorld` is in world space and knows nothing about the hierarchy. Moving this
+/// geometry the `Level` queries is in world space and knows nothing about the hierarchy. Moving this
 /// entity would slide the visible level off its collision.
 #[derive(Component, Reflect)]
 #[reflect(Component)]
-pub struct Level;
+pub struct LevelRoot;
 
-/// Builds the level: meshes for what is seen, plus the shared collision world for what is hit.
+/// Builds what the level looks like. What it collides as is
+/// [`level::spawn_level`](noob_tube_shared::level::spawn_level), spawned alongside this.
 ///
 /// Keeping the two separate is deliberate — real levels use a simplified collision mesh, and
 /// building that split in now means no rework when actual geometry arrives.
@@ -42,7 +44,7 @@ fn spawn_ground(
     let level = commands
         .spawn((
             Name::from("Level"),
-            Level,
+            LevelRoot,
             Authored,
             Transform::IDENTITY,
             Visibility::default(),
@@ -93,8 +95,6 @@ fn spawn_ground(
             ChildOf(props),
         ));
     }
-
-    commands.insert_resource(level::collision_world());
 
     commands.spawn((
         Name::from("Sun"),

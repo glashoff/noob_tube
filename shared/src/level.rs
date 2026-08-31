@@ -9,9 +9,10 @@
 //! deliberate — real levels use simplified collision geometry, and the two will diverge in shape
 //! long before they diverge in intent.
 
-use bevy::math::Vec3;
+use avian3d::prelude::Collider;
+use bevy::prelude::*;
 
-use crate::collision::CollisionWorld;
+use crate::physics::level_geometry;
 
 /// Half the side length of the ground plane, in metres.
 pub const HALF_EXTENT: f32 = 250.0;
@@ -39,21 +40,34 @@ pub fn spawn_point(index: usize) -> Vec3 {
     Vec3::new(index as f32 * 2.0, 0.0, 0.0)
 }
 
-/// Builds the collision geometry. Identical on both sides, by construction.
-pub fn collision_world() -> CollisionWorld {
-    let mut world = CollisionWorld::new();
-    world.add_trimesh(
-        vec![
-            Vec3::new(-HALF_EXTENT, 0.0, -HALF_EXTENT),
-            Vec3::new(HALF_EXTENT, 0.0, -HALF_EXTENT),
-            Vec3::new(HALF_EXTENT, 0.0, HALF_EXTENT),
-            Vec3::new(-HALF_EXTENT, 0.0, HALF_EXTENT),
-        ],
-        vec![[0, 1, 2], [0, 2, 3]],
-    );
+/// Startup: builds the collision geometry. Identical on both sides, by construction.
+///
+/// One entity per shape, each a static rigid body on the level layer. The ground is a triangle mesh
+/// rather than a box because that is what a real level's collision geometry is, and using the shape
+/// we will actually ship keeps the awkward cases — a shape cast against a triangle mesh is accurate
+/// only to a few millimetres — in front of us rather than behind a placeholder.
+pub fn spawn_level(mut commands: Commands) {
+    commands.spawn(level_geometry(
+        Collider::trimesh(
+            vec![
+                Vec3::new(-HALF_EXTENT, 0.0, -HALF_EXTENT),
+                Vec3::new(HALF_EXTENT, 0.0, -HALF_EXTENT),
+                Vec3::new(HALF_EXTENT, 0.0, HALF_EXTENT),
+                Vec3::new(-HALF_EXTENT, 0.0, HALF_EXTENT),
+            ],
+            vec![[0, 1, 2], [0, 2, 3]],
+        ),
+        Vec3::ZERO,
+    ));
     for centre in CRATES {
-        world.add_cuboid(centre, Vec3::splat(CRATE_HALF_EXTENT));
+        // Avian sizes a cuboid by its full side lengths, where rapier takes half-extents.
+        commands.spawn(level_geometry(
+            Collider::cuboid(
+                CRATE_HALF_EXTENT * 2.0,
+                CRATE_HALF_EXTENT * 2.0,
+                CRATE_HALF_EXTENT * 2.0,
+            ),
+            centre,
+        ));
     }
-    world.rebuild();
-    world
 }

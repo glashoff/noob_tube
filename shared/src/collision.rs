@@ -1,10 +1,16 @@
-//! Stateless collision queries against static level geometry.
+//! Stateless collision queries against static level geometry, in rapier.
 //!
-//! This is rapier used as a query library only: colliders and a BVH, never a solver and never
-//! `PhysicsPipeline::step()`. Nothing here carries state between ticks, so a rollback has nothing
-//! to restore beyond the player's own fields. See the README, "Two kinds of physics".
+//! **Superseded by [`physics::Level`](crate::physics::Level), and used by nothing but the test that
+//! compares the two.** It is kept only for that: `shared/tests/avian_matches_rapier.rs` asks both
+//! engines every question the movement code makes and holds the answers to each other. Both go when
+//! rapier does.
 //!
-//! The sweep is a port of `sweepShape` in `webgame/shared/game/physics.ts`.
+//! What it was: rapier as a query library only — colliders and a BVH, never a solver and never
+//! `PhysicsPipeline::step()`. Its one limitation is what ended it. The BVH is built once and cannot
+//! be refit, so no collider in it can ever move, and a lift, a door or a vehicle is not expressible.
+//!
+//! The sweep is a port of `sweepShape` in `webgame/shared/game/physics.ts`, and the comments in it
+//! are worth keeping until the Avian version has earned the same scars.
 
 use bevy::ecs::resource::Resource;
 use bevy::math::Vec3;

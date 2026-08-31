@@ -10,6 +10,7 @@ pub mod lag_compensation;
 pub mod level;
 pub mod metadata;
 pub mod movement;
+pub mod physics;
 pub mod player;
 pub mod props;
 pub mod protocol;

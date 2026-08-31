@@ -9,7 +9,7 @@
 //! this can run every frame without spawning or despawning anything.
 
 use bevy::prelude::*;
-use noob_tube_shared::collision::CollisionWorld;
+use noob_tube_shared::physics::Level;
 use noob_tube_shared::movement::{
     CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS, CAPSULE_Y_OFFSET, CROUCH_CAPSULE_HALF_HEIGHT,
     CROUCH_CAPSULE_Y_OFFSET, GROUND_SNAP_DIST,
@@ -54,10 +54,9 @@ impl Plugin for DebugDrawPlugin {
 /// It comes into its own in M3, when other players are drawn and can be looked at from outside.
 fn draw_collision(
     player: Option<Single<&PlayerState, With<Predicted>>>,
-    world: Option<Res<CollisionWorld>>,
+    level: Level,
     mut gizmos: Gizmos,
 ) {
-    let Some(world) = world else { return };
     let Some(state) = player else { return };
 
     let (half_height, y_offset) = if state.crouching {
@@ -79,7 +78,7 @@ fn draw_collision(
 
     // Where the ground actually is. A gap between this and the capsule's base is the sinking that
     // made shape casts report a contact at zero distance every tick.
-    if let Some(ground) = world.ground_height_below(state.position) {
+    if let Some(ground) = level.ground_height_below(state.position) {
         let hit = Vec3::new(state.position.x, ground, state.position.z);
         gizmos.cross(Isometry3d::from_translation(hit), 0.3, CONTACT);
     }

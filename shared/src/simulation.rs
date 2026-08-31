@@ -12,7 +12,7 @@ use bevy::ecs::query::QueryFilter;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 
-use crate::collision::CollisionWorld;
+use crate::physics::Level;
 use crate::player::{Aim, PlayerInput, PlayerState};
 
 /// FixedUpdate: advances every matching player by exactly one tick.
@@ -22,17 +22,15 @@ use crate::player::{Aim, PlayerInput, PlayerState};
 /// the constant tick length rather than the frame time, and the input comes from `ActionState`,
 /// which the input plugin refills from its buffer while replaying.
 pub fn step_players<F: QueryFilter + 'static>(
-    world: Option<Res<CollisionWorld>>,
+    level: Level,
     time: Res<Time<Fixed>>,
     mut players: Query<(&ActionState<PlayerInput>, &mut PlayerState, &mut Aim), F>,
 ) {
-    // The collision world is built in Startup, which can land after the first fixed tick.
-    let Some(world) = world else { return };
     let dt = time.delta_secs();
 
     for (action, mut state, mut aim) in players.iter_mut() {
         let input = action.0;
-        state.apply_input(&input, &world, dt);
+        state.apply_input(&input, &level, dt);
         // Aim is a pure function of the input, which is what makes it safe to predict: replaying a
         // tick reproduces the same angles from the same buffered input, so a rollback cannot make
         // another player's head twitch.

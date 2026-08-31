@@ -11,7 +11,7 @@ use noob_tube_shared::simulation;
 use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::level;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState, ViewBracket};
-use noob_tube_shared::collision::CollisionWorld;
+use noob_tube_shared::physics::{Level, PhysicsPlugin};
 use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::props::{self, Bobbing};
 use noob_tube_shared::lag_compensation::HitboxHistory;
@@ -41,10 +41,13 @@ fn main() {
         // interpolation then has nothing to interpolate across — see `SEND_RATE`.
         .insert_resource(ReplicationMetadata::new(net.send_interval()))
         .insert_resource(net)
+        .add_plugins(PhysicsPlugin)
         // The same geometry the client collides against, built from the same numbers. If the two
         // disagreed, every step near the difference would produce a correction the player sees.
-        .insert_resource(level::collision_world())
-        .add_systems(Startup, (start_listening, publish_metadata, spawn_props))
+        .add_systems(
+            Startup,
+            (start_listening, publish_metadata, level::spawn_level, spawn_props),
+        )
         .add_systems(
             FixedUpdate,
             // Before the step, which consumes the trigger by starting the cooldown, and which
@@ -146,7 +149,7 @@ type Wounded = (
 // dependencies rather than remove them.
 #[allow(clippy::too_many_arguments)]
 fn resolve_shots(
-    world: Res<CollisionWorld>,
+    level: Level,
     net: Res<NetConfig>,
     timeline: Res<LocalTimeline>,
     histories: Query<&HitboxHistory>,
@@ -270,7 +273,7 @@ fn resolve_shots(
             .collect();
 
         // The same call the shooter's own client makes to draw its tracer, over the same input.
-        let Some(fired) = shooting::fire(&world, state, &input, targets) else {
+        let Some(fired) = shooting::fire(&level, state, &input, targets) else {
             continue;
         };
         // Told to everyone, hit or miss: a shot that struck a wall beside you is as much a part of
