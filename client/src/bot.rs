@@ -125,15 +125,23 @@ fn wanted() -> bool {
     std::env::var("NOOB_TUBE_BOT").is_ok_and(|value| value != "0")
 }
 
+/// This client's own player: where it is, who it is, and whether it is in a seat.
+type Own = (
+    &'static PlayerState,
+    &'static Player,
+    Has<Driving>,
+);
+
 /// What the bot is doing, and how long it has been doing it.
 ///
 /// A resource rather than a component, because there is exactly one of these per process — a bot is
 /// a whole client, not an entity in somebody's world. Registered for reflection so that a stuck bot
 /// can be interrogated over BRP rather than guessed at from its position.
-#[derive(Resource, Reflect, Debug)]
+#[derive(Resource, Reflect, Debug, Default)]
 #[reflect(Resource)]
 enum Errand {
     /// Walking toward the nearest vehicle nobody is in.
+    #[default]
     Walking,
     /// Standing at the door with the key held, then waiting for the server to answer.
     Boarding { seconds: f32 },
@@ -161,12 +169,6 @@ enum Errand {
     },
 }
 
-impl Default for Errand {
-    fn default() -> Self {
-        Errand::Walking
-    }
-}
-
 /// Update: does the next thing.
 ///
 /// One system rather than one per step, because the steps share everything they look at and the
@@ -177,7 +179,7 @@ fn run_the_errand(
     mut errand: ResMut<Errand>,
     mut scripted: ResMut<ScriptedInput>,
     vehicles: Query<(&Position, &Rotation, &LinearVelocity, Option<&Driven>), With<VehicleKind>>,
-    me: Option<Single<(&PlayerState, &Player, Has<Driving>), With<Predicted>>>,
+    me: Option<Single<Own, With<Predicted>>>,
     view: Option<Single<&mut LocalPlayer>>,
     level: Level,
 ) {
@@ -343,6 +345,6 @@ fn clearest(level: &Level, at: Vec3, facing: Vec3) -> Vec3 {
         .max_by(|(_, a), (_, b)| a.total_cmp(b))
         // Stop short of whatever the ray found, and never make the beat so short that the vehicle
         // spends all of it turning round.
-        .map(|(direction, room)| direction * room.min(PATROL_METRES).max(15.0))
+        .map(|(direction, room)| direction * room.clamp(15.0, PATROL_METRES))
         .unwrap_or(facing * PATROL_METRES)
 }
