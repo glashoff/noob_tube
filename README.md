@@ -1202,10 +1202,36 @@ rollback check would report. Under 10 % loss the server misses an input, falls b
 last one, and diverges — and the client notices and replays. The machinery fires exactly when it
 should and not otherwise.
 
-Still open: **visual correction**. A rollback currently snaps the camera to the corrected position.
-Lightyear can decay the error over several frames (`add_correction`), which needs `PlayerState` to
-implement `Diffable`. At one rollback per eight seconds of lossy link this is not yet visible, but it
-will be the moment players collide with each other.
+Still open: **visual correction**. Nothing is smoothed at all — neither between fixed ticks nor
+after a rollback. `place_camera` writes the predicted position raw, so the eye moves at 64 Hz while
+the view turns at frame rate, and a rollback lands on the next frame as a jump.
+
+How big a jump is now measured rather than guessed, by `client/src/corrections.rs`: two systems
+inside lightyear's rollback, one either side of the replay, that compare the pose the last frame drew
+with the pose the replay produced. That distance is exactly what a correction would have to decay.
+
+| link | rollbacks | camera moved | predicted bodies |
+| --- | --- | --- | --- |
+| 100 ms, 10 % loss, walking | 4 per minute | 0.5 cm | — |
+| 300 ms, 30 % loss, walking | none in 70 s | — | — |
+| 300 ms, 30 % loss, **no input redundancy** | 17 per second | mean 31 cm, worst 154 cm | — |
+| 300 ms, 10 % loss, shooting a crate stack | 9 per second | 0.0 cm | median 3.7, p90 22.7, worst 79.2 cm |
+
+The result is not what the frequency suggested. **The camera needs no smoothing yet, and the reason
+is not that the link is good.** The only thing driving the local player is the local player's own
+input, and `input_redundancy = 5` means six consecutive packets must drop before the server misses
+one — so the server simulates from exactly the input the client predicted from, and the two agree to
+within half a centimetre. Setting redundancy to 0 shows what a genuinely missed input costs: 31 cm
+on average and one correction in six over half a metre, which would be unwatchable. That is the
+amplitude to expect the moment the *simulation* gains a way to diverge — another player pushing you,
+a vehicle under your feet — rather than the moment the network gets worse.
+
+What does need smoothing already is the other case: a **predicted crate** that a shot moves snaps by
+a median of 3.7 cm and up to 79 cm, because the client cannot know about the hit before the server
+tells it. Nothing here is per-frame smoothed either, so those land in one frame.
+
+So the order is settled by measurement rather than by guessing: frame interpolation and correction
+for predicted *bodies* first, the camera when something can push it.
 
 ---
 
