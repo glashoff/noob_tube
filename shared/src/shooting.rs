@@ -182,8 +182,12 @@ pub struct ShotFired {
     pub from: Vec3,
     /// Where it stopped: a player, a wall, or the end of its range.
     pub to: Vec3,
-    /// Whether it stopped in a player. Decides blood against a bullet hole, and whether the
-    /// shooter gets a hit marker.
+    /// Whether it stopped in a *player*, as opposed to a wall or a crate. Decides blood against a
+    /// bullet hole, and whether the shooter gets a hit marker.
+    ///
+    /// A player and a crate are the same kind of hitbox to the ray that finds them, and telling
+    /// them apart is this field's whole job. Setting it for any target at all — which it did — puts
+    /// a hit marker on the crosshair for shooting a wall and leaves the wall unmarked.
     pub hit_player: bool,
 }
 

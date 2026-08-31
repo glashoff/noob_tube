@@ -13,9 +13,10 @@
 //! pose — so they follow the body exactly, with none of the stepping that a replicated wheel
 //! position would have.
 
-use avian3d::prelude::{Position, Rotation, SpatialQuery};
+use avian3d::prelude::{CollisionLayers, LayerMask, Position, RigidBody, Rotation, SpatialQuery};
 use bevy::prelude::*;
 use lightyear::prelude::client;
+use noob_tube_shared::physics::Layer;
 use noob_tube_shared::vehicle::{probe_wheels, VehicleKind, Wheels, WHEELS};
 
 /// A vehicle that has just arrived and has nothing to be seen as yet.
@@ -69,6 +70,11 @@ fn give_bodies(
             Mesh3d(meshes.add(Cuboid::from_size(spec.half_extents * 2.0))),
             MeshMaterial3d(paint),
             spec.collider(),
+            RigidBody::Static,
+            // The layer the server gives it. The default would be the same — see `client::props`
+            // — but a vehicle is the thing most likely to grow a second collider later, and this
+            // is where the answer for it belongs.
+            CollisionLayers::new(Layer::Body, LayerMask::ALL),
             Wheels::default(),
         ));
         for index in 0..WHEELS {

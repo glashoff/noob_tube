@@ -183,6 +183,8 @@ fn predict_own_tracer(
 fn draw_shots(
     mut inbox: Query<&mut MessageReceiver<ShotFired>>,
     level: Level,
+    // What a bullet hole can be hung on, so it moves when the thing it is on does.
+    surfaces: Query<&GlobalTransform, With<Visibility>>,
     mine: Option<Single<&Player, With<Predicted>>>,
     assets: Res<ShotAssets>,
     mut holes: ResMut<Holes>,
@@ -206,7 +208,7 @@ fn draw_shots(
                 }
                 continue;
             }
-            spawn_hole(&mut commands, &assets, &level, &shot, &mut holes);
+            spawn_hole(&mut commands, &assets, &level, &surfaces, &shot, &mut holes);
         }
     }
 }
@@ -255,12 +257,16 @@ fn spawn_hole(
     commands: &mut Commands,
     assets: &ShotAssets,
     level: &Level,
+    // Everything a decal can be hung on. A crate and a vehicle are in here; the level's collision
+    // geometry is not, because it carries no `Visibility` for a child to inherit — and it has no
+    // need to, being the one thing that never moves.
+    surfaces: &Query<&GlobalTransform, With<Visibility>>,
     shot: &ShotFired,
     holes: &mut Holes,
 ) {
     let direction = (shot.to - shot.from).normalize_or_zero();
     let reach = shot.from.distance(shot.to) + 0.1;
-    let Some((_, normal)) = level.raycast_normal(shot.from, direction, reach) else {
+    let Some((_, normal, surface)) = level.surface_hit(shot.from, direction, reach) else {
         return;
     };
     // The normal can point either way along the surface; a decal wants the side it was shot from.
@@ -272,21 +278,28 @@ fn spawn_hole(
     // identical squares. Derived from the point itself, so it is stable rather than random: every
     // client draws the same hole the same way round.
     let spin = Quat::from_rotation_z(shot.to.x * 7.3 + shot.to.y * 3.1 + shot.to.z * 5.7);
-    let hole = commands
-        .spawn((
-            Name::from("Bullet hole"),
-            Ephemeral(HOLE_SECONDS),
-            // It lies a centimetre off the wall; its shadow would land on the wall beside it.
-            NotShadowCaster,
-            Mesh3d(assets.hole.clone()),
-            MeshMaterial3d(assets.hole_material.clone()),
-            // A `Rectangle` faces +Z, and `looking_to` points -Z, so it is aimed into the wall to
-            // lay the front of the quad flat against it.
-            Transform::from_translation(shot.to + facing * HOLE_LIFT)
-                .looking_to(-facing, up)
-                .with_rotation(Transform::default().looking_to(-facing, up).rotation * spin),
-        ))
-        .id();
+    // A `Rectangle` faces +Z, and `looking_to` points -Z, so it is aimed into the wall to lay the
+    // front of the quad flat against it.
+    let pose = Transform::from_translation(shot.to + facing * HOLE_LIFT)
+        .looking_to(-facing, up)
+        .with_rotation(Transform::default().looking_to(-facing, up).rotation * spin);
+
+    let mut hole = commands.spawn((
+        Name::from("Bullet hole"),
+        Ephemeral(HOLE_SECONDS),
+        // It lies a centimetre off the wall; its shadow would land on the wall beside it.
+        NotShadowCaster,
+        Mesh3d(assets.hole.clone()),
+        MeshMaterial3d(assets.hole_material.clone()),
+        pose,
+    ));
+    // Hung on what it hit, when that is something that can move. A hole pinned in world space on a
+    // crate somebody then shoves is a mark hanging in the air where the crate used to be — the same
+    // objection that keeps decals off players, only slower and so easier to miss.
+    if let Ok(host) = surfaces.get(surface) {
+        hole.insert((GlobalTransform::from(pose).reparented_to(host), ChildOf(surface)));
+    }
+    let hole = hole.id();
     holes.0.push_back(hole);
     // The oldest goes when there are too many. It may already have timed out and been despawned,
     // which `try_despawn` is fine with.

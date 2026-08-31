@@ -126,8 +126,18 @@ pub struct Level<'w, 's> {
 }
 
 impl Level<'_, '_> {
-    /// Level geometry only. See [`Layer`].
-    fn filter() -> SpatialQueryFilter {
+    /// What a foot can stand on: the map, and the things in it.
+    ///
+    /// Wider than [`sight_line`](Self::sight_line), and the difference is the point. A crate is
+    /// something to climb; it is not something a bullet stops at *here*, because a shot tests every
+    /// hitbox separately and takes the nearest — counting the crate twice would let the wall test
+    /// win over the target test at the same distance and turn a hit into a miss.
+    fn footing() -> SpatialQueryFilter {
+        SpatialQueryFilter::from_mask(LayerMask::from([Layer::Level, Layer::Body]))
+    }
+
+    /// What stops a bullet on its way to a target: the map alone. See [`footing`](Self::footing).
+    fn sight_line() -> SpatialQueryFilter {
         SpatialQueryFilter::from_mask(Layer::Level)
     }
 
@@ -154,7 +164,7 @@ impl Level<'_, '_> {
                 delta,
                 core::time::Duration::from_secs(1),
                 &Self::sweep_config(),
-                &Self::filter(),
+                &Self::footing(),
                 |_| MoveAndSlideHitResponse::Accept,
             )
             .position
@@ -183,8 +193,15 @@ impl Level<'_, '_> {
     /// worse than the drift it was meant to correct. A ray reports an exact intersection.
     pub fn ground_height_below(&self, feet: Vec3) -> Option<f32> {
         let origin = feet + Vec3::Y * GROUND_SNAP_DIST;
-        let distance = self.raycast(origin, Vec3::NEG_Y, GROUND_SNAP_DIST * 2.0)?;
-        Some(origin.y - distance)
+        let direction = Dir3::NEG_Y;
+        let hit = self.slide.spatial_query.cast_ray(
+            origin,
+            direction,
+            GROUND_SNAP_DIST * 2.0,
+            true,
+            &Self::footing(),
+        )?;
+        Some(origin.y - hit.distance)
     }
 
     /// Distance to the first piece of level geometry along a ray, if any within `max_distance`.
@@ -214,9 +231,35 @@ impl Level<'_, '_> {
             direction,
             max_distance,
             true,
-            &Self::filter(),
+            &Self::sight_line(),
         )?;
         Some((hit.distance, hit.normal))
+    }
+
+    /// Where a shot leaves a mark, and on what.
+    ///
+    /// Wider than [`raycast`](Self::raycast) on purpose, and the difference is the whole reason
+    /// both exist. What *stops* a bullet is the map: a crate is tested as a hitbox instead, so
+    /// counting it twice would let the wall test beat the target test. What a bullet leaves a
+    /// *mark* on is anything solid it can end against — a wall, a crate, a vehicle.
+    ///
+    /// The entity comes back with it so a decal can be hung on what it hit rather than left
+    /// floating in world space where that thing used to be.
+    pub fn surface_hit(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+    ) -> Option<(f32, Vec3, Entity)> {
+        let direction = Dir3::new(direction).ok()?;
+        let hit = self.slide.spatial_query.cast_ray(
+            origin,
+            direction,
+            max_distance,
+            true,
+            &Self::footing(),
+        )?;
+        Some((hit.distance, hit.normal, hit.entity))
     }
 
     /// True when there is room to stand up from a crouch.
@@ -238,7 +281,7 @@ impl Level<'_, '_> {
                 Quat::IDENTITY,
                 Dir3::Y,
                 &ShapeCastConfig::from_max_distance(rise),
-                &Self::filter(),
+                &Self::footing(),
             )
             .is_none()
     }
@@ -343,6 +386,52 @@ mod tests {
         assert!(moved.y < -5.0 + 0.05, "stopped too early: {moved:?}");
     }
 
+    /// A crate on the body layer is something to stand on and *not* something the bullet ray stops
+    /// at. Both halves matter: the first is what makes a prop climbable, and the second is what
+    /// keeps a shot from being counted as hitting the wall in front of the target it just hit.
+    #[test]
+    fn a_body_can_be_stood_on_but_does_not_stop_a_bullet() {
+        let mut app = floor_app();
+        // A metre cube whose top is at 1 m, of the kind a loose crate is.
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::cuboid(1.0, 1.0, 1.0),
+            Position(Vec3::new(5.0, 0.5, 0.0)),
+            CollisionLayers::new(Layer::Body, LayerMask::ALL),
+        ));
+        let mut app = ready(app);
+
+        let ground = ask(&mut app, |level| level.ground_height_below(Vec3::new(5.0, 1.05, 0.0)));
+        assert!(
+            ground.is_some_and(|y| (y - 1.0).abs() < 1e-3),
+            "no footing on top of the crate: {ground:?}"
+        );
+
+        let shot = ask(&mut app, |level| {
+            level.raycast(Vec3::new(0.0, 0.5, 0.0), Vec3::X, 20.0)
+        });
+        assert!(shot.is_none(), "the bullet ray stopped at a crate, at {shot:?} m");
+    }
+
+    /// And it has to stop a walk, or a crate is scenery you pass through.
+    #[test]
+    fn a_body_is_walked_into_rather_than_through() {
+        let mut app = floor_app();
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::cuboid(1.0, 1.0, 1.0),
+            Position(Vec3::new(5.0, 0.5, 0.0)),
+            CollisionLayers::new(Layer::Body, LayerMask::ALL),
+        ));
+        let mut app = ready(app);
+
+        let moved = ask(&mut app, |level| {
+            level.sweep_capsule(Vec3::ZERO, Vec3::X * 10.0, false)
+        });
+        assert!(moved.x < 5.0, "walked {:.2} m, straight through the crate", moved.x);
+        assert!(moved.x > 3.0, "stopped {:.2} m short of a crate five metres away", moved.x);
+    }
+
     /// A capsule resting on the floor must still walk. Getting this wrong froze the player
     /// mid-stride while velocity read a healthy 5.5 m/s.
     #[test]
@@ -406,11 +495,14 @@ mod tests {
         assert!(!ask(&mut app, |level| level.can_stand_up(Vec3::ZERO)));
     }
 
-    /// Level queries must not see anything that is not the level. Once players and vehicles carry
-    /// colliders, a ground probe that found one would put solid floor under a player's feet
-    /// wherever another player stood.
+    /// A collider that says nothing about its layers is a body, not the level.
+    ///
+    /// That is the whole reason [`Layer::Body`] is the default variant, and it is worth a test of
+    /// its own because it rests on the *order* of the enum: Avian's default membership is the first
+    /// layer. Reorder the variants and unlabelled geometry silently becomes the map, which is the
+    /// mistake this arrangement exists to prevent.
     #[test]
-    fn a_body_is_not_the_ground() {
+    fn a_collider_with_no_layer_stated_is_a_body() {
         let mut app = floor_app();
         app.world_mut().spawn((
             RigidBody::Static,

@@ -13,8 +13,8 @@ use noob_tube_shared::level;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::physics::{Layer, Level, PhysicsPlugin};
 use avian3d::prelude::{
-    Collider, ColliderDensity, CollisionLayers, Forces, LayerMask, PhysicsSystems, Position,
-    RigidBody, Rotation, WriteRigidBodyForces,
+    Collider, ColliderDensity, CollisionLayers, Forces, LayerMask, LockedAxes, PhysicsSystems,
+    Position, RigidBody, Rotation, WriteRigidBodyForces,
 };
 use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::props::{self, Bobbing};
@@ -184,7 +184,13 @@ fn resolve_shots(
     // Props are targets too. A prop offers its own collider and the pose Avian holds, where a
     // player's hitbox is derived from its `PlayerState` — two ways of arriving at the same thing,
     // and the reason a shot does not care which kind of target it met.
-    props: Query<(Entity, &Collider, &Position, &Rotation)>,
+    //
+    // `CollisionLayers` is read so that the *level* can be left out, and that is not a detail. This
+    // query used to take every collider in the world, so the ground and the walls were targets: a
+    // shot at a wall came back as a hit, which suppressed its bullet hole and put a hit marker on
+    // the shooter's crosshair. The map is already accounted for by `Level::raycast`, which is what
+    // stops the bullet; a second reckoning of it can only disagree with the first.
+    props: Query<(Entity, &Collider, &Position, &Rotation, &CollisionLayers)>,
     // How far behind the present each client's view of everyone else is. Lightyear puts this on the
     // connection entity when an input message reports it, which is what `ControlledBy::owner`
     // points at. It is absent until the first message arrives, and absent forever if the client
@@ -197,7 +203,9 @@ fn resolve_shots(
     mut players: ParamSet<(Query<Shooter>, Query<Wounded>)>,
     // Dynamic props take a shove where they are hit. Reading the pose and writing the velocity,
     // which is why it cannot share a query with anything that also wants them.
-    mut forces: Query<Forces>,
+    //
+    // `RigidBody` comes along because the kind has to be checked, not assumed — see below.
+    mut forces: Query<(Forces, &RigidBody)>,
     mut pending: ResMut<PendingShots>,
     // Latches the one line below that says whether any of this is actually happening.
     mut reported: Local<bool>,
@@ -209,10 +217,21 @@ fn resolve_shots(
         .p0()
         .iter()
         .map(|(entity, state, ..)| (entity, Hitbox::of(state)))
-        .chain(props.iter().map(|(entity, collider, position, rotation)| {
-            (entity, Hitbox::new(collider.clone(), position.0, rotation.0))
-        }))
+        .chain(
+            props
+                .iter()
+                .filter(|(.., layers)| layers.memberships.has_all(Layer::Body))
+                .map(|(entity, collider, position, rotation, _)| {
+                    (entity, Hitbox::new(collider.clone(), position.0, rotation.0))
+                }),
+        )
         .collect();
+
+    // Which of those targets are people. A shot into a crate and a shot into a player are the same
+    // ray against the same kind of hitbox, and only here does the difference matter: a player takes
+    // damage and leaves no decal, a crate takes a shove and does.
+    let people: bevy::platform::collections::HashSet<Entity> =
+        players.p0().iter().map(|(entity, ..)| entity).collect();
 
     let mut hits: Vec<(Entity, u64)> = Vec::new();
     for (shooter, state, action, player, controlled) in players.p0().iter() {
@@ -316,15 +335,21 @@ fn resolve_shots(
             shooter: player.peer,
             from: fired.origin,
             to: fired.point(),
-            hit_player: fired.shot.target.is_some(),
+            hit_player: fired.shot.target.is_some_and(|target| people.contains(&target)),
         });
         if let Some(hit) = fired.shot.target {
             debug!("peer {} hit at {:.1} m", player.peer, fired.shot.distance);
             hits.push((hit, player.peer));
-            // A shove where it landed, not at the centre, so a corner hit spins the crate. Nothing
-            // happens to a player or a kinematic crate: neither has a `Forces` to write to, and
-            // `get_mut` simply does not match them.
-            if let Ok(mut body) = forces.get_mut(hit) {
+            // A shove where it landed, not at the centre, so a corner hit spins the crate.
+            //
+            // Only a *dynamic* body, and the check is not a formality. A kinematic body matches
+            // `Forces` perfectly well — it has every component in that query — and Avian integrates
+            // its velocities like any other, so an impulse at a corner set the bobbing crates
+            // turning, which a crate on rails must never do. A player is genuinely not matched:
+            // players are not rigid bodies at all.
+            if let Ok((mut body, kind)) = forces.get_mut(hit)
+                && kind.is_dynamic()
+            {
                 body.apply_linear_impulse_at_point(
                     fired.direction * shooting::WEAPON_IMPULSE,
                     fired.point(),
@@ -422,6 +447,11 @@ fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
             crate_,
             prop,
             RigidBody::Kinematic,
+            // A crate on rails does not turn. Belt and braces beside the check in `resolve_shots`:
+            // that one stops the impulse that was turning them, this one states the intent on the
+            // entity, so the next thing that reaches for a kinematic body's velocity cannot spin it
+            // either.
+            LockedAxes::ROTATION_LOCKED,
             prop.collider(),
             CollisionLayers::new(Layer::Body, LayerMask::ALL),
             Position(crate_.position_at(0.0)),

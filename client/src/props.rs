@@ -11,8 +11,10 @@
 //! box a shot is tested against cannot drift apart. For players the two are separate — a capsule
 //! collides, a body and a head are drawn — and keeping them in step needed a test.
 
+use avian3d::prelude::{CollisionLayers, LayerMask, RigidBody};
 use bevy::prelude::*;
 use lightyear::prelude::client;
+use noob_tube_shared::physics::Layer;
 use noob_tube_shared::props::Prop;
 
 /// A prop that has just arrived and has nothing to be seen as yet.
@@ -33,9 +35,13 @@ impl Plugin for PropsPlugin {
 ///
 /// The collider is here so that a client asks the same question of a prop that the server does —
 /// `Hitbox::new(collider, pose)` on both sides — rather than rebuilding a shape from the size and
-/// hoping the two agree. It carries no [`RigidBody`](avian3d::prelude::RigidBody): lightyear warns
-/// against one on an interpolated entity, since Avian would then simulate something the server has
-/// already decided.
+/// hoping the two agree.
+///
+/// [`RigidBody::Static`] on something the server moves looks wrong and is not. `MoveAndSlide` only
+/// sees colliders attached to a rigid body — its query is filtered `With<ColliderOf>` — so a bare
+/// collider is invisible to a player's feet while staying visible to a ray. Static rather than
+/// kinematic because Avian never integrates a static body: lightyear writes the pose, Avian only
+/// keeps the collider tree in step with it, and there is no second opinion about where the crate is.
 fn give_bodies(
     arrived: Query<(Entity, &Prop), Arrived>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -48,6 +54,12 @@ fn give_bodies(
             Mesh3d(meshes.add(Cuboid::from_size(prop.half_extents * 2.0))),
             MeshMaterial3d(materials.add(Color::srgb(0.55, 0.42, 0.28))),
             prop.collider(),
+            RigidBody::Static,
+            // The same layer the server gives it, written out rather than left to the default.
+            // Avian's default membership is the *first* layer, which is `Layer::Body` — deliberately
+            // so, because forgetting to label something should be the harmless mistake. Saying it
+            // anyway keeps this entity a visible mirror of the server's, where it is not optional.
+            CollisionLayers::new(Layer::Body, LayerMask::ALL),
         ));
     }
 }

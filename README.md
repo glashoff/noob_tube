@@ -1028,10 +1028,27 @@ arm in the ray cast. A `Hitbox` now holds an actual `Collider` and a pose, so an
 express is a target and the hit test is one call with no cases in it. Rotation came free with it: a
 door that swings rewinds to the angle it was at, which the enum could not represent at all.
 
-What a crate is **not** is terrain. It stops bullets, because a shot tests every hitbox and takes
-the nearest, but it does not stop feet: it sits on `Layer::Body`, which the level queries do not
-see. The crates therefore ride high enough to clear a standing player, which a test holds to
-account. Standing on a lift is a separate piece of work.
+A crate is **not** terrain, and for a while that meant you walked through it. It sits on
+`Layer::Body` and the movement queries only asked about `Layer::Level`. They now ask about both, and
+the two filters are what the distinction became:
+
+- **footing** — the map *and* the things in it. What a capsule sweeps against, what a ground probe
+  finds, what a crouched player checks for headroom. A crate is something to climb.
+- **sight line** — the map alone. What stops a bullet on its way to a target. Deliberately *not*
+  widened: a crate is already tested as a hitbox, and counting it twice would let the wall test beat
+  the target test at the same distance and turn a hit into a miss.
+
+One trap came with it. A client's copy of a crate carried a bare `Collider` and no `RigidBody`, and
+`MoveAndSlide` only sees colliders attached to one — its query is filtered `With<ColliderOf>`. The
+crate was solid to a ray and transparent to feet, on the client only. They are `RigidBody::Static`
+now: lightyear writes the pose and Avian never integrates a static body, so there is no second
+opinion about where the crate is.
+
+The jump reaches 1.116 m, measured. The loose stack's crates are a metre apart, so it can be
+climbed a step at a time; the level's own crates are 2 m cubes and cannot be got on top of at all,
+which is geometry rather than physics. Riding a *moving* platform is still separate work: an
+interpolated crate is drawn in the past, and a predicted player standing on it would be standing on
+where it was.
 
 Verified live at 100 ms of ping, one player firing at a crate: the server reports rewinding it by
 13 to 14 ticks and the crate having moved 0.12 to 0.43 m since — and the bracket it used came from
@@ -1080,6 +1097,32 @@ this completely, because nothing but a system of ours ever moved one.
 Still missing, and each its own step: an engine and a steering wheel, a seat to get into, and the
 fact that a player walks straight through a vehicle — it sits on `Layer::Body`, which the movement
 queries deliberately do not see, exactly like a crate.
+
+#### Three things a shot was getting wrong
+
+Found by looking for why bullet holes were missing, and each worse than the symptom that led to it.
+
+**Every wall was a target.** `resolve_shots` gathered props with an unfiltered
+`Query<(Entity, &Collider, &Position, &Rotation)>`, which is every collider in the world — the
+ground, the walls, the ramp. So a shot at a wall came back as a hit: it suppressed the bullet hole,
+because a hit needs no decal, and put a hit marker on the shooter's crosshair. The map is already
+accounted for by `Level::raycast`, which is what stops the bullet; a second reckoning of it can only
+disagree with the first. Targets are now filtered to `Layer::Body`.
+
+**A crate counted as a person.** `ShotFired::hit_player` was `target.is_some()`, and a prop is a
+target like any other, so hitting a crate skipped its decal too. It now asks whether the thing hit
+was a player.
+
+**Shots were spinning the crates on rails.** `resolve_shots` handed its impulse to anything with a
+`Forces`, and the comment beside it asserted that a kinematic body would not match. It matches
+perfectly well — it has every component in that query — and Avian integrates a kinematic body's
+velocities like any other's, so a corner hit set the bobbing crates turning. Only dynamic bodies
+take a shove now, and the bobbing crates carry `LockedAxes::ROTATION_LOCKED` besides, because a
+crate on rails does not turn and the entity should say so.
+
+Bullet holes are also **hung on what they hit** rather than pinned in world space, when that thing
+can move. A hole left floating where a crate used to be is the same objection that keeps decals off
+players, only slower and so easier to miss.
 
 #### Lag compensation
 
