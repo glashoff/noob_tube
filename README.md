@@ -1345,6 +1345,47 @@ throttle left it accelerating away by itself for the rest of the round. Nothing 
 because nothing had ever needed to before the driving step started running on vehicles nobody was
 driving.
 
+#### A second player, on demand
+
+```
+NOOB_TUBE_BOT=1 NOOB_TUBE_HEADLESS=1 cargo run -p noob_tube_client
+```
+
+A bot walks to the nearest free vehicle, gets in, and drives a fixed beat back and forth. It exists
+because half the questions here need **two** clients and one keyboard cannot answer them — two
+predicted vehicles meeting each other has no measurement anywhere above, and every attempt to stand
+a second player in measured something adjacent instead.
+
+It drives through `ScriptedInput`, the same door the test harness uses, so it goes through
+prediction, rollback, input redundancy and the link conditioner exactly as a person does. It is not
+an AI and is not trying to be: it is a fixed errand in a loop. What it must not do is write the yaw
+into `PlayerInput` directly, because `sample_input` overwrites that from `LocalPlayer` whether the
+input is scripted or not — the look angles being the one thing a client is authoritative over. So
+the bot turns by setting the field a mouse would.
+
+Three things it does that a straight line would not, each of them a measurement rather than
+foresight:
+
+It **picks its beat by sensing**, casting a ray along each of the four directions the vehicle could
+set off in and taking the longest clear one. Driving along whatever heading the vehicle was parked
+on pointed the first buggy straight at the ramp; it wedged itself under the lip with its suspension
+fully compressed and sat there for forty seconds. Nothing tells it where the ramp is.
+
+It **drives forwards both ways**, U-turning at each end rather than reversing back down its own line.
+Reversing needs the steering sign inverted, and getting that wrong does not look like a wrong sign —
+it looks like a bot calmly driving 500 m off the edge of the level, reported as a vehicle doing
+several hundred metres a second because by then it was falling. Reverse is now used in exactly one
+place: full lock, for two and a half seconds, to free itself when it has been going nowhere while
+asking to move.
+
+And it is **on a leash**: 120 m from where it first sat down, past which the only target is home.
+That is there because the patrol has run away twice, the second time by re-anchoring its beat after
+every escape until the anchor itself had walked a kilometre. An anchor that moves whenever the bot
+gets stuck is not an anchor. Whatever else turns out to be wrong with it, that cannot be.
+
+Measured over 75 seconds: it stays inside about 90 by 130 metres, reaches 21 m/s, and is standing
+still in 2 samples out of 50.
+
 Still missing: standing on a vehicle rather than being inside it, passengers, a camera that gets out
 of the way of walls, and running people over.
 

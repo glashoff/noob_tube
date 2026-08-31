@@ -1,5 +1,6 @@
 //! Game client: renders the world, samples input, predicts the local player.
 
+mod bot;
 mod crosshair;
 mod debug_draw;
 mod harness;
@@ -51,6 +52,9 @@ fn main() {
             remote_players::RemotePlayersPlugin,
             harness::HarnessPlugin,
         ))
+        // Adds nothing unless `NOOB_TUBE_BOT` is set — the plugin decides that itself, so the
+        // condition lives beside the reason for it rather than here.
+        .add_plugins(bot::BotPlugin)
         .add_plugins(client::ClientPlugins {
             tick_duration: net.tick_duration(),
         })
