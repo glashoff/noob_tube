@@ -272,20 +272,24 @@ pub const BUGGY: VehicleSpec = VehicleSpec {
 #[reflect(Component)]
 pub struct Driving;
 
-/// On a vehicle: somebody is in it.
+/// On a vehicle: whose seat is taken, by [`Player::peer`](crate::player::Player::peer).
 ///
 /// The other half of [`Driving`], and it exists because the shortcut it replaces stopped being
 /// true. A client used to know which vehicle it was driving by elimination — it was the only one it
 /// predicted — and then parked vehicles started being predicted too, so that a driver would not ram
 /// an immovable copy of one. From that moment "the vehicle I predict" and "the vehicle I drive" are
-/// different sets, and the input has to be aimed at the second.
+/// two different sets.
 ///
-/// Still not an entity reference. A client that has this needs only *predicted and driven*, and
-/// there can be at most one of those: a vehicle somebody else is driving is one this client
-/// interpolates.
+/// It carries the peer number rather than being a bare marker, and that is what makes the answer
+/// hold when [`predict_vehicles`](crate::tuning::NetConfig::predict_vehicles) is off: with nothing
+/// predicted, "the one I predict and that is driven" identifies nothing at all. A client compares
+/// this against the `Player` on its own predicted body and needs no other machinery.
+///
+/// Still not an entity reference. An entity across the wire needs mapping, and this buys the same
+/// answer for eight bytes.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Reflect, Serialize, Deserialize)]
 #[reflect(Component)]
-pub struct Driven;
+pub struct Driven(pub u64);
 
 /// What the driver is asking for, this tick.
 ///

@@ -182,6 +182,29 @@ pub struct NetConfig {
     /// Too short is not silent: the server logs a rewind it could not satisfy rather than quietly
     /// testing against a position the shooter never saw.
     pub lag_comp_history_ticks: u16,
+    /// Whether a driver predicts the vehicle they are steering.
+    ///
+    /// **Server-side, and the whole of the switch.** Prediction is decided by which replication
+    /// targets the server writes, so a client needs no knob of its own: off, no vehicle is ever a
+    /// `PredictionTarget`, nothing on a client matches `With<Predicted>`, and every system that
+    /// simulates a vehicle locally simply stops matching.
+    ///
+    /// On, a driver's input reaches the picture immediately and the vehicle is theirs to compute.
+    /// Off, it goes to the server and comes back — about 130 ms at 100 ms of ping with the default
+    /// send rate — and the client only ever draws what it is told.
+    ///
+    /// The trade is not obvious in either direction, which is why it is a knob rather than a
+    /// decision. Prediction costs a vehicle that disagrees with the server whenever it touches
+    /// something the client could not compute: another player's car is the case that has no answer
+    /// here, because its input belongs to a peer this client never hears from. Not predicting costs
+    /// input delay on the throttle and the steering — but a buggy takes 183 ms to reach full lock
+    /// and two seconds to reach 20 m/s on its own, so 130 ms lands on something already slow.
+    ///
+    /// Turning it off takes the loose crates with it: they are handed to drivers only so that a
+    /// *predicted* vehicle meets the same box the server does, and with nothing predicted there is
+    /// nothing to hand over. Vehicles and crates then go back to being rewound exactly, which is
+    /// the half of it that prediction cannot give.
+    pub predict_vehicles: bool,
 }
 
 impl Default for NetConfig {
@@ -208,6 +231,8 @@ impl Default for NetConfig {
             lag_compensation: true,
             // ~550 ms at 64 Hz: past any playable connection, and cheap.
             lag_comp_history_ticks: 35,
+            // The behaviour everything so far was measured against.
+            predict_vehicles: true,
             // Beside SERVER_PORT, which is UDP; the two do not collide.
             meta_port: crate::SERVER_PORT + 1,
         }
@@ -283,6 +308,7 @@ impl NetConfig {
         env_parse("NOOB_TUBE_META_PORT", &mut self.meta_port);
         env_parse("NOOB_TUBE_LAG_COMPENSATION", &mut self.lag_compensation);
         env_parse("NOOB_TUBE_LAG_COMP_HISTORY_TICKS", &mut self.lag_comp_history_ticks);
+        env_parse("NOOB_TUBE_PREDICT_VEHICLES", &mut self.predict_vehicles);
     }
 
     /// The link conditioner for this process, or `None` when nothing is being simulated.

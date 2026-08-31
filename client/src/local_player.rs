@@ -88,7 +88,7 @@ impl Plugin for LocalPlayerPlugin {
             // camera reads it.
             .add_systems(
                 PostUpdate,
-                (smooth_the_view, place_camera)
+                (crate::vehicle::sit_in_the_seat, smooth_the_view, place_camera)
                     .chain()
                     .after(FrameInterpolationSystems::Interpolate)
                     .before(TransformSystems::Propagate),

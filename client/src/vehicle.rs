@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::{Predicted, client};
 use noob_tube_shared::physics::Layer;
-use noob_tube_shared::player::{PlayerInput, PlayerState};
+use noob_tube_shared::player::{Player, PlayerInput, PlayerState};
 use noob_tube_shared::vehicle::{
     self, probe_wheels, Controls, Driven, Driving, Righting, VehicleKind, Wheels, WHEELS,
 };
@@ -32,15 +32,16 @@ type Arrived = (With<client::Remote>, Added<VehicleKind>);
 type NowPredicted = (With<VehicleKind>, Added<Predicted>);
 /// This client's own player, while they are behind a wheel.
 type OwnDriver = (With<Predicted>, With<Driving>);
-/// The one vehicle this client is *steering*, as opposed to the ones it merely predicts.
+/// Any vehicle with somebody in it, this client's own included.
 ///
-/// Both halves are needed and neither is enough. `Predicted` alone used to identify it, back when
-/// the only vehicle a client predicted was the one it drove; parked vehicles are predicted now too,
-/// so that a driver does not ram an immovable copy of one, and steering every vehicle it predicted
-/// would drive the whole car park by remote control. `Driven` alone is every occupied vehicle in
-/// the game, including other people's — but a vehicle somebody else is driving is one this client
-/// interpolates, so the two together can only ever match one entity.
-type OwnVehicle = (With<VehicleKind>, With<Predicted>, With<Driven>);
+/// Narrowing this to *the driver's own* is done by comparing [`Driven`] against the `Player` on
+/// this client's own body, not by a filter. `Predicted` used to do it, back when the only vehicle a
+/// client predicted was the one it drove — parked ones are predicted now too, so that a driver does
+/// not ram an immovable copy of one, and it would identify the whole car park. It also stops
+/// identifying anything at all when
+/// [`predict_vehicles`](noob_tube_shared::tuning::NetConfig::predict_vehicles) is off, which is
+/// exactly the case the comparison has to survive.
+type Occupied = (With<VehicleKind>, With<Driven>);
 
 pub struct VehiclePlugin;
 
@@ -200,15 +201,19 @@ fn fit_for_the_solver(
 /// does; feeding them this input would have the throttle drive every vehicle on the map.
 fn take_the_wheel(
     time: Res<Time<Fixed>>,
-    driver: Option<Single<&ActionState<PlayerInput>, OwnDriver>>,
-    mut vehicles: Query<(&VehicleKind, &mut Controls), OwnVehicle>,
+    driver: Option<Single<(&Player, &ActionState<PlayerInput>), OwnDriver>>,
+    mut vehicles: Query<(&VehicleKind, &Driven, &mut Controls), Occupied>,
 ) {
     let Some(driver) = driver else {
         return;
     };
+    let (me, action) = *driver;
     let dt = time.delta_secs();
-    for (kind, mut controls) in vehicles.iter_mut() {
-        controls.apply_input(kind.spec(), &driver.0, dt);
+    for (kind, driven, mut controls) in vehicles.iter_mut() {
+        if driven.0 != me.peer {
+            continue;
+        }
+        controls.apply_input(kind.spec(), &action.0, dt);
     }
 }
 
@@ -217,16 +222,28 @@ fn take_the_wheel(
 /// The mirror of the server's own, and it has to exist: the walking step skips a seated player, so
 /// without this their predicted position would be left wherever they got in — and that position is
 /// what the camera stands at and what a shot leaves from.
+///
+/// **Only for a vehicle this client simulates.** Deriving a predicted player's position from an
+/// *interpolated* vehicle is a contradiction, and a measured one: the client would place the driver
+/// where the vehicle was a round trip ago while the server places them where it is now, and the two
+/// disagree on every update — 35 rollbacks a second, measured, for a picture that never moved. When
+/// nothing is predicted the seat is drawn by [`sit_in_the_seat`] instead, and the simulated
+/// `PlayerState` is left to be exactly what the server last said it was, which is the only value it
+/// can agree on.
 fn carry_driver(
-    vehicle: Option<Single<(&Position, &Rotation), OwnVehicle>>,
-    driver: Option<Single<&mut PlayerState, OwnDriver>>,
+    vehicles: Query<(&Position, &Rotation, &Driven), (Occupied, With<Predicted>)>,
+    driver: Option<Single<(&Player, &mut PlayerState), OwnDriver>>,
 ) {
-    let (Some(vehicle), Some(mut driver)) = (vehicle, driver) else {
+    let Some(driver) = driver else {
         return;
     };
-    let (position, rotation) = *vehicle;
-    driver.position = position.0 + rotation.0 * Vec3::new(0.0, -0.4, 0.0);
-    driver.velocity = Vec3::ZERO;
+    let (me, mut state) = driver.into_inner();
+    let Some((position, rotation, _)) = vehicles.iter().find(|(.., driven)| driven.0 == me.peer)
+    else {
+        return;
+    };
+    state.position = position.0 + rotation.0 * Vec3::new(0.0, -0.4, 0.0);
+    state.velocity = Vec3::ZERO;
 }
 
 /// Update: hangs each wheel as far down its strut as the ground allows.
@@ -255,4 +272,37 @@ fn place_wheels(
         let drop = spec.rest_length - found.0[wheel.0].compression;
         transform.translation = spec.mounts[wheel.0] + Vec3::NEG_Y * drop;
     }
+}
+
+/// PostUpdate: puts a driver in the seat of a vehicle nobody predicts.
+///
+/// Scheduled by `local_player`, chained immediately before the camera reads the seat. It is
+/// registered there rather than here so that the ordering is a `chain` rather than two independent
+/// `after`s on the same set — an ambiguity in this schedule has already cost this project two bugs,
+/// and "the camera reads what this wrote" is exactly the kind of thing that is true until it is
+/// silently not.
+///
+/// The picture-only half of [`carry_driver`], and it exists for the case where there is nothing to
+/// simulate: with
+/// [`predict_vehicles`](noob_tube_shared::tuning::NetConfig::predict_vehicles) off, the vehicle is
+/// interpolated and the driver is a passenger of something the server decides.
+///
+/// PostUpdate rather than the fixed step is the whole point. Interpolation moves the vehicle at
+/// frame rate, so reading it here follows it smoothly; the same read one schedule earlier would
+/// quantise the camera to the tick rate and, worse, would feed a rollback comparison a value that
+/// cannot match. Writing it *after* the tick has been judged is what makes it cost nothing.
+pub(crate) fn sit_in_the_seat(
+    vehicles: Query<(&Position, &Rotation, &Driven), (Occupied, Without<Predicted>)>,
+    driver: Option<Single<(&Player, &mut PlayerState), OwnDriver>>,
+) {
+    let Some(driver) = driver else {
+        return;
+    };
+    let (me, mut state) = driver.into_inner();
+    let Some((position, rotation, _)) = vehicles.iter().find(|(.., driven)| driven.0 == me.peer)
+    else {
+        return;
+    };
+    state.position = position.0 + rotation.0 * Vec3::new(0.0, -0.4, 0.0);
+    state.velocity = Vec3::ZERO;
 }

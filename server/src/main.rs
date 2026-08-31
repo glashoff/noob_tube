@@ -508,6 +508,9 @@ type Reaching = (
     &'static ActionState<PlayerInput>,
     &'static mut PlayerState,
     &'static Owner,
+    // The peer *number*, which is what travels on a seat — `Owner` is the address replication is
+    // written to and never leaves the server.
+    &'static Player,
     Has<Driving>,
     &'static mut Interacted,
 );
@@ -535,11 +538,12 @@ type Parked = (
 /// camera changes half a round trip after the key, which for something that happens once a minute
 /// is a fair price for never having to un-seat anyone.
 fn use_vehicles(
+    net: Res<NetConfig>,
     mut players: Query<Reaching>,
     mut vehicles: Query<Parked, With<VehicleKind>>,
     mut commands: Commands,
 ) {
-    for (player, action, mut state, owner, driving, mut last) in players.iter_mut() {
+    for (player, action, mut state, owner, who, driving, mut last) in players.iter_mut() {
         let pressed = action.0.interact;
         let edge = pressed && !last.0;
         last.0 = pressed;
@@ -584,13 +588,22 @@ fn use_vehicles(
             // The half of the seat that travels: everyone else needs to know this vehicle has
             // somebody in it, and the driver's own client needs it to tell the vehicle it is
             // steering from the parked ones it merely predicts.
-            Driven,
+            Driven(who.peer),
             Controls::default(),
             // The driver predicts it and everyone else interpolates it — the same split a player
             // gets, for the same reason: the input that moves it is theirs, so they are the one peer
-            // that can compute where it will be without being told.
-            PredictionTarget::to_clients(NetworkTarget::Single(owner.0)),
-            InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(owner.0)),
+            // that can compute where it will be without being told. Unless the switch says
+            // otherwise, in which case nobody computes it and everybody is told.
+            PredictionTarget::to_clients(if net.predict_vehicles {
+                NetworkTarget::Single(owner.0)
+            } else {
+                NetworkTarget::None
+            }),
+            InterpolationTarget::to_clients(if net.predict_vehicles {
+                NetworkTarget::AllExceptSingle(owner.0)
+            } else {
+                NetworkTarget::All
+            }),
         ));
         info!("{:?} got in", owner.0);
     }
@@ -633,13 +646,20 @@ fn use_vehicles(
 /// Written only when the set of drivers changes. Replication components are not free to churn, and
 /// this would otherwise rewrite six entities sixty-four times a second to say the same thing.
 fn the_driverless_follow_the_drivers(
+    net: Res<NetConfig>,
     drivers: Query<&Owner, With<Driving>>,
     crates: Query<Entity, With<Loose>>,
     parked: Query<Entity, (With<VehicleKind>, Without<Driver>)>,
     mut last: Local<Vec<PeerId>>,
     mut commands: Commands,
 ) {
-    let now: Vec<PeerId> = drivers.iter().map(|owner| owner.0).collect();
+    // With prediction off there is no predicted bumper for any of this to agree with, so nobody
+    // gets handed anything and every crate stays interpolated — and rewound exactly.
+    let now: Vec<PeerId> = if net.predict_vehicles {
+        drivers.iter().map(|owner| owner.0).collect()
+    } else {
+        Vec::new()
+    };
     // Compared as a set rather than a list, because a query's order is not a promise and a
     // reordering is not a change. `PeerId` is not `Ord`, and for the handful of drivers a server
     // has, a scan beats reaching for a hash set.

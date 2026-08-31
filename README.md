@@ -1253,6 +1253,42 @@ configurations, does **not** reproduce in the test world at all: the same staged
 same to two decimal places with the bound and without. A test that passes either way is worse than
 no test, so there is none, and changing that number is a thing to measure live.
 
+#### Should a vehicle be predicted at all?
+
+`predict_vehicles` in the config turns the whole of the above off, and it is a knob rather than a
+decision because neither answer is obviously right.
+
+Measured back to back at 100 ms of ping, from the input being set to the vehicle actually moving —
+the server's own timing is the control, identical in both runs at ~345 ms of harness overhead:
+
+| | picture moves | against the server |
+|---|---|---|
+| predicted | 260 ms | 87 ms **ahead** |
+| not predicted | 436 ms | 89 ms **behind** |
+
+So turning prediction off costs **176 ms**, not the ~130 ms the arithmetic suggested: half a ping
+down plus the interpolation buffer is only the second half of it, and the first half is losing the
+head start prediction was already running with. The comparison that makes it survivable anyway is
+that the buggy takes 183 ms to reach full lock and two seconds to reach 20 m/s by itself, so this
+lands on something already slow — 176 ms on a mouse-aimed shot would be unthinkable.
+
+What it buys is everything prediction has been costing: no rollback storms on contact, no handover
+machinery, and vehicles and crates back to being rewound exactly rather than only as accurately as
+the prediction was.
+
+**The experiment turned up something better than the number, though.** With the vehicle
+interpolated, driving still produced 35 rollbacks a second — and not for any of the reasons guessed.
+The driver is a *predicted* entity being carried by an *unpredicted* one: the server moves their
+`PlayerState` with the vehicle every tick, and the client cannot, because it does not simulate the
+vehicle. Nothing the client writes can agree, and two attempts to make it agree — deriving the seat
+from the interpolated pose, then not deriving it at all — left the count unchanged, because neither
+addressed the shape of it.
+
+It is the same rule again, one level down: **you cannot predict a passenger of something you do not
+predict.** For this mode to be clean the driver has to stop being predicted too while seated, and
+that runs into an assumption further in — a client identifies its own player *by* it being the
+predicted one. Which is where this stops, deliberately, rather than being hacked past.
+
 Still missing: standing on a vehicle rather than being inside it, passengers, a camera that gets out
 of the way of walls, and running people over.
 

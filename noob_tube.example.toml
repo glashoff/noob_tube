@@ -180,3 +180,23 @@ lag_compensation = true
 # Too short is not silent — the server logs the rewind it could not satisfy and falls back to the
 # present for that shot, rather than quietly testing against a position nobody was ever in.
 lag_comp_history_ticks = 35
+
+# Whether a driver predicts the vehicle they are steering. Server only — a client needs no knob,
+# because prediction is decided by which replication targets the server writes.
+#
+# On, your input reaches the picture immediately and the vehicle is yours to compute. Off, it goes
+# to the server and comes back — about 130 ms at ping_ms = 100 with send_hz = 64 and interp_ratio =
+# 2, being half a ping up, half a ping down, and the interpolation buffer.
+#
+# Neither is obviously right, which is why it is a knob. Prediction costs a vehicle that disagrees
+# with the server whenever it touches something the client could not compute; another player's car
+# is the case with no answer, because its input belongs to a peer this client never hears from.
+# Not predicting costs input delay on the throttle and the steering — but the buggy takes 183 ms to
+# reach full lock and two seconds to reach 20 m/s by itself, so 130 ms lands on something already
+# slow. What it buys is that vehicles and crates go back to being rewound exactly, and that no two
+# peers ever disagree about where anything is.
+#
+# Turning it off takes the loose crates with it: they are handed to drivers only so a *predicted*
+# bumper meets the same box the server does, and with nothing predicted there is nothing to hand
+# over.
+predict_vehicles = true
