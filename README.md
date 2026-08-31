@@ -1078,8 +1078,9 @@ update to save four rays per frame would cost bandwidth to save nothing.
 Unlike a crate, a vehicle is not a borderline case for prediction: the driver's input goes into it
 and the result comes back out under the driver's own camera, so whoever is driving must predict it
 and everyone else interpolates — the same split as a player, for the same reason. Until there is a
-driver there is no input, so for now nobody predicts it. That is also why `suspend_vehicles` takes a
-query filter exactly as `step_players` does.
+driver there is no input, so nobody predicts a parked one. That is also why `drive_vehicles` takes a
+query filter exactly as `step_players` does: the server steps every vehicle, a client steps only the
+one it is driving.
 
 Verified live. Parked, the chassis settles at 1.0661 m with all four struts compressed 0.1839 m and
 zero velocity — which is exactly what `mg/4k` predicts, so the spring constants are checked against
@@ -1088,6 +1089,17 @@ take the transition (0.44 m against the rear pair's 0.19 m), it climbs to 3.46 m
 with all four wheels off the ground, lands front-first, absorbs it at 0.46–0.63 m of compression and
 settles back to 1.06 m. A client interpolating all of that stayed within 2–30 cm — which is the
 interpolation delay, not error — and matched the height and the tilt through the jump.
+
+There are two of them, and that is a test rather than scenery. Everything about the seat is written
+per vehicle — `use_vehicles` picks the nearest free one within four metres, and the prediction
+handover names the vehicle it applies to — so a second one is the cheapest way to find out whether
+any of it was quietly written for exactly one. Verified live: climbing into the far vehicle makes
+that one `Predicted` on the driver's client and leaves the other `Interpolated` and static, driving
+it moves it and nothing else, and getting out hands it back. The two start a quarter of a turn
+apart, because two vehicles facing the same way say nothing about whether the spawn honours a
+rotation. A test checks they start clear of each other, of the crates and of the ramp; nothing
+checks that at spawn time, and being pushed apart on the first tick looks like a bug because it is
+one.
 
 **`record_positions` now runs explicitly after the solver.** Avian steps in `FixedPostUpdate` and so
 did the history recording, with no ordering between them: a *dynamic* target's history would be

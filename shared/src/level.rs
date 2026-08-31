@@ -57,11 +57,19 @@ pub fn ramp_pose() -> (Vec3, Quat) {
     )
 }
 
-/// Where the vehicle stands at the start of a round, on the ground plane.
+/// Where the vehicles stand at the start of a round, on the ground plane, and which way each faces.
 ///
-/// In line with the ramp and a little way in front of it, so that driving straight forward from a
-/// standing start arrives at the slope.
-pub const VEHICLE_START: Vec2 = Vec2::new(14.0, -8.0);
+/// The first is in line with the ramp and a little way in front of it, so that driving straight
+/// forward from a standing start arrives at the slope. The second stands across the map, turned a
+/// quarter of a turn from the first — not decoration: two vehicles facing the same way tell you
+/// nothing about whether the spawn honours a rotation, and one of them has to be somewhere a second
+/// player can reach without walking past the first.
+///
+/// The angle is a yaw in radians, about +Y, applied to the −Z that is forward everywhere here.
+pub const VEHICLE_STARTS: [(Vec2, f32); 2] = [
+    (Vec2::new(14.0, -8.0), 0.0),
+    (Vec2::new(-16.0, -4.0), core::f32::consts::FRAC_PI_2),
+];
 
 /// Where the nth player starts.
 ///
@@ -120,6 +128,30 @@ pub fn spawn_level(mut commands: Commands) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two vehicles that start inside each other, or inside a crate, spend the first tick of the
+    /// round being pushed apart — which looks like a bug and is one. Nothing checks this at spawn,
+    /// so it is checked here, where adding a third vehicle will trip over it.
+    #[test]
+    fn the_vehicles_start_clear_of_each_other_and_of_the_scenery() {
+        // The chassis is 1.8 x 3.8 m; its longest half-diagonal is what has to clear anything else,
+        // whichever way round it is turned.
+        let reach = crate::vehicle::BUGGY.half_extents.xz().length();
+        for (index, (at, _)) in VEHICLE_STARTS.iter().enumerate() {
+            for (other, _) in VEHICLE_STARTS.iter().skip(index + 1) {
+                let gap = at.distance(*other);
+                assert!(gap > reach * 2.0, "two vehicles start {gap:.1} m apart");
+            }
+            for centre in CRATES {
+                let gap = at.distance(centre.xz());
+                let clearance = reach + CRATE_HALF_EXTENT * 2f32.sqrt();
+                assert!(gap > clearance, "a vehicle starts {gap:.1} m from a crate");
+            }
+            let (ramp, _) = ramp_pose();
+            let gap = at.distance(ramp.xz());
+            assert!(gap > reach + RAMP_HALF_EXTENTS.xz().length(), "a vehicle starts on the ramp");
+        }
+    }
 
     /// The whole point of deriving the pose: a vehicle must be able to drive on to the ramp, not
     /// into it. The near edge of the driving surface has to be level with the ground.

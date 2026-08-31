@@ -698,18 +698,23 @@ fn carry_drivers(
 /// it hit.
 fn spawn_vehicles(net: Res<NetConfig>, mut commands: Commands) {
     let kind = VehicleKind::Buggy;
-    // Standing at its own ride height, so it starts resting on its springs rather than dropping on
-    // to them in front of everyone at the start of the round.
-    let at = level::VEHICLE_START.extend(kind.spec().ride_height()).xzy();
-    commands.spawn((
-        Name::from("Buggy"),
-        Authored,
-        vehicle::vehicle_body(kind, at, Quat::IDENTITY),
-        HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
-        Replicate::to_clients(NetworkTarget::All),
-        InterpolationTarget::to_clients(NetworkTarget::All),
-    ));
-    info!("1 vehicle");
+    for (index, (ground, yaw)) in level::VEHICLE_STARTS.into_iter().enumerate() {
+        // Standing at its own ride height, so it starts resting on its springs rather than dropping
+        // on to them in front of everyone at the start of the round.
+        let at = ground.extend(kind.spec().ride_height()).xzy();
+        commands.spawn((
+            Name::from(format!("Buggy {index}")),
+            Authored,
+            vehicle::vehicle_body(kind, at, Quat::from_rotation_y(yaw)),
+            HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
+            Replicate::to_clients(NetworkTarget::All),
+            // Nobody predicts an empty vehicle: with no input behind it there is nothing to predict
+            // from. `use_vehicles` moves this the moment somebody climbs in, per vehicle, so a
+            // second one changes nothing here.
+            InterpolationTarget::to_clients(NetworkTarget::All),
+        ));
+    }
+    info!("{} vehicles", level::VEHICLE_STARTS.len());
 }
 
 /// FixedUpdate: advances every prop to where this tick says it should be.
