@@ -12,9 +12,9 @@ use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::level;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::physics::{Layer, Level, PhysicsPlugin};
-use avian3d::prelude::{CollisionLayers, LayerMask, Position, RigidBody};
+use avian3d::prelude::{Collider, CollisionLayers, LayerMask, Position, RigidBody, Rotation};
 use noob_tube_shared::hitbox::Hitbox;
-use noob_tube_shared::props::{self, Bobbing, Prop};
+use noob_tube_shared::props::{self, Bobbing};
 use noob_tube_shared::lag_compensation::HitboxHistory;
 use noob_tube_shared::shooting::{self, Health, ShotFired};
 use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin};
@@ -154,9 +154,10 @@ fn resolve_shots(
     net: Res<NetConfig>,
     timeline: Res<LocalTimeline>,
     histories: Query<&HitboxHistory>,
-    // Props are targets too. Their hitbox comes from the pose Avian holds and the shape they were
-    // spawned with, rather than from a `PlayerState` that does not exist.
-    props: Query<(Entity, &Position, &Prop)>,
+    // Props are targets too. A prop offers its own collider and the pose Avian holds, where a
+    // player's hitbox is derived from its `PlayerState` — two ways of arriving at the same thing,
+    // and the reason a shot does not care which kind of target it met.
+    props: Query<(Entity, &Collider, &Position, &Rotation)>,
     // How far behind the present each client's view of everyone else is. Lightyear puts this on the
     // connection entity when an input message reports it, which is what `ControlledBy::owner`
     // points at. It is absent until the first message arrives, and absent forever if the client
@@ -178,7 +179,9 @@ fn resolve_shots(
         .p0()
         .iter()
         .map(|(entity, state, ..)| (entity, Hitbox::of(state)))
-        .chain(props.iter().map(|(entity, position, prop)| (entity, prop.hitbox_at(position.0))))
+        .chain(props.iter().map(|(entity, collider, position, rotation)| {
+            (entity, Hitbox::new(collider.clone(), position.0, rotation.0))
+        }))
         .collect();
 
     let mut hits: Vec<(Entity, u64)> = Vec::new();
@@ -238,9 +241,9 @@ fn resolve_shots(
         // Everyone but the shooter. Left in, they would hit themselves at zero distance.
         let targets: Vec<(Entity, Hitbox)> = present
             .iter()
-            .copied()
             .filter(|(entity, _)| *entity != shooter)
             .map(|(entity, now)| {
+                let (entity, now) = (*entity, now.clone());
                 let Some(rewind) = rewind else {
                     return (entity, now);
                 };
@@ -390,17 +393,17 @@ fn move_props(
 fn record_positions(
     timeline: Res<LocalTimeline>,
     mut players: Query<(&PlayerState, &mut HitboxHistory)>,
-    mut props: Query<(&Position, &Prop, &mut HitboxHistory), Without<PlayerState>>,
+    mut props: Query<(&Collider, &Position, &Rotation, &mut HitboxHistory), Without<PlayerState>>,
 ) {
     let tick = timeline.tick();
     for (state, mut history) in players.iter_mut() {
         history.record(tick, Hitbox::of(state));
     }
-    // A prop's hitbox is its replicated pose and its constant shape put together, where a player's
-    // comes out of a `PlayerState`. Both are derived at the same moment in the tick, which is what
-    // makes the two histories comparable.
-    for (position, prop, mut history) in props.iter_mut() {
-        history.record(tick, prop.hitbox_at(position.0));
+    // A prop's hitbox is its own collider at the pose Avian holds, where a player's comes out of a
+    // `PlayerState`. Both are read at the same moment in the tick, which is what makes the two
+    // histories comparable. Recording a collider costs nothing to speak of: the shape is shared.
+    for (collider, position, rotation, mut history) in props.iter_mut() {
+        history.record(tick, Hitbox::new(collider.clone(), position.0, rotation.0));
     }
 }
 

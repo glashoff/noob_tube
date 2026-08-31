@@ -80,6 +80,21 @@ pub fn level_geometry(collider: Collider, at: Vec3) -> impl Bundle {
     )
 }
 
+/// The player's collision capsule for a stance, and how far its centre sits above the feet.
+///
+/// The one place the player's shape is written down. It is what the movement sweeps with and what a
+/// shot is tested against — [`Hitbox::of`](crate::hitbox::Hitbox::of) builds from this — so the two
+/// cannot disagree about how big a player is.
+pub fn player_capsule(crouching: bool) -> (Collider, f32) {
+    let (half_height, y_offset) = if crouching {
+        (CROUCH_CAPSULE_HALF_HEIGHT, CROUCH_CAPSULE_Y_OFFSET)
+    } else {
+        (CAPSULE_HALF_HEIGHT, CAPSULE_Y_OFFSET)
+    };
+    // Avian's capsule length is the cylinder between the caps, so it is twice the half height.
+    (Collider::capsule(CAPSULE_RADIUS, half_height * 2.0), y_offset)
+}
+
 /// Queries against the level, and nothing else.
 ///
 /// The replacement for the old `CollisionWorld` resource: same questions, same answers (a test
@@ -105,23 +120,12 @@ impl Level<'_, '_> {
         MoveAndSlideConfig { skin_width: SKIN, ..default() }
     }
 
-    /// The player's collision capsule for a stance.
-    fn capsule(crouching: bool) -> (Collider, f32) {
-        let (half_height, y_offset) = if crouching {
-            (CROUCH_CAPSULE_HALF_HEIGHT, CROUCH_CAPSULE_Y_OFFSET)
-        } else {
-            (CAPSULE_HALF_HEIGHT, CAPSULE_Y_OFFSET)
-        };
-        // Avian's capsule length is the cylinder between the caps, so it is twice the half height.
-        (Collider::capsule(CAPSULE_RADIUS, half_height * 2.0), y_offset)
-    }
-
     /// Moves the player capsule by `delta`, sliding along whatever it hits, and returns the
     /// displacement actually achieved.
     ///
     /// `feet` is the position of the player's feet, not the capsule centre.
     pub fn sweep_capsule(&self, feet: Vec3, delta: Vec3, crouching: bool) -> Vec3 {
-        let (shape, y_offset) = Self::capsule(crouching);
+        let (shape, y_offset) = player_capsule(crouching);
         let start = feet + Vec3::Y * y_offset;
         // `move_and_slide` is given a velocity and a duration; handing it the whole displacement
         // over one second asks for exactly that displacement.

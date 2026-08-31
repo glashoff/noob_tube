@@ -204,7 +204,7 @@ mod tests {
 
     /// A standing player at `feet`, as a target.
     fn standing(feet: Vec3) -> Hitbox {
-        Hitbox::Player { feet, crouching: false }
+        Hitbox::of(&PlayerState { position: feet, ..PlayerState::default() })
     }
 
     /// Yaw 0 looks down -Z, the same convention movement uses. Getting this wrong would make every
@@ -281,10 +281,14 @@ mod tests {
                 direction,
                 [
                     (player, standing(Vec3::new(0.0, 0.0, -10.0))),
-                    (prop, Hitbox::Prop {
-                        centre: Vec3::new(0.0, 1.59, -5.0),
-                        half_extents: Vec3::splat(0.5),
-                    }),
+                    (
+                        prop,
+                        Hitbox::new(
+                            Collider::cuboid(1.0, 1.0, 1.0),
+                            Vec3::new(0.0, 1.59, -5.0),
+                            Quat::IDENTITY,
+                        ),
+                    ),
                 ],
             )
         });

@@ -26,8 +26,6 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::hitbox::Hitbox;
-
 /// A box-shaped prop, as everyone sees it.
 ///
 /// Only the size is in here, because only the size is constant: where it *is* travels as
@@ -42,11 +40,6 @@ pub struct Prop {
 }
 
 impl Prop {
-    /// The shape a shot meets, for a prop standing at `centre`.
-    pub fn hitbox_at(&self, centre: Vec3) -> Hitbox {
-        Hitbox::Prop { centre, half_extents: self.half_extents }
-    }
-
     /// The collider that shape corresponds to.
     ///
     /// Avian sizes a cuboid by its full side lengths, where the hitbox is written in half-extents.
@@ -153,15 +146,17 @@ mod tests {
         }
     }
 
-    /// The collider and the hitbox have to be the same box, or a shot passes through what it looks
-    /// like it hit. They are written in different units, which is exactly how that goes wrong.
+    /// The collider has to be the size the prop says it is. Avian measures a cuboid by its full
+    /// side lengths and this type is written in half-extents, which is exactly how a crate ends up
+    /// drawn at one size and shot at another.
+    ///
+    /// The shape a shot meets is this same collider — a `Hitbox` holds it rather than rebuilding
+    /// one — so getting this right is the whole of getting the two to agree.
     #[test]
-    fn the_collider_and_the_hitbox_are_the_same_box() {
+    fn the_collider_is_the_size_the_prop_claims() {
         let prop = MOVING_CRATES[0].prop();
         let aabb = prop.collider().aabb(Vec3::ZERO, Quat::IDENTITY);
-        let Hitbox::Prop { half_extents, .. } = prop.hitbox_at(Vec3::ZERO) else {
-            panic!("a prop's hitbox is not a prop");
-        };
+        let half_extents = prop.half_extents;
         assert!((aabb.max - half_extents).length() < 1e-5, "{:?} vs {half_extents:?}", aabb.max);
         assert!((aabb.min + half_extents).length() < 1e-5, "{:?} vs {half_extents:?}", aabb.min);
     }

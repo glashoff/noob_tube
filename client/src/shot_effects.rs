@@ -16,12 +16,11 @@
 //! not need to be paid for on the wire.
 
 use bevy::light::NotShadowCaster;
-use avian3d::prelude::Position;
+use avian3d::prelude::{Collider, Position, Rotation};
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::{MessageReceiver, Predicted, Rollback, client};
 use noob_tube_shared::physics::Level;
-use noob_tube_shared::props::Prop;
 use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::player::{Player, PlayerInput, PlayerState};
 use noob_tube_shared::shooting::{self, ShotFired};
@@ -153,7 +152,7 @@ fn predict_own_tracer(
     // where the shot goes, and it is the same view the server reconstructs to resolve the hit.
     others: Query<Target, Drawn>,
     // Props are targets too, and they carry their hitbox rather than deriving one.
-    props: Query<(Entity, &Position, &Prop), Drawn>,
+    props: Query<(Entity, &Collider, &Position, Option<&Rotation>), Drawn>,
     level: Level,
     assets: Option<Res<ShotAssets>>,
     mut commands: Commands,
@@ -165,7 +164,14 @@ fn predict_own_tracer(
     let targets = others
         .iter()
         .map(|(entity, other)| (entity, Hitbox::of(other)))
-        .chain(props.iter().map(|(entity, position, prop)| (entity, prop.hitbox_at(position.0))));
+                .chain(props.iter().map(|(entity, collider, position, rotation)| {
+            // `Rotation` arrives separately from `Position` and may not have landed yet — lightyear
+            // inserts an interpolated component only after two updates. Facing forward until it
+            // does is right for a crate and harmless for anything else: the pose is corrected on
+            // the next update, and the server's answer is the one that counts either way.
+            let facing = rotation.map_or(Quat::IDENTITY, |rotation| rotation.0);
+            (entity, Hitbox::new(collider.clone(), position.0, facing))
+        }));
     // The same call the server makes, over the same input, before either side steps the player.
     let Some(fired) = shooting::fire(&level, state, &action.0, targets) else {
         return;

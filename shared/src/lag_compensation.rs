@@ -89,9 +89,9 @@ impl HitboxHistory {
             .entries
             .partition_point(|(recorded, _)| *recorded <= tick)
             .checked_sub(1)?;
-        let (_, start) = self.entries[index];
-        let Some((_, end)) = self.entries.get(index + 1).copied() else {
-            return Some(start);
+        let (_, start) = &self.entries[index];
+        let Some((_, end)) = self.entries.get(index + 1) else {
+            return Some(start.clone());
         };
         Some(Hitbox::lerp(start, end, overstep.clamp(0.0, 1.0)))
     }
@@ -115,12 +115,12 @@ impl HitboxHistory {
     }
 
     /// The recorded moment at exactly `tick`, if it is still kept.
-    fn at(&self, tick: Tick) -> Option<Hitbox> {
+    fn at(&self, tick: Tick) -> Option<&Hitbox> {
         let index = self
             .entries
             .binary_search_by_key(&tick, |(recorded, _)| *recorded)
             .ok()?;
-        Some(self.entries[index].1)
+        Some(&self.entries[index].1)
     }
 
     /// True once the buffer has been filled, which is what separates "this player only just joined"
@@ -146,18 +146,38 @@ impl HitboxHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use avian3d::prelude::*;
+    use crate::player::PlayerState;
+
+    /// A player at `x` metres along +X, standing or crouched.
+    fn player(x: f32, crouching: bool) -> Hitbox {
+        Hitbox::of(&PlayerState {
+            position: Vec3::new(x, 0.0, 0.0),
+            crouching,
+            ..PlayerState::default()
+        })
+    }
 
     /// A standing player at `x` metres along +X.
     fn at_x(x: f32) -> Hitbox {
-        Hitbox::Player { feet: Vec3::new(x, 0.0, 0.0), crouching: false }
+        player(x, false)
     }
 
-    /// The feet of a recorded player, for comparing.
-    fn feet(hitbox: Hitbox) -> Vec3 {
-        match hitbox {
-            Hitbox::Player { feet, .. } => feet,
-            Hitbox::Prop { centre, .. } => centre,
-        }
+    /// Where a recorded target was, for comparing. The capsule's centre sits a fixed height above
+    /// the feet, so comparing centres compares positions.
+    fn place(hitbox: Hitbox) -> Vec3 {
+        hitbox.centre()
+    }
+
+    /// Just the axis these tests move along, for comparing without the capsule's fixed height.
+    fn x_of(hitbox: Hitbox) -> f32 {
+        hitbox.centre().x
+    }
+
+    /// The height of a recorded capsule, which is what tells the two stances apart.
+    fn height(hitbox: &Hitbox) -> f32 {
+        let aabb = hitbox.collider.aabb(Vec3::ZERO, Quat::IDENTITY);
+        aabb.max.y - aabb.min.y
     }
 
     /// Ten ticks of a player walking one metre per tick along +X.
@@ -171,37 +191,39 @@ mod tests {
 
     #[test]
     fn a_whole_tick_is_returned_exactly() {
-        let sample = walking().sample(Tick(4), 0.0).map(feet).expect("tick 4 was recorded");
-        assert_eq!(sample, Vec3::new(4.0, 0.0, 0.0));
+        let sample = walking().sample(Tick(4), 0.0).map(place).expect("tick 4 was recorded");
+        assert_eq!(sample.x, 4.0, "{sample:?}");
     }
 
     #[test]
     fn the_overstep_lands_between_two_ticks() {
-        let sample = walking().sample(Tick(4), 0.25).map(feet).expect("tick 4 was recorded");
-        assert_eq!(sample, Vec3::new(4.25, 0.0, 0.0));
+        let sample = walking().sample(Tick(4), 0.25).map(place).expect("tick 4 was recorded");
+        assert_eq!(sample.x, 4.25, "{sample:?}");
     }
 
     /// The past is a different shape, not just a different place.
     #[test]
     fn stance_comes_from_the_past_too() {
         let mut history = HitboxHistory::with_capacity(4);
-        history.record(Tick(1), Hitbox::Player { feet: Vec3::ZERO, crouching: true });
-        history.record(Tick(2), Hitbox::Player { feet: Vec3::ZERO, crouching: false });
-        assert_eq!(history.sample(Tick(1), 0.9), Some(Hitbox::Player {
-            feet: Vec3::ZERO,
-            crouching: true,
-        }), "stance blended");
-        assert_eq!(history.sample(Tick(2), 0.0), Some(Hitbox::Player {
-            feet: Vec3::ZERO,
-            crouching: false,
-        }));
+        history.record(Tick(1), player(0.0, true));
+        history.record(Tick(2), player(0.0, false));
+
+        let crouched = height(&player(0.0, true));
+        let standing = height(&player(0.0, false));
+        assert!(crouched < standing, "the two stances are the same size");
+
+        // Nine tenths of the way from crouched to standing is still crouched: a shape is discrete.
+        let sampled = history.sample(Tick(1), 0.9).expect("tick 1 was recorded");
+        assert_eq!(height(&sampled), crouched, "stance blended");
+        let sampled = history.sample(Tick(2), 0.0).expect("tick 2 was recorded");
+        assert_eq!(height(&sampled), standing);
     }
 
     /// Asking past the newest entry must not invent movement that has not happened.
     #[test]
     fn the_present_clamps_instead_of_extrapolating() {
-        let sample = walking().sample(Tick(99), 0.5).map(feet).expect("clamped to the newest");
-        assert_eq!(sample, Vec3::new(9.0, 0.0, 0.0));
+        let sample = walking().sample(Tick(99), 0.5).map(place).expect("clamped to the newest");
+        assert_eq!(sample.x, 9.0);
     }
 
     /// A rewind further back than the buffer reaches must say so rather than return the oldest
@@ -210,7 +232,7 @@ mod tests {
     fn too_far_back_is_a_miss_not_a_guess() {
         let mut history = HitboxHistory::with_capacity(4);
         for tick in 10..14u32 {
-            history.record(Tick(tick), Hitbox::Player { feet: Vec3::ZERO, crouching: false });
+            history.record(Tick(tick), at_x(0.0));
         }
         assert!(history.sample(Tick(9), 0.0).is_none());
         assert!(history.sample(Tick(10), 0.0).is_some());
@@ -220,7 +242,7 @@ mod tests {
     fn the_buffer_forgets_the_oldest_first() {
         let mut history = HitboxHistory::with_capacity(3);
         for tick in 0..10u32 {
-            history.record(Tick(tick), Hitbox::Player { feet: Vec3::ZERO, crouching: false });
+            history.record(Tick(tick), at_x(0.0));
         }
         assert_eq!(history.len(), 3);
         assert_eq!(history.oldest(), Some(Tick(7)));
@@ -230,8 +252,8 @@ mod tests {
     /// The exact form: two confirmed ticks and a fraction, rebuilt from the dense history.
     #[test]
     fn a_bracket_is_rebuilt_from_both_ends() {
-        let sample = walking().sample_bracket(Tick(2), Tick(6), 0.25).map(feet);
-        assert_eq!(sample, Some(Vec3::new(3.0, 0.0, 0.0)));
+        let sample = walking().sample_bracket(Tick(2), Tick(6), 0.25).map(x_of);
+        assert_eq!(sample, Some(3.0));
     }
 
     /// A wide bracket is the normal case, not the exception: at a send rate below the tick rate the
@@ -241,12 +263,12 @@ mod tests {
     fn a_wide_bracket_is_not_the_same_as_the_middle_tick() {
         let mut history = HitboxHistory::with_capacity(8);
         for (tick, x) in [(0u32, 0.0), (1, 5.0), (2, 6.0)] {
-            history.record(Tick(tick), Hitbox::Player { feet: Vec3::new(x, 0.0, 0.0), crouching: false });
+            history.record(Tick(tick), at_x(x));
         }
         // The client saw the blend of ticks 0 and 2, halfway: 3.0. The tick in between says 5.0.
-        let blended = history.sample_bracket(Tick(0), Tick(2), 0.5).map(feet).unwrap();
+        let blended = history.sample_bracket(Tick(0), Tick(2), 0.5).map(place).unwrap();
         assert_eq!(blended.x, 3.0);
-        assert_eq!(history.sample(Tick(1), 0.0).map(feet).unwrap().x, 5.0);
+        assert_eq!(history.sample(Tick(1), 0.0).map(place).unwrap().x, 5.0);
     }
 
     /// Half a bracket is not a bracket.
@@ -254,7 +276,7 @@ mod tests {
     fn a_forgotten_end_is_a_miss() {
         let mut history = HitboxHistory::with_capacity(3);
         for tick in 10..13u32 {
-            history.record(Tick(tick), Hitbox::Player { feet: Vec3::ZERO, crouching: false });
+            history.record(Tick(tick), at_x(0.0));
         }
         assert!(history.sample_bracket(Tick(8), Tick(12), 0.5).is_none());
         assert!(history.sample_bracket(Tick(10), Tick(99), 0.5).is_none());
@@ -266,7 +288,7 @@ mod tests {
     #[test]
     fn a_fresh_history_is_not_full() {
         let mut history = HitboxHistory::with_capacity(8);
-        history.record(Tick(0), Hitbox::Player { feet: Vec3::ZERO, crouching: false });
+        history.record(Tick(0), at_x(0.0));
         assert!(!history.is_full());
     }
 
@@ -274,9 +296,9 @@ mod tests {
     #[test]
     fn recording_backwards_rewrites_instead_of_corrupting() {
         let mut history = walking();
-        history.record(Tick(5), Hitbox::Player { feet: Vec3::new(-1.0, 0.0, 0.0), crouching: false });
+        history.record(Tick(5), at_x(-1.0));
         assert_eq!(history.len(), 6);
-        assert_eq!(history.sample(Tick(5), 0.0).map(feet).unwrap().x, -1.0);
-        assert_eq!(history.sample(Tick(9), 0.0).map(feet).unwrap().x, -1.0, "clamped to the newest");
+        assert_eq!(history.sample(Tick(5), 0.0).map(place).unwrap().x, -1.0);
+        assert_eq!(history.sample(Tick(9), 0.0).map(place).unwrap().x, -1.0, "clamped to the newest");
     }
 }

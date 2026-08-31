@@ -26,10 +26,16 @@ impl Plugin for PropsPlugin {
     }
 }
 
-/// Update: gives an arrived prop something to be seen as.
+/// Update: gives an arrived prop something to be seen as, and something to be hit.
 ///
 /// One mesh per prop rather than a shared one, because each is sized from its own shape. There are
 /// two of them; sharing by size belongs with the asset handling in M2.
+///
+/// The collider is here so that a client asks the same question of a prop that the server does —
+/// `Hitbox::new(collider, pose)` on both sides — rather than rebuilding a shape from the size and
+/// hoping the two agree. It carries no [`RigidBody`](avian3d::prelude::RigidBody): lightyear warns
+/// against one on an interpolated entity, since Avian would then simulate something the server has
+/// already decided.
 fn give_bodies(
     arrived: Query<(Entity, &Prop), Arrived>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -41,6 +47,7 @@ fn give_bodies(
             Name::from("Moving crate"),
             Mesh3d(meshes.add(Cuboid::from_size(prop.half_extents * 2.0))),
             MeshMaterial3d(materials.add(Color::srgb(0.35, 0.45, 0.7))),
+            prop.collider(),
         ));
         info!("drawing a moving crate");
     }

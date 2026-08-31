@@ -56,7 +56,6 @@ impl Plugin for SharedTypesPlugin {
             .register_type::<Aim>()
             .register_type::<Player>()
             .register_type::<Health>()
-            .register_type::<crate::hitbox::Hitbox>()
             .register_type::<crate::props::Bobbing>()
             .register_type::<crate::props::Prop>();
     }

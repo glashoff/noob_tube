@@ -952,24 +952,30 @@ and dropped, and every client drew nothing.
 A crate that rides up and down, to have something moving that is nobody's player. It is the case
 lag compensation has to cover for a lift, a swinging door, a train.
 
-**The animation runs on the server alone.** Clients receive `Hitbox` like any other replicated
-component and interpolate it; nothing on a client works out where the crate ought to be. That is
-deliberate even though the motion is a pure function of the tick and every client *could* compute
-it — the moment anything can stop, push or break the crate, a locally computed one is wrong, and the
-version that is wrong later is not worth being right now. It also means a crate goes down exactly
-the same path as a player, replicated and interpolated and rewound out of the same `HitboxHistory`,
-rather than being a second mechanism beside it.
+The crate is a **kinematic Avian body** whose `Position` the server writes each tick. Clients
+receive that pose like any other replicated component and interpolate it; nothing on a client works
+out where the crate ought to be. That is deliberate even though the motion is a pure function of the
+tick and every client *could* compute it — the moment anything can stop, push or break the crate, a
+locally computed one is wrong, and the version that is wrong later is not worth being right now. It
+also means a crate goes down exactly the same path as a player, replicated and interpolated and
+rewound out of the same `HitboxHistory`, rather than being a second mechanism beside it.
 
-Making that possible was the one real generalisation. A target used to be a feet position and a
-`crouching` flag — a player and nothing else, with the shape hard-coded in the hit test. It is now a
-`Hitbox`, an enum of the movement capsule or an axis-aligned box, and the shape travels *with* the
-pose because it changes over time.
+Kinematic rather than dynamic on purpose: a kinematic body moves where it is put and nothing pushes
+back, which is what an animation is. Making it dynamic — one a player could shove — is one variant
+of `RigidBody` away, and everything around it already works the way that would need.
+
+Making all of this possible took two generalisations, both of the same shape. A target used to be a
+feet position and a `crouching` flag: a player and nothing else, with the shape hard-coded in the
+hit test. It then became an enum with a variant per kind of target, which is the same problem one
+level up — a vehicle needs a new variant, a per-bone hitbox needs another, and each brings its own
+arm in the ray cast. A `Hitbox` now holds an actual `Collider` and a pose, so anything Avian can
+express is a target and the hit test is one call with no cases in it. Rotation came free with it: a
+door that swings rewinds to the angle it was at, which the enum could not represent at all.
 
 What a crate is **not** is terrain. It stops bullets, because a shot tests every hitbox and takes
-the nearest, but it does not stop feet: the level's collision is a static BVH built once, with no
-way to move a collider in it. The crates therefore ride high enough to clear a standing player,
-which a test holds to account. Standing on a lift is a separate piece of work, and a bigger one than
-the netcode was.
+the nearest, but it does not stop feet: it sits on `Layer::Body`, which the level queries do not
+see. The crates therefore ride high enough to clear a standing player, which a test holds to
+account. Standing on a lift is a separate piece of work.
 
 Verified live at 100 ms of ping, one player firing at a crate: the server reports rewinding it by
 13 to 14 ticks and the crate having moved 0.12 to 0.43 m since — and the bracket it used came from
@@ -1011,10 +1017,11 @@ in `FixedPostUpdate` so it holds the value at the *end* of a tick — the one re
 therefore the one a client interpolates towards. `resolve_shots` then rebuilds each target at the
 moment the shot names, and passes those shapes rather than the present ones to the hit test.
 
-It stores a whole `Hitbox` and not just a position, because the shape changes too. Crouching was
-already an example before any prop existed: someone who ducked half a round trip ago must still be
-standing in the past the shooter aimed at. Rewinding a shape to the right place but the wrong size
-is only half a rewind.
+It stores a whole `Hitbox` — collider and pose — and not just a position, because the shape changes
+too. Crouching was already an example before any prop existed: someone who ducked half a round trip
+ago must still be standing in the past the shooter aimed at. Rewinding a shape to the right place
+but the wrong size is only half a rewind. Carrying the shape costs nothing to speak of: a collider
+is shared, so an entry is two atomic increments rather than a copy of any geometry.
 
 Per entity, not by world snapshot: a hitscan ray asks about each target separately anyway, and per
 entity means a player who joined a moment ago simply has a short history instead of a hole in a
