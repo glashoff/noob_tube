@@ -16,7 +16,7 @@ use std::f32::consts::{PI, TAU};
 use lightyear_avian3d::prelude::LightyearAvianPlugin;
 
 use crate::player::{Aim, Player, PlayerInput, PlayerState};
-use crate::props::Prop;
+use crate::props::{Density, Prop};
 use crate::vehicle::{Driving, VehicleKind};
 use crate::shooting::{Health, ShotFired};
 use crate::tuning::NetConfig;
@@ -58,6 +58,10 @@ impl Plugin for ProtocolPlugin {
         // `LightyearAvianPlugin` registers below for every rigid body — so this is sent once per
         // entity rather than with every update, because half-extents do not change.
         app.component::<Prop>().replicate_once();
+        // Alongside the shape, and for the same reason it is sent at all: a client asked to
+        // predict a crate has to give it the mass the server gave it, or the two shove it
+        // differently and every push is a correction.
+        app.component::<Density>().replicate_once();
         // Which vehicle it is, sent once. The handling behind it is a constant both sides already
         // have — see [`VehicleKind`](crate::vehicle::VehicleKind) for why tuning is shared
         // knowledge rather than replicated state.

@@ -58,6 +58,19 @@ impl Prop {
     }
 }
 
+/// How heavy a prop is, in kilograms per cubic metre.
+///
+/// Only on the props the solver moves, and replicated because a client that has been asked to
+/// predict one has to weigh it exactly as the server does. A constant would do while there is one
+/// kind of loose crate and would quietly stop doing the moment there are two.
+///
+/// A density rather than a mass, because that is what Avian takes: it derives both the mass and the
+/// inertia from the collider and this, and setting a mass directly would leave the inertia
+/// describing a different box.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
+#[reflect(Component)]
+pub struct Density(pub f32);
+
 /// A prop that slides back and forth along one axis, forever.
 ///
 /// Server-only, and never replicated: what reaches a client is the [`Position`] this produces.
@@ -105,7 +118,7 @@ pub const LOOSE_CRATES: [Vec3; 4] = [
     Vec3::new(-8.1, 3.9, -5.9),
 ];
 
-/// The shape every loose crate has. Its weight is [`LOOSE_DENSITY`], which only the server needs.
+/// The shape every loose crate has. How heavy it is travels beside it, as [`Density`].
 pub fn loose_prop() -> Prop {
     Prop { half_extents: Vec3::splat(LOOSE_HALF_EXTENT) }
 }
@@ -115,7 +128,7 @@ pub fn loose_prop() -> Prop {
 /// Avian derives mass from the collider's volume and this, and its default of 1 makes a cubic-metre
 /// box weigh a kilogram — a shot then launches it at forty metres a second. Softwood packed loosely
 /// is around this, so a crate of a cubic metre comes out at forty kilograms and a hit shoves it
-/// rather than firing it across the map.
+/// rather than firing it across the map. It reaches a client as [`Density`].
 pub const LOOSE_DENSITY: f32 = 40.0;
 
 /// The moving crates the level starts with.

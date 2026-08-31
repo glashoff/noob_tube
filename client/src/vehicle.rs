@@ -15,7 +15,7 @@
 
 use avian3d::prelude::{
     CenterOfMass, ColliderDensity, CollisionLayers, LayerMask, PhysicsSystems, Position, RigidBody,
-    Rotation, SpatialQuery,
+    Rotation, SpatialQuery, SpeculativeMargin,
 };
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
@@ -104,6 +104,9 @@ fn give_bodies(
             MeshMaterial3d(paint),
             spec.collider(),
             RigidBody::Static,
+            // Inert while the vehicle is interpolated, and the two sides have to agree the moment
+            // it is not — see `vehicle_body` on the server, which says the same thing.
+            SpeculativeMargin(vehicle::SPECULATIVE_MARGIN),
             // The layer the server gives it. The default would be the same — see `client::props`
             // — but a vehicle is the thing most likely to grow a second collider later, and this
             // is where the answer for it belongs.

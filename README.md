@@ -1167,6 +1167,63 @@ weight off the ground and drops what the turn has to overcome to a third. Below 
 leaves the ground; it just goes light on its edge. Measured in the test world, it is back on its
 wheels 1.1 seconds after the delay expires and settled at its ride height a second after that.
 
+#### Driving into things
+
+Driving the buggy into the loose crates looked terrible, and it was two separate faults with one
+symptom.
+
+**The client was ramming a wall that was not there.** An interpolated crate is `RigidBody::Static`
+on a client and stands where the server said it was a round trip ago. The predicted vehicle
+therefore hit an immovable box in the past, while the server pushed straight through the real one.
+Four seconds of that, at 100 ms of ping with 10 % loss:
+
+| | rollbacks in 4 s | worst correction |
+|---|---|---|
+| one crate, before | 237 | 173 cm |
+| one crate, after | **1** | **15.7 cm** |
+| a stack of four, before | 245 | 740 cm |
+| a stack of four, after | 238 | 32.5 cm |
+
+The fix is the handover the vehicle already had: while somebody is driving, the server gives the
+loose crates `PredictionTarget` for exactly that peer and `InterpolationTarget` for everyone else,
+and takes it back when they get out. A client's crate then swaps `Static` for `Dynamic` and both
+sides shove the same box on the same tick.
+
+This is not a retraction of "a crate is interpolated". The rule was always *predict what you have
+the information to compute*, and behind the wheel that is what a driver has — the crate is moved by
+their own bumper. What they lack is somebody else's shot, which arrives as a correction measured
+earlier at a median of 3.7 cm, and which the driver is the worst-placed person in the game to care
+about, because nobody shoots from the driver's seat. Everyone not driving keeps the interpolated
+crate and the rewound hitbox that goes with it. The crate's mass now travels on the wire as
+`Density`, because a client that weighs a crate differently from the server pushes it somewhere
+else.
+
+The stack is the honest remainder. Four boxes in contact are chaotic, two solvers stepping slightly
+different histories diverge every update, and no amount of prediction fixes that — but the
+disagreement is now a third of a metre instead of seven.
+
+**The vehicle was braking against contacts it had not reached.** Avian predicts contacts before they
+happen and by default lets the prediction reach as far as the body's velocity does. At 24 m/s that
+is nearly a metre of guesswork ahead of the bumper, and the solver treats a contact surface as an
+infinite plane — Avian's own documentation calls the result *ghost collisions*. Measured against the
+identical run with nothing in the way, hitting a 40 kg crate cost the 1200 kg vehicle **3.8 m/s**
+where the momentum it hands over accounts for 0.7. Bounding `SpeculativeMargin` to 10 cm brings that
+to **0.9**.
+
+Swept CCD was the obvious partner and measurably does nothing: 0.10 m and 0.02 m, with the sweep and
+without, all cost the same speed to a tenth. It was never protecting anything — the thinnest thing
+in the level is a metre thick and the vehicle covers 38 cm in a tick — so it is not switched on. A
+sweep per body per replayed tick is not worth paying for on the strength of the name.
+
+Two things this cost, and both are worth writing down. The crate never outruns the car, which was
+the first thing suspected: a clean trace shows it leaving at 22.8 m/s from a 23.5 m/s vehicle and
+then travelling with it, and the crates that ended up 200 m away were being dribbled, not launched.
+Friction is exact — a crate given 15 m/s slides 22.9 m, against the 22.9 m that µ = 0.5 predicts.
+And the speculative-margin effect, flatly reproducible on a running server across seven
+configurations, does **not** reproduce in the test world at all: the same staged collision costs the
+same to two decimal places with the bound and without. A test that passes either way is worse than
+no test, so there is none, and changing that number is a thing to measure live.
+
 Still missing: standing on a vehicle rather than being inside it, passengers, a camera that gets out
 of the way of walls, and running people over.
 

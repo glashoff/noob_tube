@@ -58,6 +58,7 @@ impl Plugin for SharedTypesPlugin {
             .register_type::<Health>()
             .register_type::<crate::props::Bobbing>()
             .register_type::<crate::props::Prop>()
+            .register_type::<crate::props::Density>()
             // A vehicle's wheels are worth registering even though they never travel: they are
             // derived every tick from the pose and the ground, so a live listing of them is how one
             // sees what the suspension thinks it is doing.

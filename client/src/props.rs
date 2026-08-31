@@ -11,20 +11,22 @@
 //! box a shot is tested against cannot drift apart. For players the two are separate — a capsule
 //! collides, a body and a head are drawn — and keeping them in step needed a test.
 
-use avian3d::prelude::{CollisionLayers, LayerMask, RigidBody};
+use avian3d::prelude::{ColliderDensity, CollisionLayers, LayerMask, RigidBody};
 use bevy::prelude::*;
-use lightyear::prelude::client;
+use lightyear::prelude::{Predicted, client};
 use noob_tube_shared::physics::Layer;
-use noob_tube_shared::props::Prop;
+use noob_tube_shared::props::{Density, Prop};
 
 /// A prop that has just arrived and has nothing to be seen as yet.
 type Arrived = (With<client::Remote>, Added<Prop>);
+/// A prop this client has just been asked to predict.
+type NowPredicted = (With<Prop>, Added<Predicted>);
 
 pub struct PropsPlugin;
 
 impl Plugin for PropsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, give_bodies);
+        app.add_systems(Update, (give_bodies, fit_for_the_solver).chain());
     }
 }
 
@@ -61,5 +63,36 @@ fn give_bodies(
             // anyway keeps this entity a visible mirror of the server's, where it is not optional.
             CollisionLayers::new(Layer::Body, LayerMask::ALL),
         ));
+    }
+}
+
+/// Update: gives a prop the body it needs for whichever side of the prediction line it is on.
+///
+/// The line moves at runtime, exactly as it does for a vehicle. A driver has to predict the crates
+/// their bumper is about to move, so the server hands them over on the way into the seat and takes
+/// them back on the way out; everyone else keeps the interpolated crate and the rewound hitbox that
+/// comes with it. See `crates_follow_the_drivers` on the server for what that trade is worth —
+/// 245 rollbacks in four seconds, against a median 3.7 cm when somebody else shoots one.
+///
+/// Predicted, the crate is [`RigidBody::Dynamic`] and Avian moves it; the mass comes off the wire
+/// as [`Density`] rather than out of a constant, because a client that weighs a crate differently
+/// from the server pushes it somewhere else. Interpolated, it goes back to `Static` and lightyear
+/// writes the pose — leaving it dynamic would have Avian fighting the replicated pose every update.
+fn fit_for_the_solver(
+    took_over: Query<(Entity, &Density), NowPredicted>,
+    mut gave_up: RemovedComponents<Predicted>,
+    props: Query<(), With<Prop>>,
+    mut commands: Commands,
+) {
+    for (entity, density) in took_over.iter() {
+        commands
+            .entity(entity)
+            .insert((RigidBody::Dynamic, ColliderDensity(density.0)));
+    }
+    for entity in gave_up.read() {
+        if props.get(entity).is_err() {
+            continue;
+        }
+        commands.entity(entity).insert(RigidBody::Static);
     }
 }

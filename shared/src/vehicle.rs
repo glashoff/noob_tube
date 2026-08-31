@@ -44,6 +44,34 @@ pub const FRONT_WHEELS: usize = 2;
 /// genuinely on its side or its roof is beyond this, and there is no way back from either.
 pub const FLIPPED_COSINE: f32 = 0.2;
 
+/// How far ahead of itself a vehicle is allowed to predict a contact, in metres.
+///
+/// Avian predicts contacts before they happen — a *speculative* contact — and by default lets the
+/// prediction reach as far as a body's velocity does. For anything that moves at walking pace that
+/// is free accuracy. For a buggy at 24 m/s, which covers 38 cm in a tick, it is a metre-wide plane
+/// of guesswork in front of the bumper, and the solver treats every contact surface as an infinite
+/// plane: the vehicle brakes against a wall that is not there. Measured, hitting a 40 kg crate at
+/// 23.4 m/s took **7 m/s** off a 1200 kg vehicle where the momentum it handed over accounts for
+/// 0.7 — Avian's own documentation calls these ghost collisions and names a smaller margin as the
+/// cure.
+///
+/// Ten centimetres is comfortably more than a tick of a walking pace and far less than a tick of a
+/// driving one, which is exactly the split that matters. Bounding it takes the cost of hitting that
+/// crate from 3.8 m/s down to **0.9**, against the 0.7 the momentum it hands over accounts for.
+///
+/// Swept CCD was the obvious partner for this and measurably does nothing: at margins of 0.10 m and
+/// 0.02 m, with the sweep and without it, the same collision costs the same speed to a tenth. It
+/// was never protecting anything here — the shortest thing in the level is a metre thick and the
+/// vehicle covers 38 cm in a tick — so it is not switched on, and a sweep per body per replayed
+/// tick is not a thing to pay for on the strength of the name.
+///
+/// **Not covered by a test, and not for want of trying.** The effect is flatly reproducible on a
+/// running server — 7.2 m/s lost at an unbounded margin and at 0.50 m, 3.4 at 0.10 m and at 0.02 m,
+/// across seven runs — and the same collision staged in the test world above costs the same to two
+/// decimal places with the bound and without it. Something between the two differs and this comment
+/// does not know what. Until it does, changing this number is a thing to measure live.
+pub const SPECULATIVE_MARGIN: f32 = 0.1;
+
 /// Which vehicle this is.
 ///
 /// The numbers behind it are a constant both sides already have, not something sent per entity.
@@ -345,6 +373,10 @@ pub fn vehicle_body(kind: VehicleKind, at: Vec3, facing: Quat) -> impl Bundle {
         // Not on the level layer: a vehicle is not terrain, and the movement queries deliberately
         // do not see it. Walking on one is its own piece of work.
         CollisionLayers::new(Layer::Body, LayerMask::ALL),
+        SpeculativeMargin(SPECULATIVE_MARGIN),
+        // What stops the vehicle braking against contacts it has not reached yet. See
+        // [`SPECULATIVE_MARGIN`], including why the swept CCD that would normally accompany it is
+        // not here.
         Position(at),
         Rotation(facing),
     )

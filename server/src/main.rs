@@ -17,7 +17,7 @@ use avian3d::prelude::{
     Position, RigidBody, Rotation, WriteRigidBodyForces,
 };
 use noob_tube_shared::hitbox::Hitbox;
-use noob_tube_shared::props::{self, Bobbing};
+use noob_tube_shared::props::{self, Bobbing, Density};
 use noob_tube_shared::vehicle::{self, Controls, Driving, VehicleKind};
 use noob_tube_shared::lag_compensation::HitboxHistory;
 use noob_tube_shared::shooting::{self, Health, ShotFired};
@@ -71,7 +71,7 @@ fn main() {
             (
                 // Getting in and out first: it decides who is walking this tick and who is driving,
                 // and both of the steps below depend on that answer.
-                (use_vehicles, take_the_wheel).chain(),
+                (use_vehicles, crates_follow_the_drivers, take_the_wheel).chain(),
                 resolve_shots,
                 (
                     simulation::step_players::<()>,
@@ -427,10 +427,14 @@ fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
         commands.spawn((
             Name::from(format!("Loose crate {index}")),
             Authored,
+            Loose,
             loose,
             RigidBody::Dynamic,
             loose.collider(),
             ColliderDensity(props::LOOSE_DENSITY),
+            // The same number, sent once, so a client that has to predict this crate weighs it the
+            // same way rather than assuming there is only one kind.
+            Density(props::LOOSE_DENSITY),
             CollisionLayers::new(Layer::Body, LayerMask::ALL),
             Position(at),
             HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
@@ -478,6 +482,13 @@ fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
 /// Generous. Reaching for a door handle is not the interesting part of this, and a radius that has
 /// to be hunted for turns a one-key action into a game of its own.
 const REACH: f32 = 4.0;
+
+/// On a crate that the solver moves, as opposed to one on rails.
+///
+/// Server-side. A client tells the two apart by what it has been asked to do with them, which is
+/// the only difference that matters to it.
+#[derive(Component, Clone, Copy)]
+struct Loose;
 
 /// On a vehicle: who is driving it. Server-side; a client works it out from what it predicts.
 #[derive(Component, Clone, Copy)]
@@ -579,6 +590,60 @@ fn use_vehicles(
         ));
         info!("{:?} got in", owner.0);
     }
+}
+
+/// FixedUpdate: hands the loose crates to whoever is driving, and takes them back afterwards.
+///
+/// A driver has to predict the crates, and the reason is a measurement rather than a preference.
+/// An interpolated crate is `RigidBody::Static` on a client and stands at the pose it had a
+/// round trip ago, so a predicted vehicle drives into an immovable wall in the past while the
+/// server pushes straight through it: four seconds of that produced **245 rollbacks — one per
+/// server update — moving the vehicle by up to 7.4 m**. Predicted, both sides shove the same crate
+/// on the same tick and there is nothing to correct.
+///
+/// It is not a retraction of the rule that a crate is interpolated. The rule is that a peer
+/// predicts what it has the information to compute, and behind the wheel that is exactly what the
+/// driver has: the crate is moved by *their* bumper. The information they lack is somebody else's
+/// shot, which arrives as a correction — measured earlier at a median of 3.7 cm — and which the
+/// driver is in the worst position to care about, since nobody shoots from the driver's seat.
+///
+/// Everyone who is *not* driving keeps the interpolated crate, and with it a rewound hitbox that is
+/// exactly where the server says it was. That is the half of the trade worth protecting.
+///
+/// Written only when the set of drivers changes. Replication components are not free to churn, and
+/// this would otherwise rewrite four crates sixty-four times a second to say the same thing.
+fn crates_follow_the_drivers(
+    drivers: Query<&Owner, With<Driving>>,
+    crates: Query<Entity, With<Loose>>,
+    mut last: Local<Vec<PeerId>>,
+    mut commands: Commands,
+) {
+    let now: Vec<PeerId> = drivers.iter().map(|owner| owner.0).collect();
+    // Compared as a set rather than a list, because a query's order is not a promise and a
+    // reordering is not a change. `PeerId` is not `Ord`, and for the handful of drivers a server
+    // has, a scan beats reaching for a hash set.
+    if now.len() == last.len() && now.iter().all(|peer| last.contains(peer)) {
+        return;
+    }
+    *last = now.clone();
+
+    // `Only`/`AllExcept` rather than the single-peer pair the vehicle uses: there can be as many
+    // drivers as there are vehicles, and every one of them needs the same crates.
+    let (predicted, interpolated) = if now.is_empty() {
+        (NetworkTarget::None, NetworkTarget::All)
+    } else {
+        (
+            NetworkTarget::Only(now.iter().copied().collect()),
+            NetworkTarget::AllExcept(now.iter().copied().collect()),
+        )
+    };
+    for entity in crates.iter() {
+        commands.entity(entity).insert((
+            PredictionTarget::to_clients(predicted.clone()),
+            InterpolationTarget::to_clients(interpolated.clone()),
+        ));
+    }
+    info!("{} driver(s) now predict the loose crates", now.len());
 }
 
 /// FixedUpdate: hands each vehicle the input of whoever is sitting in it.
