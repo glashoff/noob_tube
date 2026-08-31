@@ -1310,10 +1310,40 @@ everywhere, including on an empty road with nothing to hit, for the passenger re
 
 **What it does not show is the case `"world"` exists for.** A parked vehicle is something `"full"`
 can predict, so this table is `"world"` paying its cost with none of its benefit; the case it is
-meant for is a vehicle *another player* is driving, where `"full"` has no answer at all. Measuring
-that needs two clients. An attempt to stand one in — stripping the prediction target off a parked
-vehicle to leave it interpolated the way a driven one is — did not work, because the client went on
-predicting it, so that row is missing rather than estimated.
+meant for is a vehicle *another player* is driving.
+
+#### Predicting a vehicle somebody else is driving
+
+Which `"full"` can now do, and could not before, because `Controls` travels.
+
+The objection was that a client cannot predict another player's vehicle, having none of their input.
+That is true of the input and false of the vehicle: the *result* of that input — throttle, handbrake,
+where the wheels point and where the driver is asking them to point — is four numbers, and it
+arrives every update like any other replicated state. A client that holds them for the length of its
+prediction window is guessing how much a driver changed their mind in a round trip, which is very
+little. Compare that with the alternative it replaces, which was a frozen box standing in the past.
+
+`wanted_steer` travels beside `steer` for a specific reason. Holding the *angle* freezes a turn
+halfway through it; holding the *intent* lets a peer keep easing the wheels exactly as the server is
+easing them, so a driver holding full lock is predicted through the whole turn and is wrong only
+from the moment they actually let go.
+
+Measured against a vehicle driven by nobody this client can see, at 100 ms of ping with 10 % loss —
+full throttle to 16 m/s, then the same again into full lock:
+
+| | rollbacks in 2.5 s |
+|---|---|
+| accelerating in a straight line | 0 |
+| accelerating into a full-lock turn | 0 |
+
+Two bugs surfaced on the way there, and the second was the better find. The server never eased the
+wheels of a vehicle with nobody in it — `take_the_wheel` only reaches occupied ones — so every
+client predicting a driverless vehicle went on easing while the server did not: a disagreement
+invented by the split rather than by the network, worth 78 rollbacks in two and a half seconds. And
+stepping out of a vehicle left `Controls` at whatever they last were, so getting out at full
+throttle left it accelerating away by itself for the rest of the round. Nothing cleared them,
+because nothing had ever needed to before the driving step started running on vehicles nobody was
+driving.
 
 Still missing: standing on a vehicle rather than being inside it, passengers, a camera that gets out
 of the way of walls, and running people over.

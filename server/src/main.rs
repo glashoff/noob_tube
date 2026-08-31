@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use lightyear::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use noob_tube_shared::simulation;
-use noob_tube_shared::tuning::NetConfig;
+use noob_tube_shared::tuning::{NetConfig, VehiclePrediction};
 use noob_tube_shared::level;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::physics::{Layer, Level, PhysicsPlugin};
@@ -71,7 +71,13 @@ fn main() {
             (
                 // Getting in and out first: it decides who is walking this tick and who is driving,
                 // and both of the steps below depend on that answer.
-                (use_vehicles, the_driverless_follow_the_drivers, take_the_wheel).chain(),
+                (
+                    use_vehicles,
+                    the_world_follows_the_drivers,
+                    take_the_wheel,
+                    ease_the_driverless,
+                )
+                    .chain(),
                 resolve_shots,
                 (
                     simulation::step_players::<()>,
@@ -538,7 +544,6 @@ type Parked = (
 /// camera changes half a round trip after the key, which for something that happens once a minute
 /// is a fair price for never having to un-seat anyone.
 fn use_vehicles(
-    net: Res<NetConfig>,
     mut players: Query<Reaching>,
     mut vehicles: Query<Parked, With<VehicleKind>>,
     mut commands: Commands,
@@ -564,11 +569,10 @@ fn use_vehicles(
             state.velocity = Vec3::ZERO;
             commands.entity(player).remove::<Driving>();
             commands.entity(vehicle).remove::<(Driver, Driven)>();
-            // Nobody predicts it again: with no input behind it there is nothing to predict from.
-            commands.entity(vehicle).insert((
-                PredictionTarget::to_clients(NetworkTarget::None),
-                InterpolationTarget::to_clients(NetworkTarget::All),
-            ));
+            // Hands off the wheel, and not only for tidiness. `Controls` is what the driving step
+            // reads, nothing else clears it, and stepping out at full throttle would otherwise
+            // leave the vehicle accelerating away by itself for the rest of the round.
+            commands.entity(vehicle).insert(Controls::default());
             info!("{:?} got out", owner.0);
             continue;
         }
@@ -590,78 +594,79 @@ fn use_vehicles(
             // steering from the parked ones it merely predicts.
             Driven(who.peer),
             Controls::default(),
-            // The driver predicts it and everyone else interpolates it — the same split a player
-            // gets, for the same reason: the input that moves it is theirs, so they are the one peer
-            // that can compute where it will be without being told. Unless the switch says
-            // otherwise, in which case nobody computes it and everybody is told.
-            PredictionTarget::to_clients(if net.predict_vehicles.simulates_the_vehicle() {
-                NetworkTarget::Single(owner.0)
-            } else {
-                NetworkTarget::None
-            }),
-            InterpolationTarget::to_clients(if net.predict_vehicles.simulates_the_vehicle() {
-                NetworkTarget::AllExceptSingle(owner.0)
-            } else {
-                NetworkTarget::All
-            }),
         ));
+        // Who predicts what is decided in one place, by `the_world_follows_the_drivers` below —
+        // including this vehicle. Setting it here as well would be two systems writing the same
+        // components in the same tick, with the answer decided by which ran last.
         info!("{:?} got in", owner.0);
     }
 }
 
-/// FixedUpdate: hands everything driverless to whoever is driving, and takes it back afterwards.
+/// FixedUpdate: lets a vehicle nobody is driving finish the turn its wheels were in.
 ///
-/// Driverless means a loose crate or a vehicle with nobody in it: something a bumper can move that
-/// has no input of its own behind it. A driver has to predict all of it, and the reason is a
-/// measurement rather than a preference. Interpolated, such a thing is `RigidBody::Static` on a
-/// client and stands at the pose it had a round trip ago, so a predicted vehicle drives into an
-/// immovable copy of it in the past while the server pushes straight through the real one. Four
-/// seconds of that, at 100 ms of ping with 10 % loss:
+/// The mirror of the client's `hold_the_course`, and it exists so that the two sides run the same
+/// model on the same vehicles. `take_the_wheel` only reaches vehicles with somebody in them, so
+/// without this the server would leave a driverless vehicle's steering frozen while every client
+/// predicting it went on easing — which is a disagreement invented by the split rather than by the
+/// network.
+///
+/// In practice it eases zeroes, because a vehicle stepped out of has its controls reset. That is
+/// the point: it is here so that the rule is "wheels ease, always" rather than "wheels ease when
+/// somebody is looking".
+fn ease_the_driverless(
+    time: Res<Time<Fixed>>,
+    mut vehicles: Query<(&VehicleKind, &mut Controls), Without<Driver>>,
+) {
+    let dt = time.delta_secs();
+    for (kind, mut controls) in vehicles.iter_mut() {
+        controls.ease(kind.spec(), dt);
+    }
+}
+
+/// FixedUpdate: decides who predicts what, and it is the only thing that decides it.
+///
+/// Everything a bumper can reach has to be predicted by the driver about to reach it, or the client
+/// meets an immovable copy of it standing a round trip in the past while the server pushes through
+/// the real one. Measured, four seconds of that at 100 ms of ping with 10 % loss:
 ///
 /// | | rollbacks | worst correction |
 /// |---|---|---|
 /// | into one crate | 237 | 173 cm |
 /// | into a parked vehicle | 208 | 140 cm |
 ///
-/// The parked vehicle is the worse of the two despite being hit more gently, and the reason is
-/// mass. A 40 kg crate barely slows a 1200 kg buggy, so even a wrong answer was nearly right; two
-/// vehicles of the same mass trade half their momentum, so the client's "it is a wall" and the
-/// server's "they both move" have nothing in common. It showed up as the vehicle crawling forward
-/// at half a metre a second and shaking.
+/// The vehicle is the worse of the two despite the gentler impact, and the reason is mass. A 40 kg
+/// crate barely slows a 1200 kg buggy, so even a wrong answer was nearly right; two vehicles of the
+/// same mass trade half their momentum, so "it is a wall" and "they both move" have nothing in
+/// common. It showed as the vehicle crawling forward at half a metre a second and shaking.
 ///
-/// It is not a retraction of the rule that a crate is interpolated. The rule is that a peer
-/// predicts what it has the information to compute, and behind the wheel that is exactly what the
-/// driver has: these things are moved by *their* bumper. The information they lack is somebody
-/// else's shot, which arrives as a correction — measured earlier at a median of 3.7 cm — and which
-/// the driver is in the worst position to care about, since nobody shoots from the driver's seat.
+/// **A vehicle somebody else is driving is in here too**, which it could not be until [`Controls`]
+/// travelled. Its input belongs to a peer this client never hears from — but the *result* of that
+/// input arrives every update, and a client that holds the last one for the length of its
+/// prediction window is guessing about how much a driver changed their mind in a round trip, which
+/// is very little. That is the whole of what replicating the controls bought.
 ///
-/// Everyone who is *not* driving keeps the interpolated copy, and with it a rewound hitbox that is
-/// exactly where the server says it was. That is the half of the trade worth protecting.
+/// What each setting of [`predict_vehicles`](noob_tube_shared::tuning::NetConfig::predict_vehicles)
+/// asks for:
 ///
-/// **A vehicle somebody else is driving is deliberately not in here.** It has an input behind it,
-/// and that input belongs to a peer this one never hears from, so there is nothing to predict from
-/// and `Without<Driver>` says so. Two driven vehicles colliding is a genuinely harder problem than
-/// this system solves and is not solved here.
+/// - `Full`: every vehicle and every loose crate, to every driver. The bumper and what it hits are
+///   on the same tick on both sides.
+/// - `World`: each vehicle to its own driver only, and no crates at all. There is no predicted
+///   chassis for a crate to agree with — see [`VehiclePrediction::World`] — so handing one over
+///   would buy a rollback and nothing else.
+/// - `Off`: nothing to anybody.
 ///
 /// Written only when the set of drivers changes. Replication components are not free to churn, and
 /// this would otherwise rewrite six entities sixty-four times a second to say the same thing.
-fn the_driverless_follow_the_drivers(
+fn the_world_follows_the_drivers(
     net: Res<NetConfig>,
-    drivers: Query<&Owner, With<Driving>>,
+    driving: Query<&Owner, With<Driving>>,
+    owners: Query<&Owner>,
+    vehicles: Query<(Entity, Option<&Driver>), With<VehicleKind>>,
     crates: Query<Entity, With<Loose>>,
-    parked: Query<Entity, (With<VehicleKind>, Without<Driver>)>,
     mut last: Local<Vec<PeerId>>,
     mut commands: Commands,
 ) {
-    // Only the fullest setting hands anything over. With the vehicle predicted against the level
-    // alone its chassis does not collide with a crate at all, so there is nothing for a predicted
-    // crate to agree with; with nothing predicted there is no bumper either. In both cases the
-    // crates stay interpolated — and rewound exactly, which is what that buys.
-    let now: Vec<PeerId> = if net.predict_vehicles.simulates_contacts() {
-        drivers.iter().map(|owner| owner.0).collect()
-    } else {
-        Vec::new()
-    };
+    let now: Vec<PeerId> = driving.iter().map(|owner| owner.0).collect();
     // Compared as a set rather than a list, because a query's order is not a promise and a
     // reordering is not a change. `PeerId` is not `Ord`, and for the handful of drivers a server
     // has, a scan beats reaching for a hash set.
@@ -670,23 +675,47 @@ fn the_driverless_follow_the_drivers(
     }
     *last = now.clone();
 
-    // `Only`/`AllExcept` rather than the single-peer pair the vehicle uses: there can be as many
-    // drivers as there are vehicles, and every one of them needs the same crates.
-    let (predicted, interpolated) = if now.is_empty() {
-        (NetworkTarget::None, NetworkTarget::All)
-    } else {
-        (
-            NetworkTarget::Only(now.iter().copied().collect()),
-            NetworkTarget::AllExcept(now.iter().copied().collect()),
-        )
-    };
-    for entity in crates.iter().chain(parked.iter()) {
-        commands.entity(entity).insert((
-            PredictionTarget::to_clients(predicted.clone()),
-            InterpolationTarget::to_clients(interpolated.clone()),
-        ));
+    /// `Only`/`AllExcept` rather than the single-peer pair, because there can be as many drivers as
+    /// there are vehicles and every one of them needs the same answer.
+    fn addressed(peers: &[PeerId]) -> (PredictionTarget, InterpolationTarget) {
+        if peers.is_empty() {
+            (
+                PredictionTarget::to_clients(NetworkTarget::None),
+                InterpolationTarget::to_clients(NetworkTarget::All),
+            )
+        } else {
+            (
+                PredictionTarget::to_clients(NetworkTarget::Only(peers.iter().copied().collect())),
+                InterpolationTarget::to_clients(NetworkTarget::AllExcept(
+                    peers.iter().copied().collect(),
+                )),
+            )
+        }
     }
-    info!("{} driver(s) now predict everything driverless", now.len());
+
+    for (entity, driver) in vehicles.iter() {
+        let audience: Vec<PeerId> = match net.predict_vehicles {
+            VehiclePrediction::Full => now.clone(),
+            // Its own driver and nobody else: they are predicting it against the level, and the
+            // level is all they are predicting it against.
+            VehiclePrediction::World => driver
+                .and_then(|driver| owners.get(driver.0).ok())
+                .map(|owner| vec![owner.0])
+                .unwrap_or_default(),
+            VehiclePrediction::Off => Vec::new(),
+        };
+        commands.entity(entity).insert(addressed(&audience));
+    }
+
+    let watching = if net.predict_vehicles.simulates_contacts() {
+        now.as_slice()
+    } else {
+        &[]
+    };
+    for entity in crates.iter() {
+        commands.entity(entity).insert(addressed(watching));
+    }
+    info!("{} driver(s) now predict the world around them", now.len());
 }
 
 /// FixedUpdate: hands each vehicle the input of whoever is sitting in it.

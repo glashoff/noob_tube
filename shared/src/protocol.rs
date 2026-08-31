@@ -17,7 +17,7 @@ use lightyear_avian3d::prelude::LightyearAvianPlugin;
 
 use crate::player::{Aim, Player, PlayerInput, PlayerState};
 use crate::props::{Density, Prop};
-use crate::vehicle::{Driven, Driving, VehicleKind};
+use crate::vehicle::{Controls, Driven, Driving, VehicleKind};
 use crate::shooting::{Health, ShotFired};
 use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
@@ -71,6 +71,12 @@ impl Plugin for ProtocolPlugin {
         // guessed wrong would climb into a seat someone else had taken.
         app.component::<Driving>().replicate();
         app.component::<Driven>().replicate();
+        // What the driver is asking of the vehicle, every tick, and predicted like a player's own
+        // state. For the vehicle a client drives this is redundant — it derives the same value from
+        // the same input the server saw — and for every *other* vehicle it is the only thing that
+        // makes prediction possible at all: the input behind them belongs to peers this client
+        // never hears from, and this is the result of that input, arriving as fast as anything can.
+        app.component::<Controls>().replicate().predict();
         // Health is the server's alone. A client predicting whether its shot landed would have to
         // un-kill someone on screen when the server disagreed, and there is no graceful way to do
         // that — so this only ever arrives.

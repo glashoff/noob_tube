@@ -56,6 +56,7 @@ impl Plugin for VehiclePlugin {
                 // and the driver is put in the seat after the vehicle has moved.
                 (
                     take_the_wheel,
+                    hold_the_course,
                     vehicle::drive_vehicles::<With<Predicted>>,
                     vehicle::right_flipped_vehicles::<With<Predicted>>,
                 )
@@ -178,10 +179,13 @@ fn fit_for_the_solver(
             ColliderDensity(spec.density()),
             CenterOfMass(Vec3::NEG_Y * spec.centre_of_mass_drop),
             CollisionLayers::new(Layer::Body, against),
-            Controls::default(),
-            // Starts at zero on both sides. A vehicle handed over while it is already on its roof
-            // waits out the delay again on this client, which costs a second and a half once and
-            // saves having to replicate a counter that is otherwise nobody's business.
+            // `Controls` is deliberately not inserted here: it is replicated, so it arrives with
+            // the vehicle, and writing a default over it would be this system racing the wire for
+            // a value only the server knows.
+            //
+            // `Righting` is the opposite case and starts at zero on both sides. A vehicle handed
+            // over while it is already on its roof waits out the delay again on this client, which
+            // costs a second and a half once and saves replicating a counter nobody else wants.
             Righting::default(),
         ));
         info!("simulating a {kind:?} for myself");
@@ -199,7 +203,7 @@ fn fit_for_the_solver(
                 RigidBody::Static,
                 CollisionLayers::new(Layer::Body, LayerMask::ALL),
             ))
-            .remove::<(Controls, Righting)>();
+            .remove::<Righting>();
         info!("a vehicle went back to being interpolated");
     }
 }
@@ -232,6 +236,32 @@ fn take_the_wheel(
             continue;
         }
         controls.apply_input(kind.spec(), &action.0, dt);
+    }
+}
+
+/// FixedUpdate: keeps a vehicle this client predicts but does not drive turning the way it was.
+///
+/// The other half of [`take_the_wheel`], and the thing replicating [`Controls`] was for. The
+/// throttle and the handbrake are held at whatever last arrived, which is the best a peer can do
+/// about somebody else's key; the steering is *continued* rather than held, because the intent
+/// travels beside the angle and the easing is the same on both sides. A driver who is holding full
+/// left is predicted through the whole turn; one who lets go is predicted wrongly for exactly as
+/// long as it takes that news to arrive.
+///
+/// Deliberately after `take_the_wheel` and filtered against it, so the vehicle this client steers
+/// is never eased twice in a tick.
+fn hold_the_course(
+    time: Res<Time<Fixed>>,
+    driver: Option<Single<&Player, OwnDriver>>,
+    mut vehicles: Query<(&VehicleKind, Option<&Driven>, &mut Controls), With<Predicted>>,
+) {
+    let mine = driver.map(|me| me.peer);
+    let dt = time.delta_secs();
+    for (kind, driven, mut controls) in vehicles.iter_mut() {
+        if driven.map(|driven| driven.0) == mine && mine.is_some() {
+            continue;
+        }
+        controls.ease(kind.spec(), dt);
     }
 }
 

@@ -302,7 +302,15 @@ pub struct Driven(pub u64);
 /// state in here that a replay could get wrong. `steer` is the exception and deliberately so — it
 /// is the wheels' *current* angle, eased toward what is being asked for, and easing is a thing with
 /// memory. Replay reproduces it because it starts from the same angle and sees the same inputs.
-#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
+///
+/// **Replicated**, and that is what lets a client predict a vehicle it is not driving. Its own it
+/// derives from its own input; anyone else's it cannot, because that input belongs to a peer it
+/// never hears from — but the *result* of that input arrives here every update, and holding the
+/// last one for the length of the prediction window is a far better guess than a frozen box in the
+/// past. That is the whole reason [`wanted_steer`](Self::wanted_steer) travels alongside the angle:
+/// with the driver's intent in hand, a client can keep easing the wheels the way the server is
+/// easing them, rather than freezing them mid-turn.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(Component)]
 pub struct Controls {
     /// −1 hard on the brakes, +1 full throttle.
@@ -311,6 +319,13 @@ pub struct Controls {
     pub steer: f32,
     /// Everything locked, for stopping and for turning without rolling.
     pub handbrake: bool,
+    /// Where the driver is asking the front wheels to point, which is where `steer` is heading.
+    ///
+    /// The intent rather than the state, and the two are different for up to a fifth of a second at
+    /// [`steer_rate`](VehicleSpec::steer_rate). A peer holding only the angle would freeze a turn
+    /// halfway through it; a peer holding the intent finishes the turn exactly as the server does,
+    /// and is wrong only from the moment the driver actually changes their mind.
+    pub wanted_steer: f32,
 }
 
 impl Controls {
@@ -318,13 +333,21 @@ impl Controls {
     pub fn apply_input(&mut self, spec: &VehicleSpec, input: &PlayerInput, dt: f32) {
         self.throttle = (input.forward as i32 - input.backward as i32) as f32;
         self.handbrake = input.jump;
+        self.wanted_steer = (input.right as i32 - input.left as i32) as f32 * spec.max_steer;
+        self.ease(spec, dt);
+    }
 
-        let wanted = (input.right as i32 - input.left as i32) as f32 * spec.max_steer;
+    /// Advances the wheels toward what was last asked for, with no new input to go on.
+    ///
+    /// What a peer runs for a vehicle it predicts but does not drive. It is the same easing
+    /// `apply_input` ends with, so a client that keeps calling this reproduces the server's steering
+    /// exactly for as long as the driver holds the wheel where it is.
+    pub fn ease(&mut self, spec: &VehicleSpec, dt: f32) {
         let step = spec.steer_rate * dt;
-        self.steer = if (wanted - self.steer).abs() <= step {
-            wanted
+        self.steer = if (self.wanted_steer - self.steer).abs() <= step {
+            self.wanted_steer
         } else {
-            self.steer + (wanted - self.steer).signum() * step
+            self.steer + (self.wanted_steer - self.steer).signum() * step
         };
     }
 }
