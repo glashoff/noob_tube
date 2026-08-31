@@ -114,7 +114,6 @@ impl Rewind {
 type Shooter = (
     Entity,
     &'static PlayerState,
-    &'static Aim,
     &'static ActionState<PlayerInput>,
     &'static Player,
     &'static ControlledBy,
@@ -138,6 +137,10 @@ type Wounded = (
 ///
 /// Two passes, because a shooter cannot hold everyone else's health mutably while looking for a
 /// target. The first reads; the second writes.
+// Eight parameters, and every one of them is a thing this system genuinely depends on. A Bevy
+// system's signature *is* its dependency list, so splitting it to satisfy a count would hide the
+// dependencies rather than remove them.
+#[allow(clippy::too_many_arguments)]
 fn resolve_shots(
     world: Res<CollisionWorld>,
     net: Res<NetConfig>,
@@ -167,7 +170,7 @@ fn resolve_shots(
         .collect();
 
     let mut hits: Vec<(Entity, u64)> = Vec::new();
-    for (shooter, state, aim, action, player, controlled) in players.p0().iter() {
+    for (shooter, state, action, player, controlled) in players.p0().iter() {
         if !state.is_firing(&action.0) {
             continue;
         }
@@ -255,7 +258,12 @@ fn resolve_shots(
             })
             .collect();
 
-        let (origin, direction) = shooting::aim_ray(state.eye_position(), aim.yaw, aim.pitch);
+        // The angles come from *this* tick's input, not from `Aim`. `Aim` is written at the end of
+        // a tick by `step_players`, so reading it here would aim every shot with the previous
+        // tick's angles — 15.6 ms of mouse movement stale, which during a flick is a visible
+        // offset, and which the client could not reproduce when predicting its own shot.
+        let input = action.0;
+        let (origin, direction) = shooting::aim_ray(state.eye_position(), input.yaw, input.pitch);
         let shot = shooting::resolve(&world, origin, direction, targets);
         // Told to everyone, hit or miss: a shot that struck a wall beside you is as much a part of
         // knowing where the fire is coming from as one that struck you.

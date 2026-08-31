@@ -17,10 +17,12 @@
 
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
-use lightyear::prelude::{MessageReceiver, Predicted};
+use lightyear::prelude::input::native::ActionState;
+use lightyear::prelude::{MessageReceiver, Predicted, Rollback, client};
 use noob_tube_shared::collision::CollisionWorld;
-use noob_tube_shared::player::Player;
-use noob_tube_shared::shooting::ShotFired;
+use noob_tube_shared::player::{Player, PlayerInput, PlayerState};
+use noob_tube_shared::shooting::{self, ShotFired};
+use noob_tube_shared::simulation;
 
 use crate::crosshair;
 
@@ -52,7 +54,18 @@ impl Plugin for ShotEffectsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Holes>()
             .add_systems(Startup, load_assets)
-            .add_systems(Update, (draw_shots, forget_effects));
+            .add_systems(Update, (draw_shots, forget_effects))
+            .add_systems(
+                FixedUpdate,
+                predict_own_tracer
+                    // Before the step, exactly as on the server: the step starts the cooldown, so
+                    // afterwards the answer to "is this tick a shot" is always no. Same rule, same
+                    // order, same answer.
+                    .before(simulation::step_players::<With<Predicted>>)
+                    // A rollback re-runs this schedule for every replayed tick. Without this a
+                    // single correction would redraw every tracer of the last twenty ticks at once.
+                    .run_if(not(resource_exists::<Rollback>)),
+            );
     }
 }
 
@@ -108,6 +121,54 @@ fn load_assets(
     });
 }
 
+/// What a shot is fired from: the trigger and this tick's input, plus where the eye is.
+type Shooter = (&'static ActionState<PlayerInput>, &'static PlayerState);
+/// A player a shot could stop in.
+type Target = (Entity, &'static PlayerState);
+/// Everyone the server is replicating to us except ourselves.
+type Drawn = (With<client::Remote>, Without<Predicted>);
+
+/// FixedUpdate: draws our own tracer the moment we fire, without waiting to be told.
+///
+/// The client is not deciding anything here. `fire_cooldown` lives in `PlayerState`, which is
+/// predicted, so the client and the server run the same rule over the same input and pick out the
+/// same ticks; this only *uses* an answer the client already had. The server remains the authority,
+/// and a client that lied about its rate of fire would still be ignored — the shot it invented has
+/// no effect on anyone.
+///
+/// What it buys is the same thing predicting the cooldown buys: at 100 ms of ping, waiting for the
+/// server's `ShotFired` puts half a round trip between the click and the line on screen, on top of
+/// a tracer that only lives for 50 ms. That reads as a weapon disconnected from the trigger.
+///
+/// Only the tracer. The bullet hole and the hit marker still come from the server, and they can
+/// afford to: a hole lasts twelve seconds, so arriving 50 ms late is invisible, and a *hit* is
+/// exactly the thing a client must never guess at — the server rewinds the world to decide it, and
+/// a predicted kill it then denied could not be taken back.
+fn predict_own_tracer(
+    mine: Option<Single<Shooter, With<Predicted>>>,
+    // Everyone else, at the position they are being *drawn* at. That is the honest local answer to
+    // where the shot goes, and it is the same view the server reconstructs to resolve the hit.
+    others: Query<Target, Drawn>,
+    world: Option<Res<CollisionWorld>>,
+    assets: Option<Res<ShotAssets>>,
+    mut commands: Commands,
+) {
+    let (Some(mine), Some(world), Some(assets)) = (mine, world, assets) else {
+        return;
+    };
+    let (action, state) = *mine;
+    let input = action.0;
+    if !state.is_firing(&input) {
+        return;
+    }
+    let (origin, direction) = shooting::aim_ray(state.eye_position(), input.yaw, input.pitch);
+    let targets = others
+        .iter()
+        .map(|(entity, other)| (entity, other.position, other.crouching));
+    let shot = shooting::resolve(&world, origin, direction, targets);
+    spawn_tracer(&mut commands, &assets, origin, shot.point(origin, direction), true);
+}
+
 /// Update: draws every shot the server has told us about.
 fn draw_shots(
     mut inbox: Query<&mut MessageReceiver<ShotFired>>,
@@ -121,7 +182,11 @@ fn draw_shots(
     for mut receiver in inbox.iter_mut() {
         for shot in receiver.receive() {
             let own = own_peer == Some(shot.shooter);
-            spawn_tracer(&mut commands, &assets, &shot, own);
+            // Our own tracer was drawn the moment we fired — see `predict_own_tracer`. Drawing it
+            // again now would put a second line half a round trip behind the first.
+            if !own {
+                spawn_tracer(&mut commands, &assets, shot.from, shot.to, false);
+            }
 
             if shot.hit_player {
                 // No decal on a player: they move, and a hole pinned to the world where they
@@ -139,8 +204,8 @@ fn draw_shots(
 }
 
 /// The bright line along the shot's path.
-fn spawn_tracer(commands: &mut Commands, assets: &ShotAssets, shot: &ShotFired, own: bool) {
-    let direction = (shot.to - shot.from).normalize_or_zero();
+fn spawn_tracer(commands: &mut Commands, assets: &ShotAssets, from: Vec3, to: Vec3, own: bool) {
+    let direction = (to - from).normalize_or_zero();
     if direction == Vec3::ZERO {
         return;
     }
@@ -149,12 +214,12 @@ fn spawn_tracer(commands: &mut Commands, assets: &ShotAssets, shot: &ShotFired, 
         let right = direction.cross(Vec3::Y).normalize_or_zero();
         // Never more than a third of the way to the target: at point-blank range a muzzle a fixed
         // 1.6 m out puts most of the tracer against the camera, where perspective makes it a blob.
-        let ahead = MUZZLE_OFFSET.z.min(shot.from.distance(shot.to) * 0.35);
-        shot.from + right * MUZZLE_OFFSET.x + Vec3::Y * MUZZLE_OFFSET.y + direction * ahead
+        let ahead = MUZZLE_OFFSET.z.min(from.distance(to) * 0.35);
+        from + right * MUZZLE_OFFSET.x + Vec3::Y * MUZZLE_OFFSET.y + direction * ahead
     } else {
-        shot.from
+        from
     };
-    let length = start.distance(shot.to);
+    let length = start.distance(to);
     if length < 0.01 {
         return;
     }
@@ -166,8 +231,8 @@ fn spawn_tracer(commands: &mut Commands, assets: &ShotAssets, shot: &ShotFired, 
         NotShadowCaster,
         Mesh3d(assets.tracer.clone()),
         MeshMaterial3d(assets.tracer_material.clone()),
-        Transform::from_translation(start.lerp(shot.to, 0.5))
-            .looking_at(shot.to, Vec3::Y)
+        Transform::from_translation(start.lerp(to, 0.5))
+            .looking_at(to, Vec3::Y)
             // The mesh is a unit box along Z; stretching it is what makes it a line.
             .with_scale(Vec3::new(1.0, 1.0, length)),
     ));

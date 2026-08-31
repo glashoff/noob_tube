@@ -825,10 +825,42 @@ on a player puts a marker on the shooter's crosshair instead: white ticks with d
 the players are red and a red marker on the body it just hit would be invisible exactly when it
 matters.
 
-None of it is decided locally. The server resolves every shot and sends a `ShotFired` — shooter,
-muzzle, endpoint, and whether it stopped in a player — to everyone including the shooter. A client
-drawing its own shots would show hits the server never granted, and two players would be watching
-different fights.
+The server resolves every shot and sends a `ShotFired` — shooter, muzzle, endpoint, and whether it
+stopped in a player — to everyone including the shooter.
+
+**One's own tracer is predicted.** Automatic fire is not split into shots by either side alone:
+`fire_cooldown` lives in `PlayerState`, which is predicted, so the client and the server run the
+same `fire && cooldown == 0` over the same input and pick out the same ticks. The client already
+knew which ticks were shots; it simply did nothing with it. Now it draws the line immediately.
+
+The distinction that matters is between the client *computing* that and the client *deciding* it. A
+client that sent discrete "shoot now" events would set its own rate of fire, which is the cheat. A
+client that replays a shared rule while the server does the same is prediction, and the invented
+shot of a lying client still has no effect on anyone.
+
+Only the tracer, though. The bullet hole and the hit marker still come from the server, and they can
+afford to: a hole lasts twelve seconds, so arriving late is invisible, and a *hit* is exactly the
+thing a client must never guess — the server rewinds the world to decide it, and a predicted kill it
+then denied could not be taken back. The rule is the same one prediction always follows: predict
+what has to be instant and is over in a moment, take from the server what is long-lived and
+authoritative.
+
+Both are consequences of the same shot, so the gap between them measures what the prediction is
+worth:
+
+| ping | own tracer | bullet hole (server) | saved |
+|---|---|---|---|
+| 100 ms | 22 ms | 178 ms | **157 ms** |
+| 300 ms | 13 ms | 379 ms | **366 ms** |
+
+and over the same runs, 16 and 17 holes for about two seconds of fire — 7.3 and 7.1 a second against
+the 8.0 the cooldown allows. One tracer per shot, not two.
+
+Finding this needed one fix first. `resolve_shots` aimed with the replicated `Aim`, which
+`step_players` writes at the *end* of a tick — so every shot went off with the previous tick's
+angles, 15.6 ms of mouse movement stale. Invisible until a client tried to reproduce it, at which
+point the two would have drawn different lines. The angles now come from the same tick's input on
+both sides.
 
 It goes **unreliably**, on a channel of its own. A tracer lives for 50 ms, so a retransmitted one
 arrives after the moment it belongs to, and drawing it then is worse than not drawing it. The
