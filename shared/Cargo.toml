@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+avian3d = { workspace = true }
 bevy = { workspace = true }
 lightyear = { workspace = true }
 rapier3d = { workspace = true }

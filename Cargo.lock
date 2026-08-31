@@ -5930,6 +5930,7 @@ dependencies = [
 name = "noob_tube_shared"
 version = "0.1.0"
 dependencies = [
+ "avian3d",
  "bevy",
  "bevy_remote",
  "lightyear",

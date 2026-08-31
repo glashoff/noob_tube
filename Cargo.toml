@@ -32,6 +32,11 @@ bevy_remote = { version = "0.19.1", default-features = false, features = ["http"
 # rapier3d 0.35.3 pulls glam 0.33 and every vector would need translating.
 rapier3d = "=0.35.0-glamx0.2"
 
+# Avian, used for level collision, spatial queries and (from M-vehicles on) simulated bodies.
+# `default-features = false` keeps the debug renderer, picking and mesh conversion out of the
+# headless server; `parry-f32` is what switches on the `Collider` type at all.
+avian3d = { version = "0.7", default-features = false, features = ["3d", "f32", "parry-f32"] }
+
 [profile.dev]
 opt-level = 1
 # Enough debug info to keep the file and line in a panic, and nothing else. Full debug info is for
