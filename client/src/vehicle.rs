@@ -21,11 +21,30 @@ use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::{Predicted, client};
 use noob_tube_shared::physics::Layer;
-use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::player::{Player, PlayerInput, PlayerState};
+use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::vehicle::{
-    self, probe_wheels, Controls, Driven, Driving, Righting, VehicleKind, Wheels, WHEELS,
+    self, Controls, Driven, Driving, Righting, VehicleKind, WHEELS, Wheels, probe_wheels,
 };
+
+/// The visual model, under the asset directory.
+///
+/// Not in the repository, and `/assets/` is gitignored for the reason already written down there:
+/// licensed for use, not for redistribution. Each developer brings their own copy. That is also why
+/// nothing here may *require* it — see [`give_bodies`], which falls back to a box.
+const MODEL: &str = "models/warthog.glb";
+
+/// How long the model is along its own X axis, in its own units.
+///
+/// Read out of the file rather than guessed: the glTF is a Sketchfab export normalised into a
+/// 2 x 0.893 x 0.994 box, so every other number here is a ratio against this one. If the file is
+/// ever replaced, these three constants are what has to be measured again.
+const MODEL_LENGTH: f32 = 2.0;
+/// How far the model's origin sits above the point its tyres touch, in its own units.
+const MODEL_GROUND: f32 = 0.446;
+/// Which way the model faces. Its windscreen and steering wheel are at −X and its antenna at +X, so
+/// its nose points along −X where everything in this game points along −Z: a quarter turn.
+const MODEL_YAW: f32 = -core::f32::consts::FRAC_PI_2;
 
 /// A vehicle that has just arrived and has nothing to be seen as yet.
 type Arrived = (With<client::Remote>, Added<VehicleKind>);
@@ -49,7 +68,10 @@ pub struct VehiclePlugin;
 impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<Wheel>()
-            .add_systems(Update, (give_bodies, fit_for_the_solver, place_wheels).chain())
+            .add_systems(
+                Update,
+                (give_bodies, fit_for_the_solver, place_wheels).chain(),
+            )
             .add_systems(
                 FixedUpdate,
                 // The same order the server uses: the controls are read before they are acted on,
@@ -87,10 +109,17 @@ struct Wheel(usize);
 /// simulating something the server has already decided.
 fn give_bodies(
     arrived: Query<(Entity, &VehicleKind), Arrived>,
+    assets: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
 ) {
+    // Asked of the filesystem once per arrival rather than of the asset server, because the two
+    // answer different questions. The asset server would report a missing file asynchronously,
+    // some frames after the vehicle has already been given a body, and by then the choice between
+    // the model and the box has been made. This is the same thing the config loader does with the
+    // settings file, for the same reason.
+    let modelled = std::path::Path::new(crate::ASSETS).join(MODEL).exists();
     for (entity, kind) in arrived.iter() {
         let spec = kind.spec();
         let paint = materials.add(StandardMaterial {
@@ -110,8 +139,10 @@ fn give_bodies(
 
         commands.entity(entity).insert((
             Name::from("Buggy"),
-            Mesh3d(meshes.add(Cuboid::from_size(spec.half_extents * 2.0))),
-            MeshMaterial3d(paint),
+            // Without a mesh of its own this entity has no visibility of its own either, and a
+            // child that has one under a parent that does not is a Bevy warning and an
+            // inconsistency waiting to happen.
+            Visibility::default(),
             spec.collider(),
             RigidBody::Static,
             // Inert while the vehicle is interpolated, and the two sides have to agree the moment
@@ -123,6 +154,26 @@ fn give_bodies(
             CollisionLayers::new(Layer::Body, LayerMask::ALL),
             Wheels::default(),
         ));
+        if modelled {
+            // Scaled by its length, so the model and the shape a shot is tested against are the
+            // same size along the axis a driver notices most. Lifted so the tyres it is drawn with
+            // touch the ground the springs settle it at, rather than the model's own origin doing.
+            let scale = spec.half_extents.z * 2.0 / MODEL_LENGTH;
+            commands.entity(entity).with_child((
+                Name::from("Buggy model"),
+                WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(MODEL))),
+                Transform::from_xyz(0.0, MODEL_GROUND * scale - spec.ride_height(), 0.0)
+                    .with_rotation(Quat::from_rotation_y(MODEL_YAW))
+                    .with_scale(Vec3::splat(scale)),
+            ));
+        } else {
+            // No model on this machine: a box the right size, so the vehicle is still visible and
+            // still the shape the collider says it is.
+            commands.entity(entity).insert((
+                Mesh3d(meshes.add(Cuboid::from_size(spec.half_extents * 2.0))),
+                MeshMaterial3d(paint),
+            ));
+        }
         for index in 0..WHEELS {
             commands.spawn((
                 Name::from(format!("Wheel {index}")),
@@ -132,6 +183,14 @@ fn give_bodies(
                 // Placed properly on the first frame by `place_wheels`; this only has to be
                 // somewhere while the transform propagation catches up.
                 Transform::from_translation(spec.mounts[index]).with_rotation(lay_flat),
+                // Placed every frame by `place_wheels` either way, because where a wheel sits is
+                // worth knowing whether or not it is being drawn — the debug view and any future
+                // skid mark reads it. Hidden when the model is used, which brings its own tyres.
+                if modelled {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Inherited
+                },
                 ChildOf(entity),
             ));
         }

@@ -1386,6 +1386,35 @@ gets stuck is not an anchor. Whatever else turns out to be wrong with it, that c
 Measured over 75 seconds: it stays inside about 90 by 130 metres, reaches 21 m/s, and is standing
 still in 2 samples out of 50.
 
+#### What it looks like
+
+A Warthog, by pinto36, CC BY 4.0 — the credit and the source link are in `assets/CREDITS.md`, and
+none of it was typed off a web page: the glTF carries it in `asset.extras`, which is what Sketchfab
+writes on export.
+
+Three numbers are read out of the file rather than guessed, because it is a Sketchfab export
+normalised into a 2 x 0.893 x 0.994 box: how long it is along its own X, how far its origin sits
+above where its tyres touch, and which way it faces. Its windscreen and steering wheel are at −X and
+its antenna at +X, so it wants a quarter turn to point along −Z like everything else here. It is
+then scaled by its length, so the model and the shape a shot is tested against agree along the axis
+a driver notices most.
+
+**Nothing requires it.** `/assets/` is ignored file by file and this one is let through because CC
+BY allows it; the animation library beside it is not. A client with no model on disk gets the box it
+always had, with its four cylinders visible — checked, because that is the state every other
+developer's first checkout is in. The choice is made from the filesystem rather than from the asset
+server, which would answer asynchronously, some frames after the vehicle already needed a body.
+
+The model brings its own wheels, so ours are spawned and placed as before but hidden. That costs the
+suspension travel on screen, which is a real loss — landing a jump compresses 0.46 to 0.63 m and now
+none of it shows. Putting the model's tyre mesh on our own wheel entities would give it back, and is
+the next thing here.
+
+Two things had to change around it. Bevy's asset root defaults to `assets/` beside the executable,
+which for a cargo build is `target/debug/assets` — a directory `cargo clean` deletes; it is
+anchored to the source tree instead. And `jpeg` is not in Bevy's default features, so the geometry
+loaded and the textures did not, which shows up as one line in the log and an untextured model.
+
 Still missing: standing on a vehicle rather than being inside it, passengers, a camera that gets out
 of the way of walls, and running people over.
 

@@ -1,25 +1,25 @@
 //! Game client: renders the world, samples input, predicts the local player.
 
 mod bot;
+mod corrections;
 mod crosshair;
 mod debug_draw;
 mod harness;
-mod local_player;
-mod corrections;
 mod hud;
+mod local_player;
 mod props;
-mod vehicle;
 mod remote_players;
 mod shot_effects;
+mod vehicle;
 mod world;
 
 use bevy::app::{PluginGroupBuilder, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::ExitCondition;
+use core::time::Duration;
 use lightyear::prelude::*;
 use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, SERVER_PORT};
-use core::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};
 
 fn main() {
@@ -78,9 +78,24 @@ fn main() {
 /// is left out, and a plain loop drives the schedule instead of an event loop. Rendering is still
 /// set up, so meshes, materials and the camera all behave — there is simply nowhere for the frames
 /// to go. What does *not* work headless is the screenshot harness, which needs a surface.
+/// Where the asset server looks, as an absolute path fixed at build time.
+///
+/// Bevy's default is `assets/` beside the executable, which for a cargo build means
+/// `target/debug/assets` — a directory `cargo clean` deletes and nobody would think to put anything
+/// in. Anchoring it to the source tree instead puts the assets where they are edited.
+///
+/// Absolute, and that is the limitation: a binary copied to another machine looks for the path it
+/// was built at. Shipping one means making this relative and putting the assets beside it, which is
+/// a packaging question and is not one yet.
+pub const ASSETS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../assets");
+
 fn windowing() -> PluginGroupBuilder {
     if std::env::var("NOOB_TUBE_HEADLESS").is_ok_and(|value| value != "0") {
         return DefaultPlugins
+            .set(AssetPlugin {
+                file_path: ASSETS.into(),
+                ..default()
+            })
             .set(WindowPlugin {
                 primary_window: None,
                 // Without this the app exits the moment it notices it has no windows.
@@ -91,15 +106,22 @@ fn windowing() -> PluginGroupBuilder {
             .disable::<bevy::winit::WinitPlugin>()
             // 240 Hz: fast enough that the fixed timestep never starves, slow enough not to spin a
             // core for nothing.
-            .add(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / 240.0)));
+            .add(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+                1.0 / 240.0,
+            )));
     }
-    DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "Noob Tube".into(),
+    DefaultPlugins
+        .set(AssetPlugin {
+            file_path: ASSETS.into(),
             ..default()
-        }),
-        ..default()
-    })
+        })
+        .set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Noob Tube".into(),
+                ..default()
+            }),
+            ..default()
+        })
 }
 
 /// Reads our own settings, then asks the server for the one it owns.
@@ -130,7 +152,10 @@ fn configure() -> NetConfig {
             if net.tick_hz == ours {
                 println!("server at {addr} agrees on {} Hz", net.tick_hz);
             } else {
-                println!("server at {addr} runs {} Hz, adopting it over our {ours}", net.tick_hz);
+                println!(
+                    "server at {addr} runs {} Hz, adopting it over our {ours}",
+                    net.tick_hz
+                );
             }
         }
         None => println!(

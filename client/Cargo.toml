@@ -7,7 +7,10 @@ license.workspace = true
 [dependencies]
 noob_tube_shared = { workspace = true }
 avian3d = { workspace = true }
-bevy = { workspace = true, features = ["default"] }
+# `jpeg` is not in Bevy's defaults, and a glTF whose textures are JPEG loads its geometry and then
+# fails on the images — visibly, as an untextured model, with one line in the log. Vehicle assets
+# are the first thing here to bring their own textures.
+bevy = { workspace = true, features = ["default", "jpeg"] }
 lightyear = { workspace = true }
 # In-process inspector window. Its egui and bevy_egui versions are tied to this exact release,
 # so it moves in lockstep with Bevy just as bevy_remote does.

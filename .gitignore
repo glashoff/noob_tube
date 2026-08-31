@@ -1,8 +1,11 @@
 /target
 
-# Character assets are licensed for use but not redistribution — see README,
-# "Character assets: an open question". Each developer downloads their own copy.
-/assets/
+# Assets are ignored by default and let through one at a time, because the reason differs per file:
+# the character animations are licensed for use but not redistribution — see README, "Character
+# assets: an open question" — while the vehicle model is CC BY and may travel with the repository.
+# Whatever is let through must have an entry in assets/CREDITS.md.
+/assets/*
+!/assets/CREDITS.md
 
 # Byte-code from running the Python helpers in tools/
 __pycache__/
