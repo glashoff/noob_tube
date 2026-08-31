@@ -1,7 +1,9 @@
 //! What the screen says about itself.
 //!
 //! One line, bottom left: how far the drawn player has been from the simulated one over the last
-//! second, and how much of that the rollback smoothing accounts for.
+//! second, and how much of that the rollback smoothing accounts for. The *player*, not the camera —
+//! the camera sits seven metres behind a vehicle while driving, and that is a choice about framing
+//! rather than anything being wrong.
 //!
 //! It is on screen rather than in the log because it is a *feel* question. The measurements in
 //! [`corrections`](crate::corrections) say what the numbers are under a scripted walk; this says

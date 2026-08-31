@@ -13,21 +13,47 @@
 //! pose — so they follow the body exactly, with none of the stepping that a replicated wheel
 //! position would have.
 
-use avian3d::prelude::{CollisionLayers, LayerMask, Position, RigidBody, Rotation, SpatialQuery};
+use avian3d::prelude::{
+    CenterOfMass, ColliderDensity, CollisionLayers, LayerMask, PhysicsSystems, Position, RigidBody,
+    Rotation, SpatialQuery,
+};
 use bevy::prelude::*;
-use lightyear::prelude::client;
+use lightyear::prelude::input::native::ActionState;
+use lightyear::prelude::{Predicted, client};
 use noob_tube_shared::physics::Layer;
-use noob_tube_shared::vehicle::{probe_wheels, VehicleKind, Wheels, WHEELS};
+use noob_tube_shared::player::{PlayerInput, PlayerState};
+use noob_tube_shared::vehicle::{self, probe_wheels, Controls, Driving, VehicleKind, Wheels, WHEELS};
 
 /// A vehicle that has just arrived and has nothing to be seen as yet.
 type Arrived = (With<client::Remote>, Added<VehicleKind>);
+/// A vehicle this client has just been handed to drive, or has just given back.
+type NowDriven = (With<VehicleKind>, Added<Predicted>);
+/// This client's own player, while they are behind a wheel.
+type OwnDriver = (With<Predicted>, With<Driving>);
+/// The one vehicle this client simulates for itself, which is the one it is driving.
+type OwnVehicle = (With<VehicleKind>, With<Predicted>);
 
 pub struct VehiclePlugin;
 
 impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<Wheel>()
-            .add_systems(Update, (give_bodies, place_wheels).chain());
+            .add_systems(Update, (give_bodies, fit_for_driving, place_wheels).chain())
+            .add_systems(
+                FixedUpdate,
+                // The same order the server uses: the controls are read before they are acted on,
+                // and the driver is put in the seat after the vehicle has moved.
+                (take_the_wheel, vehicle::drive_vehicles::<With<Predicted>>).chain(),
+            )
+            // Explicitly after the solver, because Avian runs in this schedule too. Without the
+            // ordering the two are ambiguous and the driver is placed at the vehicle's pose from
+            // *before* the step on some runs — a tick's worth of the vehicle's speed, which at
+            // 13 m/s is 20 cm of position error arriving as a rollback every update. The server has
+            // the same ordering for the same reason.
+            .add_systems(
+                FixedPostUpdate,
+                carry_driver.after(PhysicsSystems::StepSimulation),
+            );
     }
 }
 
@@ -91,6 +117,85 @@ fn give_bodies(
         }
         info!("drawing a {kind:?}");
     }
+}
+
+/// Update: gives a vehicle the body it needs for whichever side of the line it is on.
+///
+/// The line is prediction, and it moves at runtime: the server hands a vehicle to whoever climbs
+/// into it, so the same entity is interpolated one moment and predicted the next. Interpolated, it
+/// is [`RigidBody::Static`] and lightyear writes its pose. Predicted, it has to be simulated here —
+/// so it needs the mass and the centre of gravity the server gave it, and Avian has to be allowed
+/// to move it.
+///
+/// Getting the swap wrong is silent in the worst way. A predicted vehicle left static would take
+/// the throttle and not move; an interpolated one left dynamic would fall through the replicated
+/// pose being written on top of it every update.
+fn fit_for_driving(
+    took_over: Query<(Entity, &VehicleKind), NowDriven>,
+    mut gave_up: RemovedComponents<Predicted>,
+    kinds: Query<&VehicleKind>,
+    mut commands: Commands,
+) {
+    for (entity, kind) in took_over.iter() {
+        let spec = kind.spec();
+        commands.entity(entity).insert((
+            RigidBody::Dynamic,
+            ColliderDensity(spec.density()),
+            CenterOfMass(Vec3::NEG_Y * spec.centre_of_mass_drop),
+            Controls::default(),
+        ));
+        info!("driving a {kind:?}");
+    }
+    for entity in gave_up.read() {
+        if kinds.get(entity).is_err() {
+            continue;
+        }
+        commands
+            .entity(entity)
+            .insert(RigidBody::Static)
+            .remove::<Controls>();
+        info!("gave the wheel back");
+    }
+}
+
+/// FixedUpdate: hands the vehicle this client's own input.
+///
+/// The one place the two sides differ from each other, and only in how the driver is found. The
+/// server looks up who is in the seat; a client does not have to, because the only vehicle it
+/// predicts is the one it is driving. Everything downstream reads [`Controls`] and cannot tell.
+///
+/// The input comes from the `ActionState` rather than from this frame's keyboard, because that is
+/// what lightyear refills while replaying a rollback. Reading the keyboard here would replay twenty
+/// ticks of steering with whatever is being held *now*.
+fn take_the_wheel(
+    time: Res<Time<Fixed>>,
+    driver: Option<Single<&ActionState<PlayerInput>, OwnDriver>>,
+    mut vehicles: Query<(&VehicleKind, &mut Controls), With<Predicted>>,
+) {
+    let Some(driver) = driver else {
+        return;
+    };
+    let dt = time.delta_secs();
+    for (kind, mut controls) in vehicles.iter_mut() {
+        controls.apply_input(kind.spec(), &driver.0, dt);
+    }
+}
+
+/// FixedPostUpdate: a driver is wherever their vehicle ended up.
+///
+/// The mirror of the server's own, and it has to exist: the walking step skips a seated player, so
+/// without this their predicted position would be left wherever they got in — and that position is
+/// what the camera stands at and what a shot leaves from.
+fn carry_driver(
+    vehicle: Option<Single<(&Position, &Rotation), OwnVehicle>>,
+    driver: Option<Single<&mut PlayerState, OwnDriver>>,
+) {
+    let (Some(vehicle), Some(mut driver)) = (vehicle, driver) else {
+        return;
+    };
+    let (position, rotation) = *vehicle;
+    driver.position = position.0 + rotation.0 * Vec3::new(0.0, -0.4, 0.0);
+    driver.velocity = Vec3::ZERO;
 }
 
 /// Update: hangs each wheel as far down its strut as the ground allows.

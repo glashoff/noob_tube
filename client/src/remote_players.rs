@@ -17,6 +17,7 @@ use noob_tube_shared::movement::{
     BODY_HALF_HEIGHT, BODY_RADIUS, BODY_Y_OFFSET, HEAD_SIZE, HEAD_Y,
 };
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
+use noob_tube_shared::vehicle::Driving;
 use noob_tube_shared::tuning::NetConfig;
 
 use crate::local_player::CurrentInput;
@@ -27,7 +28,7 @@ impl Plugin for RemotePlayersPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (give_bodies, claim_own_player, place_bodies, place_heads)
+            (give_bodies, claim_own_player, hide_the_seated, place_bodies, place_heads)
                 .chain()
                 // Interpolation writes the smoothed values into `PlayerState` and `Aim` in Update
                 // as well. Without this the capsules would render whatever last frame's sample
@@ -148,6 +149,23 @@ fn place_bodies(
     for (state, aim, mut transform) in bodies.iter_mut() {
         transform.translation = state.position + Vec3::Y * BODY_Y_OFFSET;
         transform.rotation = Quat::from_rotation_y(aim.yaw);
+    }
+}
+
+/// Update: a player in a vehicle is inside the bodywork, so stop drawing them.
+///
+/// Hidden rather than despawned. They are still a replicated entity with a pose and a hitbox — they
+/// can still be shot, and they come back the moment they get out — and rebuilding the meshes on
+/// every exit would be work done for nothing.
+///
+/// Cheap enough to run every frame: it writes only when the answer changes, so the change detection
+/// downstream stays quiet.
+fn hide_the_seated(mut bodies: Query<(&mut Visibility, Has<Driving>), With<PlayerState>>) {
+    for (mut visibility, driving) in bodies.iter_mut() {
+        let wanted = if driving { Visibility::Hidden } else { Visibility::Inherited };
+        if *visibility != wanted {
+            *visibility = wanted;
+        }
     }
 }
 

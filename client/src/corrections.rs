@@ -18,15 +18,20 @@
 //! replay runs `FixedMain` inline between them. This is what decided that a *predicted* crate had
 //! to go — a median snap of 3.7 cm and up to 79 cm, in one frame.
 //!
-//! **How far the camera jumps in one rendered frame**, over and above what walking explains. A raw
-//! per-frame step is useless on its own: at 5.5 m/s and 30 fps, moving is 18 cm a frame, and a
-//! 15 cm jump would hide inside it. Subtracting `speed x frame time` leaves only what movement
-//! cannot account for. Not gated on a rollback, because the point is the opposite: measuring every
-//! frame is what makes a smoothed correction show up, as its absence.
+//! **How far the drawn player jumps in one rendered frame**, over and above what moving explains. A
+//! raw per-frame step is useless on its own: at 5.5 m/s and 30 fps, moving is 18 cm a frame, and a
+//! 15 cm jump would hide inside it. Subtracting the distance actually covered leaves only what
+//! movement cannot account for. Not gated on a rollback, because the point is the opposite:
+//! measuring every frame is what makes a smoothed correction show up, as its absence.
 //!
-//! **How far the drawn camera is from the simulation.** The price of the smoothing, and the reason
+//! **How far the drawn player is from the simulation.** The price of the smoothing, and the reason
 //! it cannot simply be made slower and slower: a view that never jumps but trails half a metre
 //! behind the position shots are fired from is worse than the jump.
+//!
+//! Both are measured on the *player*, not on the camera, and that is not a detail. The camera sits
+//! seven metres behind a vehicle while driving, and reading the camera's own position reported that
+//! as seven metres of error. Nothing about where the camera is put belongs in a measurement of how
+//! wrong the picture is.
 //!
 //! The player's own rollback error is deliberately *not* measured here any more. Frame
 //! interpolation writes the visual pose into the live `PlayerState` in `PostUpdate` and restores
@@ -42,7 +47,7 @@ use std::collections::VecDeque;
 use lightyear::prelude::{Predicted, Rollback, RollbackSystems};
 use noob_tube_shared::player::PlayerState;
 
-use crate::local_player::{LocalPlayer, MovementTicks, ViewError};
+use crate::local_player::{MovementTicks, ViewError};
 
 /// Everything this client simulates for itself that is not its own player: the loose crates today,
 /// a vehicle it is driving later.
@@ -90,7 +95,7 @@ pub struct Corrections {
     pub count: u32,
     /// The worst any predicted body — a crate, later a vehicle — has been moved, in metres.
     pub worst_body: f32,
-    /// The furthest the drawn camera has ever been from where the simulation says the eye is.
+    /// The furthest the drawn player has ever been from where the simulation says they are.
     pub worst_lag: f32,
     /// The same over the last second, and how much of it the rollback smoothing accounted for.
     ///
@@ -103,7 +108,7 @@ pub struct Corrections {
     /// whole, from two different moments in the same second.
     pub lag_last_second: f32,
     pub smoothing_last_second: f32,
-    /// The furthest the camera has jumped in one rendered frame beyond what walking explains.
+    /// The furthest the drawn player has jumped in one rendered frame beyond what moving explains.
     ///
     /// This is the number a player actually sees, and the one that says whether smoothing works: a
     /// correction changes it and not the rollback figures, because the simulation still takes the
@@ -120,11 +125,15 @@ pub struct Corrections {
     countdown: f32,
     #[reflect(ignore)]
     since: Vec<f32>,
-    /// Where the camera was last frame, and the worst step since the last summary.
+    /// Where the player was drawn last frame, and the worst step since the last summary.
     #[reflect(ignore)]
     eye: Option<Vec3>,
-    /// Where the simulation last put the eye, as opposed to where it was drawn, and how fast it
-    /// was going — which is how much of a frame's movement is explained rather than jumped.
+    /// Where the simulation last put the eye, as opposed to where it was drawn, and how fast it was
+    /// actually covering ground — which is how much of a frame's movement is explained.
+    ///
+    /// The speed is measured from the simulated position itself rather than read off `velocity`,
+    /// because the two part company: a player pressed against a wall has 5.5 m/s of velocity and
+    /// goes nowhere, and a driver's velocity is zero while the vehicle carries them along.
     #[reflect(ignore)]
     simulated_eye: Option<Vec3>,
     #[reflect(ignore)]
@@ -183,18 +192,18 @@ fn watch_the_camera(
     mut corrections: ResMut<Corrections>,
     time: Res<Time>,
     smoothing: Res<ViewError>,
-    camera: Single<&GlobalTransform, With<LocalPlayer>>,
+    drawn: Option<Single<&PlayerState, With<Predicted>>>,
 ) {
-    // Nothing to compare against until there is a player: the camera sits at the origin before one
-    // arrives and then moves to the spawn point in one frame, which is a teleport, not a jump.
-    if corrections.simulated_eye.is_none() {
+    // Nothing to compare against until there is a player, and nothing to compare it with until the
+    // simulation has run a tick: the first frame is a teleport from the origin, not a jump.
+    let (Some(drawn), true) = (drawn, corrections.simulated_eye.is_some()) else {
         corrections.eye = None;
         return;
-    }
-    let eye = camera.translation();
+    };
+    let eye = drawn.eye_position();
     if let Some(was) = corrections.eye {
-        // Only the part walking cannot explain. A frame that took 30 ms legitimately moves the
-        // camera 18 cm at full speed, and a jump has to be told apart from that.
+        // Only the part moving cannot explain. A frame that took 30 ms legitimately moves the
+        // player 18 cm at running speed, and a jump has to be told apart from that.
         let walked = corrections.speed * time.delta_secs();
         let jumped = (was.distance(eye) - walked).max(0.0);
         corrections.worst_frame = corrections.worst_frame.max(jumped);
@@ -230,13 +239,17 @@ fn watch_the_camera(
 /// only overwrites the live component later, in `PostUpdate`.
 fn note_the_simulated_eye(
     mut corrections: ResMut<Corrections>,
+    time: Res<Time<Fixed>>,
     player: Option<Single<&PlayerState, With<Predicted>>>,
 ) {
     let Some(state) = player else {
         return;
     };
-    corrections.simulated_eye = Some(state.eye_position());
-    corrections.speed = state.velocity.length();
+    let eye = state.eye_position();
+    if let Some(was) = corrections.simulated_eye {
+        corrections.speed = was.distance(eye) / time.delta_secs();
+    }
+    corrections.simulated_eye = Some(eye);
 }
 
 /// Update: a line every ten seconds, but only when there was something to say.
@@ -256,8 +269,8 @@ fn summarise(mut corrections: ResMut<Corrections>, time: Res<Time>) {
         return;
     }
     info!(
-        "view: {seen} rollbacks in {SUMMARY_EVERY:.0} s, biggest camera jump in one frame \
-         {:.1} cm, furthest the camera trailed the simulation {:.1} cm \
+        "view: {seen} rollbacks in {SUMMARY_EVERY:.0} s, biggest jump in one frame {:.1} cm, \
+         furthest the picture trailed the simulation {:.1} cm \
          (all time: worst body snap {:.1} cm)",
         stepped * 100.0,
         lag * 100.0,

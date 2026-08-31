@@ -63,6 +63,8 @@ impl Plugin for SharedTypesPlugin {
             // sees what the suspension thinks it is doing.
             .register_type::<crate::vehicle::Wheel>()
             .register_type::<crate::vehicle::Wheels>()
-            .register_type::<crate::vehicle::VehicleKind>();
+            .register_type::<crate::vehicle::VehicleKind>()
+            .register_type::<crate::vehicle::Controls>()
+            .register_type::<crate::vehicle::Driving>();
     }
 }

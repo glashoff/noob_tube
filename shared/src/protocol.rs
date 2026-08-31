@@ -17,7 +17,7 @@ use lightyear_avian3d::prelude::LightyearAvianPlugin;
 
 use crate::player::{Aim, Player, PlayerInput, PlayerState};
 use crate::props::Prop;
-use crate::vehicle::VehicleKind;
+use crate::vehicle::{Driving, VehicleKind};
 use crate::shooting::{Health, ShotFired};
 use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
@@ -62,6 +62,10 @@ impl Plugin for ProtocolPlugin {
         // have — see [`VehicleKind`](crate::vehicle::VehicleKind) for why tuning is shared
         // knowledge rather than replicated state.
         app.component::<VehicleKind>().replicate_once();
+        // Whether a player is in a vehicle. Replicated rather than sent once, because it comes and
+        // goes; not predicted, because getting in is the server's decision and a client that
+        // guessed wrong would climb into a seat someone else had taken.
+        app.component::<Driving>().replicate();
         // Health is the server's alone. A client predicting whether its shot landed would have to
         // un-kill someone on screen when the server disagreed, and there is no graceful way to do
         // that — so this only ever arrives.

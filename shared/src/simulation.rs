@@ -14,8 +14,20 @@ use lightyear::prelude::input::native::ActionState;
 
 use crate::physics::Level;
 use crate::player::{Aim, PlayerInput, PlayerState};
+use crate::vehicle::Driving;
+
+/// A player on their feet: what they are asking for, where they are, and where they are looking.
+type Walking = (
+    &'static ActionState<PlayerInput>,
+    &'static mut PlayerState,
+    &'static mut Aim,
+);
 
 /// FixedUpdate: advances every matching player by exactly one tick.
+///
+/// Except the ones in a vehicle. A seated player has no legs: their pose comes from the vehicle,
+/// and running the walking step on them as well would have two things writing the same position
+/// every tick.
 ///
 /// During a rollback lightyear re-runs the whole `FixedMain` schedule once per replayed tick, so
 /// this is also the replay. It must therefore read nothing but its arguments: `Time<Fixed>` gives
@@ -24,7 +36,7 @@ use crate::player::{Aim, PlayerInput, PlayerState};
 pub fn step_players<F: QueryFilter + 'static>(
     level: Level,
     time: Res<Time<Fixed>>,
-    mut players: Query<(&ActionState<PlayerInput>, &mut PlayerState, &mut Aim), F>,
+    mut players: Query<Walking, (F, Without<Driving>)>,
 ) {
     let dt = time.delta_secs();
 

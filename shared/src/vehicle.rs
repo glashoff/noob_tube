@@ -19,7 +19,7 @@
 //! a driver it has no input at all, so for now nobody predicts it and every client interpolates
 //! what the server sends.
 //!
-//! That is why [`suspend_vehicles`] takes a query filter, exactly as
+//! That is why [`drive_vehicles`] takes a query filter, exactly as
 //! [`step_players`](crate::simulation::step_players) does: the server steps every vehicle, and a
 //! client will step only the one it is driving.
 
@@ -29,9 +29,12 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::physics::{Layer, WORLD_GRAVITY};
+use crate::player::PlayerInput;
 
 /// How many struts a vehicle has. Four, and the code says so once rather than in six places.
 pub const WHEELS: usize = 4;
+/// How many of them steer, and they are the first ones in [`VehicleSpec::mounts`].
+pub const FRONT_WHEELS: usize = 2;
 
 /// Which vehicle this is.
 ///
@@ -90,6 +93,30 @@ pub struct VehicleSpec {
     pub grip: f32,
     /// The same, for the speed a free-rolling wheel loses. Small: a wheel is meant to roll.
     pub rolling_resistance: f32,
+    /// How much sideways force a tyre can hold, as a multiple of the load on it.
+    ///
+    /// This is what turns [`grip`](Self::grip) from a wish into a limit. A rate alone would let a
+    /// tyre take out any amount of sideways speed however lightly it was loaded, and at full lock a
+    /// hard turn then scrubbed a vehicle to a standstill in three seconds — measured, before this
+    /// existed. A real tyre can only pull about its own load sideways, so a wheel in the air holds
+    /// nothing, a lightly loaded inside wheel holds little, and cornering too fast understeers
+    /// instead of stopping dead.
+    pub friction: f32,
+    /// Newtons the engine puts through the tyres at full throttle, across all four.
+    pub drive_force: f32,
+    /// Newtons the brakes can take out, across all four.
+    pub brake_force: f32,
+    /// How far the front wheels turn at full lock, in radians.
+    pub max_steer: f32,
+    /// How fast they get there, in radians per second. A steering wheel is not a switch, and a
+    /// front axle that snapped to full lock in one tick would flip the vehicle on the spot.
+    pub steer_rate: f32,
+    /// Metres per second past which the engine stops pushing.
+    ///
+    /// Not a cap on the speed — a hill will still take it faster. It is where the drive force
+    /// tapers to nothing, which is what a gearbox and drag do in a real vehicle and what stops a
+    /// constant force from accelerating for ever.
+    pub top_speed: f32,
 }
 
 impl VehicleSpec {
@@ -153,7 +180,69 @@ pub const BUGGY: VehicleSpec = VehicleSpec {
     damping: 2_000.0,
     grip: 16.0,
     rolling_resistance: 0.15,
+    // A shade over 1 g of cornering, which is a good road tyre and a generous off-road one.
+    friction: 1.2,
+    // 12 kN through 1200 kg is 10 m/s²: nought to twenty in two seconds, which is brisk rather
+    // than silly. Brakes stronger than the engine, as on anything that has to stop as well as go.
+    drive_force: 12_000.0,
+    brake_force: 20_000.0,
+    // About 31 degrees of lock, reached in a fifth of a second.
+    max_steer: 0.55,
+    steer_rate: 3.0,
+    top_speed: 25.0,
 };
+
+/// On a player: they are in a vehicle rather than on their feet.
+///
+/// Replicated, because everyone needs it. The driver's own client switches the camera to the
+/// vehicle; every other client stops drawing that player, since they are inside the bodywork.
+/// [`step_players`](crate::simulation::step_players) skips them, which is the whole of "you cannot
+/// walk while driving".
+///
+/// A marker rather than the vehicle's entity. A client already knows which vehicle it is driving —
+/// it is the only one it predicts — and an entity reference across the wire needs mapping, which is
+/// a whole mechanism to buy something nobody asked for.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Reflect, Serialize, Deserialize)]
+#[reflect(Component)]
+pub struct Driving;
+
+/// What the driver is asking for, this tick.
+///
+/// A component rather than something worked out inside the driving step, because the two sides
+/// arrive at it differently and the step must not care: the server looks up whoever is in the seat,
+/// a client uses its own input and knows there is only one vehicle it could possibly be driving.
+/// Everything after this point is identical on both.
+///
+/// It is derived fresh from the input every tick, so a rollback reproduces it exactly; there is no
+/// state in here that a replay could get wrong. `steer` is the exception and deliberately so — it
+/// is the wheels' *current* angle, eased toward what is being asked for, and easing is a thing with
+/// memory. Replay reproduces it because it starts from the same angle and sees the same inputs.
+#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
+#[reflect(Component)]
+pub struct Controls {
+    /// −1 hard on the brakes, +1 full throttle.
+    pub throttle: f32,
+    /// Where the front wheels actually point, in radians. Negative is left.
+    pub steer: f32,
+    /// Everything locked, for stopping and for turning without rolling.
+    pub handbrake: bool,
+}
+
+impl Controls {
+    /// Advances the controls by one tick of a driver's intent.
+    pub fn apply_input(&mut self, spec: &VehicleSpec, input: &PlayerInput, dt: f32) {
+        self.throttle = (input.forward as i32 - input.backward as i32) as f32;
+        self.handbrake = input.jump;
+
+        let wanted = (input.right as i32 - input.left as i32) as f32 * spec.max_steer;
+        let step = spec.steer_rate * dt;
+        self.steer = if (wanted - self.steer).abs() <= step {
+            wanted
+        } else {
+            self.steer + (wanted - self.steer).signum() * step
+        };
+    }
+}
 
 /// Where one wheel ended up this tick.
 ///
@@ -192,6 +281,7 @@ pub fn vehicle_body(kind: VehicleKind, at: Vec3, facing: Quat) -> impl Bundle {
     (
         kind,
         Wheels::default(),
+        Controls::default(),
         RigidBody::Dynamic,
         spec.collider(),
         ColliderDensity(spec.density()),
@@ -248,20 +338,25 @@ pub fn probe_wheels(
     })
 }
 
-/// FixedUpdate: holds every matching vehicle up on its springs, and keeps its tyres from sliding.
+/// FixedUpdate: holds every matching vehicle up on its springs, and does what the driver asked.
 ///
 /// Runs before the solver step in `FixedPostUpdate`, which is what consumes the forces; both are
 /// inside `FixedMain`, so a rollback replays this once per replayed tick exactly as it replays
 /// movement. It reads nothing but its arguments and the collider trees, which is what makes that
 /// replay reproduce the same result.
-pub fn suspend_vehicles<F: QueryFilter + 'static>(
+///
+/// **Steering is not a torque.** Turning the front wheels only changes which way their grip points;
+/// the sideways force that grip produces is what swings the vehicle round, at the contact patch,
+/// through the length of the wheelbase. That is why a vehicle with a wheel in the air understeers
+/// and one on ice does not turn at all, without any of it being written down anywhere.
+pub fn drive_vehicles<F: QueryFilter + 'static>(
     space: SpatialQuery,
     time: Res<Time<Fixed>>,
-    mut vehicles: Query<(Entity, &VehicleKind, &mut Wheels, Forces), F>,
+    mut vehicles: Query<(Entity, &VehicleKind, &Controls, &mut Wheels, Forces), F>,
 ) {
     let dt = time.delta_secs();
 
-    for (entity, kind, mut wheels, mut body) in vehicles.iter_mut() {
+    for (entity, kind, controls, mut wheels, mut body) in vehicles.iter_mut() {
         let spec = kind.spec();
         let position = body.position().0;
         let rotation = body.rotation().0;
@@ -277,8 +372,11 @@ pub fn suspend_vehicles<F: QueryFilter + 'static>(
         // remove more than all of the speed and start pushing the other way.
         let grip = 1.0 - (-spec.grip * dt).exp();
         let drag = 1.0 - (-spec.rolling_resistance * dt).exp();
+        // Only the front wheels turn, and they turn the other way from the sign convention: a
+        // positive `steer` is a right turn, and rotating −Z about +Y by a positive angle goes left.
+        let steered = Quat::from_rotation_y(-controls.steer);
 
-        for wheel in &found {
+        for (index, wheel) in found.iter().enumerate() {
             if !wheel.grounded {
                 continue;
             }
@@ -286,25 +384,64 @@ pub fn suspend_vehicles<F: QueryFilter + 'static>(
             // Spring minus damper, and never negative: a strut can push the chassis away from the
             // ground, but it cannot pull it back down. Letting it go negative is how a car ends up
             // sucked onto the road and unable to leave a ramp.
-            let load = (spec.stiffness * wheel.compression - spec.damping * velocity.dot(up)).max(0.0);
+            let load =
+                (spec.stiffness * wheel.compression - spec.damping * velocity.dot(up)).max(0.0);
             body.apply_force_at_point(up * load, wheel.contact);
 
-            // Tyre friction, at the contact patch rather than at the centre of mass. That is what
+            // Which way this tyre is pointing. Flattened onto the ground first, or on a slope some
+            // of the grip would act as lift.
+            let turn = if index < FRONT_WHEELS { steered } else { Quat::IDENTITY };
+            let facing = rotation * turn;
+            let forward = (facing * Vec3::NEG_Z).reject_from(wheel.normal).normalize_or_zero();
+            let right = (facing * Vec3::X).reject_from(wheel.normal).normalize_or_zero();
+
+            // Sideways grip, at the contact patch rather than at the centre of mass. That is what
             // makes the body lean into a corner and dip under braking — the same force through a
             // longer lever arm — and it is also what lets it roll over if the mass sits too high.
             //
-            // Both directions are flattened onto the ground first, or on a slope some of the grip
-            // would act as lift.
-            let forward = (rotation * Vec3::NEG_Z).reject_from(wheel.normal).normalize_or_zero();
-            let right = (rotation * Vec3::X).reject_from(wheel.normal).normalize_or_zero();
+            // Capped by what this tyre is actually carrying. `load` is the suspension force that
+            // has just been applied through it, so an unloaded wheel grips nothing and the inside
+            // wheels of a fast corner grip less than the outside ones — which is understeer, and it
+            // arrives without being written down anywhere.
+            let wanted = -velocity.dot(right) * grip * share;
+            let strongest = spec.friction * load * dt;
             body.apply_linear_impulse_at_point(
-                right * (-velocity.dot(right) * grip * share),
+                right * wanted.clamp(-strongest, strongest),
                 wheel.contact,
             );
-            body.apply_linear_impulse_at_point(
-                forward * (-velocity.dot(forward) * drag * share),
-                wheel.contact,
-            );
+
+            let along = velocity.dot(forward);
+            // Braking covers three things that are the same act: the handbrake, asking to go
+            // backwards while still going forwards, and asking to go forwards while still rolling
+            // back. The half a metre a second is the dead band that lets the third become reverse
+            // rather than an eternal fight against a stopped vehicle.
+            let braking = controls.handbrake
+                || (controls.throttle < 0.0 && along > 0.5)
+                || (controls.throttle > 0.0 && along < -0.5);
+
+            if braking {
+                // At most what the brakes can take out this tick, and never more than the speed
+                // there is — overshooting would drive the vehicle backwards out of a stop.
+                let strongest = spec.brake_force / WHEELS as f32 * dt;
+                let needed = along.abs() * share;
+                body.apply_linear_impulse_at_point(
+                    forward * (-along.signum() * needed.min(strongest)),
+                    wheel.contact,
+                );
+            } else if controls.throttle != 0.0 {
+                // Tapered to nothing at the top speed. Not a cap — a hill will still take it
+                // faster — but it is what stops a constant force accelerating for ever, which is
+                // what a gearbox and the air do on a real vehicle.
+                let taper = (1.0 - along.abs() / spec.top_speed).clamp(0.0, 1.0);
+                let force = spec.drive_force / WHEELS as f32 * controls.throttle * taper;
+                body.apply_force_at_point(forward * force, wheel.contact);
+            } else {
+                // Coasting: a wheel is meant to roll, and only just resists it.
+                body.apply_linear_impulse_at_point(
+                    forward * (-along * drag * share),
+                    wheel.contact,
+                );
+            }
         }
 
         wheels.0 = found;
@@ -330,7 +467,7 @@ mod tests {
         app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / HZ,
         )));
-        app.add_systems(FixedUpdate, suspend_vehicles::<()>);
+        app.add_systems(FixedUpdate, drive_vehicles::<()>);
         app
     }
 
@@ -343,6 +480,17 @@ mod tests {
         // asks what the vehicle weighs.
         app.update();
         car
+    }
+
+    /// Puts the driver's hands on it. `steer` is the wheel angle, not the input.
+    fn hands(app: &mut App, car: Entity, throttle: f32, steer: f32) {
+        let mut controls = app.world_mut().get_mut::<Controls>(car).expect("controls");
+        controls.throttle = throttle;
+        controls.steer = steer * VehicleKind::Buggy.spec().max_steer;
+    }
+
+    fn facing(app: &App, car: Entity) -> Vec3 {
+        app.world().get::<Rotation>(car).expect("a rotation").0 * Vec3::NEG_Z
     }
 
     fn run(app: &mut App, seconds: f32) {
@@ -484,6 +632,107 @@ mod tests {
              are not gripping"
         );
         assert!(rolling > 6.0, "it coasts to {rolling:.2} m/s from 8: the wheels are dragging");
+    }
+
+    /// Full throttle has to move it, forwards, and not sideways or into the ground.
+    #[test]
+    fn the_throttle_drives_it_forward() {
+        let mut app = driving_app();
+        let spec = VehicleKind::Buggy.spec();
+        let car = park(&mut app, Vec3::Y * spec.ride_height());
+        run(&mut app, 0.5);
+        hands(&mut app, car, 1.0, 0.0);
+        run(&mut app, 2.0);
+
+        let travelled = pose(&app, car);
+        assert!(travelled.z < -8.0, "went {:.1} m in two seconds", -travelled.z);
+        assert!(travelled.x.abs() < 0.5, "wandered {:.2} m sideways", travelled.x);
+        assert!(
+            (travelled.y - spec.ride_height()).abs() < 0.1,
+            "left the ground, or dug into it: {:.2} m",
+            travelled.y
+        );
+    }
+
+    /// And the brakes have to stop it — without hauling it backwards through zero, which is what an
+    /// unbounded braking force does on the tick the speed runs out.
+    #[test]
+    fn the_brakes_stop_it_without_reversing_it() {
+        let mut app = driving_app();
+        let spec = VehicleKind::Buggy.spec();
+        let car = park(&mut app, Vec3::Y * spec.ride_height());
+        run(&mut app, 0.5);
+        hands(&mut app, car, 1.0, 0.0);
+        run(&mut app, 2.0);
+        let rolling = speed(&app, car).length();
+        assert!(rolling > 5.0, "never got going: {rolling:.1} m/s");
+
+        hands(&mut app, car, 0.0, 0.0);
+        app.world_mut().get_mut::<Controls>(car).unwrap().handbrake = true;
+        run(&mut app, 3.0);
+
+        let stopped = speed(&app, car);
+        assert!(stopped.length() < 0.2, "still doing {:.2} m/s", stopped.length());
+        assert!(stopped.z < 0.2, "the brakes pushed it backwards at {:.2} m/s", -stopped.z);
+    }
+
+    /// Steering right turns it right. The whole model rests on this: nothing applies a turning
+    /// torque anywhere — the front tyres simply grip in a different direction, and that is what
+    /// swings the back end round.
+    #[test]
+    fn steering_turns_it_the_way_the_wheels_point() {
+        let mut app = driving_app();
+        let spec = VehicleKind::Buggy.spec();
+        let car = park(&mut app, Vec3::Y * spec.ride_height());
+        run(&mut app, 0.5);
+        assert!(facing(&app, car).x.abs() < 1e-3, "did not start facing straight ahead");
+
+        hands(&mut app, car, 1.0, 1.0);
+        run(&mut app, 2.0);
+
+        let ahead = facing(&app, car);
+        assert!(ahead.x > 0.2, "full right lock turned it to {:?}", ahead);
+        assert!(pose(&app, car).x > 0.5, "it turned on the spot rather than driving round");
+    }
+
+    /// The drive force tapers off, or a constant push accelerates for ever.
+    #[test]
+    fn it_stops_accelerating_near_its_top_speed() {
+        let mut app = driving_app();
+        let spec = VehicleKind::Buggy.spec();
+        let car = park(&mut app, Vec3::Y * spec.ride_height());
+        run(&mut app, 0.5);
+        hands(&mut app, car, 1.0, 0.0);
+        run(&mut app, 12.0);
+
+        let fast = speed(&app, car).length();
+        assert!(fast > spec.top_speed * 0.7, "only reached {fast:.1} m/s");
+        assert!(fast < spec.top_speed * 1.1, "ran away to {fast:.1} m/s");
+    }
+
+    /// A tyre can only hold so much sideways force, and that limit is what makes a fast corner
+    /// understeer rather than scrub the vehicle to a halt. Before the load cap existed, full lock
+    /// at 13 m/s stopped it dead in three seconds — measured on a live server.
+    #[test]
+    fn a_hard_corner_understeers_rather_than_stopping_it() {
+        let mut app = driving_app();
+        let spec = VehicleKind::Buggy.spec();
+        let car = park(&mut app, Vec3::Y * spec.ride_height());
+        run(&mut app, 0.5);
+        hands(&mut app, car, 1.0, 0.0);
+        run(&mut app, 4.0);
+        let straight = speed(&app, car).length();
+        assert!(straight > 10.0, "never got up to speed: {straight:.1} m/s");
+
+        hands(&mut app, car, 1.0, 1.0);
+        run(&mut app, 2.0);
+
+        let cornering = speed(&app, car).length();
+        assert!(
+            cornering > straight * 0.5,
+            "the corner scrubbed it from {straight:.1} to {cornering:.1} m/s"
+        );
+        assert!(facing(&app, car).x > 0.2, "and it did not even turn");
     }
 
     /// The mass has to end up below the middle of the body, or the vehicle tips over in the first

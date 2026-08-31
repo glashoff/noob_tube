@@ -18,7 +18,7 @@ use avian3d::prelude::{
 };
 use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::props::{self, Bobbing};
-use noob_tube_shared::vehicle::{self, VehicleKind};
+use noob_tube_shared::vehicle::{self, Controls, Driving, VehicleKind};
 use noob_tube_shared::lag_compensation::HitboxHistory;
 use noob_tube_shared::shooting::{self, Health, ShotFired};
 use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin};
@@ -69,11 +69,14 @@ fn main() {
             // Suspension alongside the rest: it only applies forces, which the solver in
             // `FixedPostUpdate` then consumes.
             (
+                // Getting in and out first: it decides who is walking this tick and who is driving,
+                // and both of the steps below depend on that answer.
+                (use_vehicles, take_the_wheel).chain(),
                 resolve_shots,
                 (
                     simulation::step_players::<()>,
                     move_props,
-                    vehicle::suspend_vehicles::<()>,
+                    vehicle::drive_vehicles::<()>,
                 ),
             )
                 .chain(),
@@ -87,7 +90,11 @@ fn main() {
         // it on others. A kinematic crate hid that: nothing moves it except a system of ours.
         .add_systems(
             FixedPostUpdate,
-            record_positions.after(PhysicsSystems::StepSimulation),
+            // A driver is wherever their vehicle is, and the vehicle only reaches this tick's pose
+            // in the solver — so this has to come after it, and before the histories are written.
+            (carry_drivers, record_positions)
+                .chain()
+                .after(PhysicsSystems::StepSimulation),
         )
         // Once per frame, not once per tick: several ticks can resolve between two frames, and
         // there is no reason to touch the network that often for something cosmetic.
@@ -465,6 +472,153 @@ fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
     info!("{} moving crates", props::MOVING_CRATES.len());
 }
 
+/// How close you have to be to get into a vehicle, in metres.
+///
+/// Generous. Reaching for a door handle is not the interesting part of this, and a radius that has
+/// to be hunted for turns a one-key action into a game of its own.
+const REACH: f32 = 4.0;
+
+/// On a vehicle: who is driving it. Server-side; a client works it out from what it predicts.
+#[derive(Component, Clone, Copy)]
+struct Driver(Entity);
+
+/// On a player: the connection they came in on.
+///
+/// [`Player::peer`] is the netcode id and reads the same, but replication is addressed by
+/// [`PeerId`], and rebuilding one from the number would be a guess about which variant it came out
+/// of. This is the one the server was handed.
+#[derive(Component, Clone, Copy)]
+struct Owner(PeerId);
+
+/// Everything getting in or out of a vehicle needs to know about a player.
+type Reaching = (
+    Entity,
+    &'static ActionState<PlayerInput>,
+    &'static mut PlayerState,
+    &'static Owner,
+    Has<Driving>,
+    &'static mut Interacted,
+);
+
+/// On a player: whether the interact key was down last tick.
+///
+/// Getting in is an *edge*, not a state, and an input carries only the state. Holding the key would
+/// otherwise climb in and out again sixty-four times a second.
+#[derive(Component, Default)]
+struct Interacted(bool);
+
+/// A vehicle, from outside it: where it is, which way round, and whether the seat is taken.
+type Parked = (
+    Entity,
+    &'static Position,
+    &'static Rotation,
+    Option<&'static Driver>,
+);
+
+/// FixedUpdate: gets people in and out of vehicles.
+///
+/// Not predicted, and that is deliberate rather than lazy. Whether a seat is free is the server's
+/// to decide — two players reaching for the same door on the same tick have to be resolved
+/// somewhere, and a client that guessed would have to be taken back out again. The cost is that the
+/// camera changes half a round trip after the key, which for something that happens once a minute
+/// is a fair price for never having to un-seat anyone.
+fn use_vehicles(
+    mut players: Query<Reaching>,
+    mut vehicles: Query<Parked, With<VehicleKind>>,
+    mut commands: Commands,
+) {
+    for (player, action, mut state, owner, driving, mut last) in players.iter_mut() {
+        let pressed = action.0.interact;
+        let edge = pressed && !last.0;
+        last.0 = pressed;
+        if !edge {
+            continue;
+        }
+
+        if driving {
+            let Some((vehicle, position, rotation, _)) = vehicles
+                .iter()
+                .find(|(.., driver)| driver.is_some_and(|driver| driver.0 == player))
+            else {
+                continue;
+            };
+            // Put down beside the driver's door, clear of the bodywork so the first tick on foot is
+            // not spent being pushed out of a wall.
+            state.position = position.0 + rotation.0 * Vec3::new(-2.0, -0.6, 0.0);
+            state.velocity = Vec3::ZERO;
+            commands.entity(player).remove::<Driving>();
+            commands.entity(vehicle).remove::<Driver>();
+            // Nobody predicts it again: with no input behind it there is nothing to predict from.
+            commands.entity(vehicle).insert((
+                PredictionTarget::to_clients(NetworkTarget::None),
+                InterpolationTarget::to_clients(NetworkTarget::All),
+            ));
+            info!("{:?} got out", owner.0);
+            continue;
+        }
+
+        let nearest = vehicles
+            .iter_mut()
+            .filter(|(.., driver)| driver.is_none())
+            .map(|(entity, position, ..)| (entity, position.0.distance(state.position)))
+            .filter(|(_, distance)| *distance <= REACH)
+            .min_by(|(_, a), (_, b)| a.total_cmp(b));
+        let Some((vehicle, _)) = nearest else {
+            continue;
+        };
+        commands.entity(player).insert(Driving);
+        commands.entity(vehicle).insert((
+            Driver(player),
+            Controls::default(),
+            // The driver predicts it and everyone else interpolates it — the same split a player
+            // gets, for the same reason: the input that moves it is theirs, so they are the one peer
+            // that can compute where it will be without being told.
+            PredictionTarget::to_clients(NetworkTarget::Single(owner.0)),
+            InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(owner.0)),
+        ));
+        info!("{:?} got in", owner.0);
+    }
+}
+
+/// FixedUpdate: hands each vehicle the input of whoever is sitting in it.
+///
+/// The one place the two sides differ, and only in how they find the driver: the server looks up
+/// the seat, a client uses its own input because the only vehicle it predicts is the one it is
+/// driving. Everything after this reads [`Controls`] and cannot tell the difference.
+fn take_the_wheel(
+    time: Res<Time<Fixed>>,
+    drivers: Query<&ActionState<PlayerInput>>,
+    mut vehicles: Query<(&VehicleKind, &Driver, &mut Controls)>,
+) {
+    let dt = time.delta_secs();
+    for (kind, driver, mut controls) in vehicles.iter_mut() {
+        let Ok(action) = drivers.get(driver.0) else {
+            continue;
+        };
+        controls.apply_input(kind.spec(), &action.0, dt);
+    }
+}
+
+/// FixedPostUpdate: a driver is wherever their vehicle ended up.
+///
+/// Their `PlayerState` is still the thing everything else reads — where a shot comes from, what a
+/// hitbox is built from, where they respawn — so it has to keep meaning something while they are
+/// not walking. It means "in that seat".
+fn carry_drivers(
+    vehicles: Query<(&Position, &Rotation, &Driver)>,
+    mut players: Query<&mut PlayerState, With<Driving>>,
+) {
+    for (position, rotation, driver) in vehicles.iter() {
+        let Ok(mut state) = players.get_mut(driver.0) else {
+            continue;
+        };
+        // Feet on the floor of the cab rather than at the centre of the body, so the eye ends up
+        // roughly where a head would be.
+        state.position = position.0 + rotation.0 * Vec3::new(0.0, -0.4, 0.0);
+        state.velocity = Vec3::ZERO;
+    }
+}
+
 /// Startup: puts one vehicle in the world.
 ///
 /// Replicated and interpolated by everyone, predicted by nobody — for now. There is no driver, so
@@ -623,6 +777,8 @@ fn on_peer_connected(
         Name::from(format!("Player {peer}")),
         Authored,
         Player { peer },
+        Owner(remote.0),
+        Interacted::default(),
         spawn,
         state,
         Aim::default(),

@@ -26,6 +26,13 @@ pub struct PlayerInput {
     /// Held, not tapped. The rate of fire comes from [`PlayerState::fire_cooldown`], so holding the
     /// button produces a steady stream rather than one shot per tick.
     pub fire: bool,
+    /// Get in, or get out. Held, like everything else here — the *edge* is found by the server,
+    /// which compares this tick's input with the last one it acted on.
+    ///
+    /// It has to travel as an input rather than as a message, because the moment it happens is a
+    /// tick and every other decision on this struct is made at one. A message would arrive between
+    /// two ticks and there would be no honest answer to which of them it belonged to.
+    pub interact: bool,
     /// Horizontal look angle in radians. Movement is relative to it.
     pub yaw: f32,
     /// Vertical look angle in radians. Does not affect movement, but travels with the input so the

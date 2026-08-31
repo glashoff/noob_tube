@@ -1094,9 +1094,55 @@ did the history recording, with no ordering between them: a *dynamic* target's h
 filled with the pose from before the step on some runs and after it on others. A kinematic crate hid
 this completely, because nothing but a system of ours ever moved one.
 
-Still missing, and each its own step: an engine and a steering wheel, a seat to get into, and the
-fact that a player walks straight through a vehicle — it sits on `Layer::Body`, which the movement
-queries deliberately do not see, exactly like a crate.
+#### Driving it
+
+**E** gets in, and gets out again. The player is hidden rather than despawned — still a replicated
+entity with a pose and a hitbox, back on their feet the moment they get out — and the walking step
+skips them, which is the whole of "you cannot walk while driving". They are not standing on the
+vehicle and there is no cab to sit in; the camera moves seven metres behind it, because a
+first-person view from inside a windowless box is a black screen.
+
+Getting in is **not predicted**, and that is a decision rather than an omission. Whether a seat is
+free is the server's to settle — two people reaching for the same door on the same tick have to be
+resolved somewhere — and a client that guessed would have to be taken back out again. It costs half
+a round trip before the camera moves, once a minute.
+
+What *is* predicted is the driving, and the split happens at the moment of getting in: the server
+gives the vehicle `PredictionTarget` for that one peer and `InterpolationTarget` for everyone else,
+the same split a player gets, for the same reason. A client's copy swaps from `RigidBody::Static` to
+`Dynamic` as it changes hands, which is the one place this could fail silently in either direction —
+a predicted vehicle left static takes the throttle and does not move; an interpolated one left
+dynamic falls through the pose being written on top of it.
+
+Throttle, brakes and steering come from the same `PlayerInput` that walks, and the two sides differ
+in exactly one place: the server looks up who is in the seat, a client uses its own input because
+the only vehicle it predicts is the one it is driving. Everything downstream reads a `Controls`
+component and cannot tell the difference.
+
+**Steering is not a torque.** Turning the front wheels only changes which way their grip points; the
+sideways force that grip produces is what swings the vehicle round, through the length of the
+wheelbase. Nothing anywhere applies a turning moment.
+
+That grip is capped by the load on each tyre — `friction x load x dt` — and the cap is not a detail.
+Without it a rate alone let a tyre take out any amount of sideways speed however lightly it was
+loaded, and full lock at 13 m/s scrubbed the vehicle to a standstill in three seconds, measured on a
+live server. With it, a wheel in the air holds nothing, the inside wheels of a fast corner hold less
+than the outside ones, and cornering too fast understeers instead of stopping dead.
+
+Verified live at 100 ms of ping with 10 % packet loss, from a standing start to nearly 20 m/s and
+round a full-lock corner: **zero rollbacks and zero correction**, and the client's vehicle within
+0.000 m of the server's once stopped. The picture trails the simulation by exactly one tick
+throughout — 18.7 cm at 12.4 m/s, 28.5 cm at 19.5 m/s, against a tick's 19.4 and 30.5 — which is
+frame interpolation and nothing else.
+
+One bug on the way, and it was the same one twice. `carry_driver` puts the driver wherever the
+vehicle ended up, and it ran in `FixedPostUpdate` alongside Avian with no ordering between them, so
+on some runs the driver was placed at the vehicle's pose from *before* the step. A tick of a
+vehicle's speed is 20 cm, and it arrived as a correction on every update — the same ambiguity that
+had already been fixed for `record_positions`, in the same schedule, for the same reason.
+
+Still missing: standing on a vehicle rather than being inside it, passengers, a camera that gets out
+of the way of walls, and running people over.
 
 #### Three things a shot was getting wrong
 

@@ -20,6 +20,7 @@ use lightyear::prelude::{
     NetworkTimeline, Predicted, Tick, interpolation_fraction,
 };
 use noob_tube_shared::player::{PlayerInput, PlayerState, ViewBracket};
+use noob_tube_shared::vehicle::Driving;
 use noob_tube_shared::simulation;
 use noob_tube_shared::types::Authored;
 
@@ -317,6 +318,7 @@ fn sample_input(
         jump: keys.pressed(KeyCode::Space),
         crouch: keys.pressed(KeyCode::ControlLeft),
         fire: firing,
+        interact: keys.pressed(KeyCode::KeyE),
         yaw: player.yaw,
         pitch: player.pitch,
     };
@@ -454,6 +456,16 @@ fn count_ticks(mut ticks: ResMut<MovementTicks>) {
     ticks.0 += 1;
 }
 
+/// Where this client's own player is, and whether they are behind a wheel rather than on foot.
+type OwnPose = (&'static PlayerState, Has<Driving>);
+
+/// How far behind the vehicle the camera sits while driving, and how far above it.
+///
+/// A vehicle is driven from outside it here. There is no cab to sit in — the chassis is one box —
+/// and a first-person view from inside a box is a black screen.
+const CHASE_DISTANCE: f32 = 7.0;
+const CHASE_LIFT: f32 = 1.2;
+
 /// How far the drawn view may fall behind the simulation, in metres.
 ///
 /// This is not a tuning preference, it is the whole trade in one number. Smoothing a correction
@@ -550,12 +562,26 @@ fn smooth_the_view(
 /// `EulerRot::YXZ` applies yaw first and pitch second, in the camera's own frame. Any other order
 /// makes the horizon tilt as you look up while turning.
 fn place_camera(
-    predicted: Option<Single<&PlayerState, With<Predicted>>>,
+    predicted: Option<Single<OwnPose, With<Predicted>>>,
     mut camera: Single<(&LocalPlayer, &mut Transform)>,
 ) {
     let (player, transform) = &mut *camera;
-    if let Some(state) = predicted {
-        transform.translation = state.eye_position();
-    }
-    transform.rotation = Quat::from_euler(EulerRot::YXZ, player.yaw, player.pitch, 0.0);
+    let look = Quat::from_euler(EulerRot::YXZ, player.yaw, player.pitch, 0.0);
+    transform.rotation = look;
+    let Some(predicted) = predicted else {
+        return;
+    };
+    let (state, driving) = *predicted;
+    transform.translation = if driving {
+        // Behind and above, along the direction being looked in rather than the way the vehicle
+        // points — so the driver can look around while going straight, which is most of why anyone
+        // wants a third-person view in the first place.
+        //
+        // It does not yet get out of the way of walls: driving backwards into one puts the camera
+        // inside it. A chase camera earns its keep by casting a ray and pulling in, and that is
+        // its own piece of work.
+        state.eye_position() + Vec3::Y * CHASE_LIFT - (look * Vec3::NEG_Z) * CHASE_DISTANCE
+    } else {
+        state.eye_position()
+    };
 }
