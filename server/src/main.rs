@@ -400,15 +400,16 @@ fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
             ColliderDensity(props::LOOSE_DENSITY),
             CollisionLayers::new(Layer::Body, LayerMask::ALL),
             Position(at),
+            HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
             Replicate::to_clients(NetworkTarget::All),
-            // Predicted by everyone, which is what puts the solver's rollback to work: each client
-            // runs the same simulation and is corrected when the server disagrees.
-            //
-            // And why there is no `HitboxHistory` here. A history exists because a client draws
-            // something in the *past* — the whole of lag compensation is undoing that. A client
-            // that predicts a crate draws it at the present, so there is nothing to undo, and
-            // `resolve_shots` already tests a target with no history against the present.
-            PredictionTarget::to_clients(NetworkTarget::All),
+            // Interpolated, not predicted, and that is the rule rather than a shortcut. A client
+            // can only predict what it has the information to compute, and what moves a crate is
+            // *somebody else's* shot — which it learns about no sooner than the server tells it.
+            // Predicting it therefore means guessing, being wrong, and snapping: measured at a
+            // median of 3.7 cm and up to 79 cm per correction. Interpolation is never wrong about
+            // what it draws; it merely draws it late, and lag compensation is exactly the machinery
+            // that undoes "late". See the README, "Things that move and are not players".
+            InterpolationTarget::to_clients(NetworkTarget::All),
         ));
     }
     info!("{} loose crates", props::LOOSE_CRATES.len());

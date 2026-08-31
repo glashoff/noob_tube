@@ -35,6 +35,8 @@ fn main() {
         .insert_resource(net)
         .add_plugins((
             noob_tube_shared::physics::PhysicsPlugin,
+            // Draws the predicted player between fixed ticks, and carries visual correction.
+            lightyear::frame_interpolation::prelude::FrameInterpolationPlugin,
             world::WorldPlugin,
             noob_tube_shared::types::SharedTypesPlugin,
             local_player::LocalPlayerPlugin,

@@ -982,17 +982,33 @@ and its density, and the default density of 1 makes a cubic-metre box weigh a ki
 launched it at forty metres a second, out of the level. Wood is around 40 kg per cubic metre packed
 loosely, and at that weight the same shot shoves the crate a few centimetres.
 
-Loose crates are **predicted by every client**, which is what puts the solver's rollback to work:
-each client runs the same simulation and is corrected when the server disagrees. They therefore get
-no `HitboxHistory`, and that is not an omission. A history exists because a client draws something
-in the *past* — undoing that is the whole of lag compensation — and a client that predicts a crate
-draws it at the present. `resolve_shots` already tests a target with no history against the present.
+Loose crates were briefly **predicted by every client**, and are not any more. The reason is worth
+writing down, because the obvious objection to prediction is the wrong one.
+
+The obvious objection is that a predicted entity lives in a different time from the server's, so a
+shot at one would be resolved against a pose the shooter never saw. That is not true. A client
+predicting tick T+k draws the state of tick T+k, and the shot it fires is *stamped* for T+k; the
+server resolves it while simulating T+k, against its own state for that same tick. Prediction is not
+a different time — it is the same tick, computed earlier. Interpolation is the one that genuinely
+draws the past, which is why it, and not prediction, needs lag compensation.
+
+The real objection is information. A client can only predict what it has what it needs to compute,
+and what moves a crate is *somebody else's* shot, which it learns about no sooner than the server
+tells it. Predicting it is therefore guessing, and the guess is wrong every time anyone else fires:
+measured at a median snap of 3.7 cm and up to 79 cm, in a single frame. Worse, a client that has not
+yet heard about another player's shove aims at a crate that is no longer there, and misses — where
+an interpolated crate is reconstructed exactly by the server and hits what the shooter saw.
+
+So the rule is not "predict what moves" but **predict what you have the information to compute**:
+your own player, and the vehicle you are driving. Everything else is interpolated and rewound out of
+a `HitboxHistory`, which is what that machinery is for.
 
 Verified live: four crates dropped a little above their resting heights settle at 0.50, 1.50, 2.50
 and 3.50 m and drift 0.00 cm over the following second. A burst into the bottom of the stack moves
-it by up to 10 cm, and the shove propagates up through the contacts. At 300 ms of ping with 15%
-packet loss the client's own simulation stays within 0.0 cm of the server's across 24 rollbacks and
-584 replayed ticks.
+it by up to 10 cm, and the shove propagates up through the contacts. While they were still
+predicted, at 300 ms of ping with 15% packet loss the client's own simulation stayed within 0.0 cm
+of the server's across 24 rollbacks and 584 replayed ticks — the solver rollback works; it is simply
+not what a crate wants.
 
 **`max_rollback_ticks` has to be raised, and getting it wrong fails silently.** Lightyear keeps two
 separate bounds — how far ahead a client may predict, and how far back a rollback may reach — and
@@ -1202,36 +1218,62 @@ rollback check would report. Under 10 % loss the server misses an input, falls b
 last one, and diverges — and the client notices and replays. The machinery fires exactly when it
 should and not otherwise.
 
-Still open: **visual correction**. Nothing is smoothed at all — neither between fixed ticks nor
-after a rollback. `place_camera` writes the predicted position raw, so the eye moves at 64 Hz while
-the view turns at frame rate, and a rollback lands on the next frame as a jump.
+**Visual correction**, and how its size was settled. Nothing used to be smoothed at all — neither
+between fixed ticks nor after a rollback. `place_camera` wrote the predicted position raw, so the
+eye moved at 64 Hz while the view turned at frame rate, and a rollback landed on the next frame as a
+jump.
 
-How big a jump is now measured rather than guessed, by `client/src/corrections.rs`: two systems
-inside lightyear's rollback, one either side of the replay, that compare the pose the last frame drew
-with the pose the replay produced. That distance is exactly what a correction would have to decay.
+How big a jump is measured rather than guessed, by `client/src/corrections.rs`: two systems inside
+lightyear's rollback, one either side of the replay, plus a per-frame watch on the camera itself.
+The per-frame figure subtracts `speed x frame time`, because at 5.5 m/s and 30 fps ordinary walking
+is 18 cm in a frame and a 15 cm jump would hide inside it.
 
-| link | rollbacks | camera moved | predicted bodies |
-| --- | --- | --- | --- |
-| 100 ms, 10 % loss, walking | 4 per minute | 0.5 cm | — |
-| 300 ms, 30 % loss, walking | none in 70 s | — | — |
-| 300 ms, 30 % loss, **no input redundancy** | 17 per second | mean 31 cm, worst 154 cm | — |
-| 300 ms, 10 % loss, shooting a crate stack | 9 per second | 0.0 cm | median 3.7, p90 22.7, worst 79.2 cm |
+| link | rollbacks | camera jump in one frame |
+| --- | --- | --- |
+| 100 ms, 10 % loss, walking | 4 per minute | 0.5 cm |
+| 300 ms, 30 % loss, walking | none in 70 s | — |
+| 300 ms, 30 % loss, **no input redundancy** | 18 per second | 85 cm |
+| 300 ms, 10 % loss, shooting a crate stack | 9 per second | 0.0 cm, but the crate snapped up to 79 cm |
 
-The result is not what the frequency suggested. **The camera needs no smoothing yet, and the reason
-is not that the link is good.** The only thing driving the local player is the local player's own
-input, and `input_redundancy = 5` means six consecutive packets must drop before the server misses
-one — so the server simulates from exactly the input the client predicted from, and the two agree to
-within half a centimetre. Setting redundancy to 0 shows what a genuinely missed input costs: 31 cm
-on average and one correction in six over half a metre, which would be unwatchable. That is the
-amplitude to expect the moment the *simulation* gains a way to diverge — another player pushing you,
-a vehicle under your feet — rather than the moment the network gets worse.
+The result is not what the frequency suggested. **The camera needs almost no smoothing yet, and the
+reason is not that the link is good.** The only thing driving the local player is the local player's
+own input, and `input_redundancy = 5` means six consecutive packets must drop before the server
+misses one — so the server simulates from exactly the input the client predicted from, and the two
+agree to within half a centimetre. Setting redundancy to 0 shows what a genuinely missed input
+costs, and that is the amplitude to expect the moment the *simulation* gains a way to diverge —
+another player pushing you, a vehicle under your feet — rather than the moment the network gets
+worse.
 
-What does need smoothing already is the other case: a **predicted crate** that a shot moves snaps by
-a median of 3.7 cm and up to 79 cm, because the client cannot know about the hit before the server
-tells it. Nothing here is per-frame smoothed either, so those land in one frame.
+Two things are now switched on.
 
-So the order is settled by measurement rather than by guessing: frame interpolation and correction
-for predicted *bodies* first, the camera when something can push it.
+**Frame interpolation** (lightyear's `FrameInterpolationPlugin`, plus `FrameInterpolate` on the
+predicted player) draws the player blended between the last two ticks rather than on them. It costs
+one tick of delay by design — 8.6 cm at running speed, and that figure shows up in the measurements
+exactly where it should.
+
+**View smoothing**, ours rather than lightyear's. `add_linear_correction` does the same job and was
+tried first; its `CorrectionPolicy` has private fields and no constructor besides the default, and
+the decay constant is the entire design. Measured with lightyear's 200 ms half-life under a storm of
+corrections, the view trailed the simulation by **1.9 m**: the filter never released, so the camera
+simply ran a fifth of a second behind everything. Thirty lines in `local_player.rs` own that number
+instead — a 110 ms time constant, and a hard leash at 25 cm.
+
+The leash is the whole trade in one number, and it does not go away by tuning. Smoothing a
+correction means drawing the player where they are not, so **the size of error that can be hidden is
+exactly how far behind the view is allowed to get**. A view a metre back puts the crosshair
+somewhere the player is not, which is worse than the jump it was hiding. So errors up to 25 cm — 45
+ms of running — are smoothed away, and anything larger shows, on purpose.
+
+Measured after, under the same storm: the trail is bounded at 21 cm where it had been 1.9 m, and
+what still jumps is the part above the leash. On a sane link the errors are half a centimetre, so
+everything is smoothed, the jump is 0.0 cm and the trail is 0.0 cm.
+
+None of this touches the simulation. Both the frame blend and the smoothing write into the live
+`PlayerState` in `PostUpdate`, and `RunFixedMainLoop` restores the simulated value before the next
+tick — so a shot still leaves from where the simulation says the player is, because the shooting
+code runs in `Update`, after that restore and before either of them.
+
+
 
 ---
 

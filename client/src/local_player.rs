@@ -13,9 +13,11 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use avian3d::prelude::Position;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use lightyear::frame_interpolation::prelude::FrameInterpolationSystems;
+use lightyear::prelude::{Rollback, RollbackSystems};
 use lightyear::prelude::{
-    ConfirmedHistory, Interpolated, InterpolationSystems, InterpolationTimeline, NetworkTimeline,
-    Predicted, Tick, interpolation_fraction,
+    ConfirmedHistory, FrameInterpolate, Interpolated, InterpolationSystems, InterpolationTimeline,
+    NetworkTimeline, Predicted, Tick, interpolation_fraction,
 };
 use noob_tube_shared::player::{PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::simulation;
@@ -46,6 +48,7 @@ impl Plugin for LocalPlayerPlugin {
             .init_resource::<ScriptedInput>()
             .init_resource::<MovementTicks>()
             .add_systems(Startup, spawn_player)
+            .add_systems(Update, smooth_own_frames)
             .add_systems(
                 Update,
                 (note_pointer_over_ui, note_drawn_view, grab_cursor, look, sample_input)
@@ -63,7 +66,32 @@ impl Plugin for LocalPlayerPlugin {
                 FixedUpdate,
                 (simulation::step_players::<With<Predicted>>, count_ticks),
             )
-            .add_systems(PostUpdate, place_camera.before(TransformSystems::Propagate));
+            // After frame interpolation, not merely before transform propagation. Frame
+            // interpolation writes the blended `PlayerState` in PostUpdate, and the camera reads
+            // it; the other order would put last frame's fixed value on screen and throw the
+            // blend away. Visual correction rides on the same pass, one set later still.
+            .init_resource::<ViewError>()
+            .add_systems(
+                PreUpdate,
+                (
+                    remember_the_view
+                        .after(RollbackSystems::Check)
+                        .before(RollbackSystems::Prepare),
+                    absorb_the_correction
+                        .after(RollbackSystems::Rollback)
+                        .before(RollbackSystems::EndRollback),
+                )
+                    .run_if(resource_exists::<Rollback>),
+            )
+            // After the frame blend, which writes the simulated pose for this frame, and before the
+            // camera reads it.
+            .add_systems(
+                PostUpdate,
+                (smooth_the_view, place_camera)
+                    .chain()
+                    .after(FrameInterpolationSystems::Interpolate)
+                    .before(TransformSystems::Propagate),
+            );
     }
 }
 
@@ -127,6 +155,33 @@ fn note_pointer_over_ui() {}
 #[derive(Resource, Default, Reflect)]
 #[reflect(Resource)]
 pub struct MovementTicks(pub u64);
+
+/// The predicted player, before anyone has asked for it to be drawn between ticks.
+type NotYetSmoothed = (With<Predicted>, With<PlayerState>, Without<FrameInterpolate>);
+
+/// Update: asks for the predicted player to be drawn between ticks rather than on them.
+///
+/// The simulation runs at the tick rate and the screen does not, so without this the eye position
+/// only changes on the frames a fixed tick happened to land in — at 64 Hz on a 144 Hz display,
+/// roughly every other frame repeats the last one while the view keeps turning smoothly with the
+/// mouse. [`FrameInterpolate`] makes lightyear draw the state blended between the last two ticks
+/// by the current overstep instead.
+///
+/// It is also what visual correction is built on: the correction decays the difference between the
+/// frame-interpolated pose the last frame drew and the one the replay produced, so without this
+/// there is no "what the last frame drew" to compare against.
+///
+/// Only the predicted entity. Remote players are already smooth for a different reason — they are
+/// interpolated between received snapshots — and the confirmed copy is never drawn at all.
+fn smooth_own_frames(
+    mine: Query<Entity, NotYetSmoothed>,
+    mut commands: Commands,
+) {
+    for entity in mine.iter() {
+        commands.entity(entity).insert(FrameInterpolate);
+        info!("interpolating our own player between ticks");
+    }
+}
 
 /// Startup: creates the camera.
 ///
@@ -397,6 +452,84 @@ fn report_drawn_view(
 /// than the tick rate is itself the signal that corrections are happening.
 fn count_ticks(mut ticks: ResMut<MovementTicks>) {
     ticks.0 += 1;
+}
+
+/// How far the drawn view may fall behind the simulation, in metres.
+///
+/// This is not a tuning preference, it is the whole trade in one number. Smoothing a correction
+/// means drawing the player where they are not, so the size of the error that can be hidden *is*
+/// how far behind the view is allowed to get. Anything larger has to show, and should: a view a
+/// metre behind puts the crosshair somewhere the player is not, which is worse than the jump it
+/// was hiding.
+///
+/// 25 cm is about 45 ms of running. Measured corrections on a sane link are half a centimetre, so
+/// in practice everything is smoothed and nothing is ever clipped by this.
+const VIEW_LEASH: f32 = 0.25;
+
+/// Fraction of the outstanding view error still left one second later.
+///
+/// A rate rather than a per-frame factor, so the smoothing does not change with the frame rate.
+/// 1e-4 is a time constant of about 110 ms: a correction is most of the way gone in a tenth of a
+/// second, which is long enough not to read as a jump and short enough not to be a delay.
+const VIEW_DECAY_PER_SECOND: f32 = 1e-4;
+
+/// How far the drawn view currently is from the simulated one, and where it was before a rollback.
+///
+/// Lightyear can do this itself — `add_linear_correction` — but its `CorrectionPolicy` has private
+/// fields and no constructor besides the default, and the decay constant is the entire design.
+/// Measured with lightyear's own 200 ms half-life, under a storm of corrections, the view trailed
+/// the simulation by 1.9 m: the filter never released, so the camera simply ran a fifth of a second
+/// behind. Owning thirty lines is the cheaper way to own that number.
+#[derive(Resource, Default)]
+struct ViewError {
+    /// The offset added to the drawn position. Decays towards zero every frame.
+    offset: Vec3,
+    /// Where the view was drawn just before a rollback replaced the state under it.
+    drawn: Option<Vec3>,
+}
+
+/// PreUpdate, inside the rollback and before it snaps back: where the view was.
+///
+/// The live `PlayerState` here is last frame's *drawn* value — frame interpolation writes it in
+/// `PostUpdate` and only restores the simulated one in `RunFixedMainLoop`, which has not run yet.
+/// That is exactly what is wanted: the view has to stay continuous with what was on screen.
+fn remember_the_view(mut error: ResMut<ViewError>, drawn: Option<Single<&PlayerState, With<Predicted>>>) {
+    error.drawn = drawn.map(|state| state.position);
+}
+
+/// PreUpdate, after the replay: takes the difference on to the books.
+///
+/// The offset is what keeps the drawn position from moving at all this frame; it is then paid off
+/// over the following tenth of a second. Clamped, because an error larger than [`VIEW_LEASH`] is
+/// one that has to be shown rather than hidden.
+fn absorb_the_correction(
+    mut error: ResMut<ViewError>,
+    simulated: Option<Single<&PlayerState, With<Predicted>>>,
+) {
+    let (Some(drawn), Some(simulated)) = (error.drawn.take(), simulated) else {
+        return;
+    };
+    error.offset = (drawn - simulated.position).clamp_length_max(VIEW_LEASH);
+}
+
+/// PostUpdate: draws the player at the simulated position plus what is still owed.
+///
+/// Writing to `PlayerState` here changes only what is drawn: `RunFixedMainLoop` restores the
+/// simulated value before the next tick, and the shooting code runs in `Update`, after that restore
+/// and before this — so a shot still leaves from where the simulation says the player is, however
+/// far behind the picture happens to be.
+fn smooth_the_view(
+    mut error: ResMut<ViewError>,
+    time: Res<Time>,
+    drawn: Option<Single<&mut PlayerState, With<Predicted>>>,
+) {
+    error.offset *= VIEW_DECAY_PER_SECOND.powf(time.delta_secs());
+    if error.offset.length() < 1e-4 {
+        error.offset = Vec3::ZERO;
+    }
+    if let Some(mut drawn) = drawn {
+        drawn.position += error.offset;
+    }
 }
 
 /// PostUpdate: writes the predicted eye position and the look angles into the camera transform.

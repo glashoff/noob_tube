@@ -43,12 +43,6 @@ use serde::{Deserialize, Serialize};
 pub struct Prop {
     /// Half the size of the box.
     pub half_extents: Vec3,
-    /// Kilograms per cubic metre, when this is a body the client simulates for itself; `None` when
-    /// the server alone moves it and clients only interpolate what arrives.
-    ///
-    /// It is here because it is exactly what a client needs in order to rebuild the body: a shape
-    /// and a mass. A vehicle will want more, and this is the field that grows.
-    pub density: Option<f32>,
 }
 
 impl Prop {
@@ -92,10 +86,8 @@ impl Bobbing {
     }
 
     /// The shape it presents, which never changes.
-    ///
-    /// No density: a bobbing crate is kinematic, and nothing on a client simulates it.
     pub fn prop(&self) -> Prop {
-        Prop { half_extents: self.half_extents, density: None }
+        Prop { half_extents: self.half_extents }
     }
 }
 
@@ -113,9 +105,9 @@ pub const LOOSE_CRATES: [Vec3; 4] = [
     Vec3::new(-8.1, 3.9, -5.9),
 ];
 
-/// The shape and weight every loose crate has.
+/// The shape every loose crate has. Its weight is [`LOOSE_DENSITY`], which only the server needs.
 pub fn loose_prop() -> Prop {
-    Prop { half_extents: Vec3::splat(LOOSE_HALF_EXTENT), density: Some(LOOSE_DENSITY) }
+    Prop { half_extents: Vec3::splat(LOOSE_HALF_EXTENT) }
 }
 
 /// How heavy a loose crate is, in kilograms per cubic metre.
