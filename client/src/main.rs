@@ -202,7 +202,21 @@ fn connect(net: Res<NetConfig>, mut commands: Commands) {
     };
 
     // Prediction needs its manager resource in place before the client entity exists.
-    commands.insert_resource(PredictionManager::default());
+    //
+    // The rollback bound is set from the same number that bounds prediction, because there is only
+    // one honest answer: a rollback can never need to reach further back than the client is allowed
+    // to run ahead. Lightyear keeps the two as separate limits and takes the smaller, and its
+    // default of 20 ticks is 312 ms at 64 Hz — so at 300 ms of ping a correction is silently
+    // dropped and a predicted body stays wrong forever. That is measured, not theoretical: a
+    // predicted crate shoved by a shot froze 10 cm from where the server had it, indefinitely,
+    // with no rollback and no warning.
+    commands.insert_resource(PredictionManager {
+        rollback_policy: RollbackPolicy {
+            max_rollback_ticks: net.max_predicted_ticks,
+            ..default()
+        },
+        ..default()
+    });
 
     let client = commands
         .spawn((

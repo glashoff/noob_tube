@@ -364,7 +364,7 @@ fn broadcast_shots(
 /// anyone walking under it.
 fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
     // Loose crates: dynamic, so they fall, stack and take a shove. The first thing here the
-    // solver actually works for.
+    // solver actually works for, and the first thing a client simulates that is not its own player.
     let loose = props::loose_prop();
     for (index, at) in props::LOOSE_CRATES.into_iter().enumerate() {
         commands.spawn((
@@ -376,9 +376,15 @@ fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
             ColliderDensity(props::LOOSE_DENSITY),
             CollisionLayers::new(Layer::Body, LayerMask::ALL),
             Position(at),
-            HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
             Replicate::to_clients(NetworkTarget::All),
-            InterpolationTarget::to_clients(NetworkTarget::All),
+            // Predicted by everyone, which is what puts the solver's rollback to work: each client
+            // runs the same simulation and is corrected when the server disagrees.
+            //
+            // And why there is no `HitboxHistory` here. A history exists because a client draws
+            // something in the *past* — the whole of lag compensation is undoing that. A client
+            // that predicts a crate draws it at the present, so there is nothing to undo, and
+            // `resolve_shots` already tests a target with no history against the present.
+            PredictionTarget::to_clients(NetworkTarget::All),
         ));
     }
     info!("{} loose crates", props::LOOSE_CRATES.len());

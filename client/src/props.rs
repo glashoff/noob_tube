@@ -11,8 +11,9 @@
 //! box a shot is tested against cannot drift apart. For players the two are separate — a capsule
 //! collides, a body and a head are drawn — and keeping them in step needed a test.
 
+use avian3d::prelude::{ColliderDensity, RigidBody};
 use bevy::prelude::*;
-use lightyear::prelude::client;
+use lightyear::prelude::{Predicted, client};
 use noob_tube_shared::props::Prop;
 
 /// A prop that has just arrived and has nothing to be seen as yet.
@@ -37,18 +38,37 @@ impl Plugin for PropsPlugin {
 /// against one on an interpolated entity, since Avian would then simulate something the server has
 /// already decided.
 fn give_bodies(
-    arrived: Query<(Entity, &Prop), Arrived>,
+    arrived: Query<(Entity, &Prop, Has<Predicted>), Arrived>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
 ) {
-    for (entity, prop) in arrived.iter() {
-        commands.entity(entity).insert((
-            Name::from("Moving crate"),
+    for (entity, prop, predicted) in arrived.iter() {
+        let colour = if predicted {
+            Color::srgb(0.75, 0.55, 0.3)
+        } else {
+            Color::srgb(0.35, 0.45, 0.7)
+        };
+        let mut crate_ = commands.entity(entity);
+        crate_.insert((
+            Name::from("Crate"),
             Mesh3d(meshes.add(Cuboid::from_size(prop.half_extents * 2.0))),
-            MeshMaterial3d(materials.add(Color::srgb(0.35, 0.45, 0.7))),
+            MeshMaterial3d(materials.add(colour)),
             prop.collider(),
         ));
-        info!("drawing a moving crate");
+        // A prop this client predicts has to be simulated here as well, so it needs the body the
+        // server gave it. One it only interpolates gets no `RigidBody` at all — Avian would then
+        // simulate something the server has already decided, and lightyear warns against exactly
+        // that.
+        match (predicted, prop.density) {
+            (true, Some(density)) => {
+                crate_.insert((RigidBody::Dynamic, ColliderDensity(density)));
+                info!("simulating a loose crate");
+            }
+            (true, None) => warn!("a predicted prop arrived with no density: nothing will move it"),
+            (false, _) => {
+                info!("drawing a moving crate");
+            }
+        }
     }
 }

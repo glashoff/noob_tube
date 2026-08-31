@@ -982,10 +982,27 @@ and its density, and the default density of 1 makes a cubic-metre box weigh a ki
 launched it at forty metres a second, out of the level. Wood is around 40 kg per cubic metre packed
 loosely, and at that weight the same shot shoves the crate a few centimetres.
 
+Loose crates are **predicted by every client**, which is what puts the solver's rollback to work:
+each client runs the same simulation and is corrected when the server disagrees. They therefore get
+no `HitboxHistory`, and that is not an omission. A history exists because a client draws something
+in the *past* — undoing that is the whole of lag compensation — and a client that predicts a crate
+draws it at the present. `resolve_shots` already tests a target with no history against the present.
+
 Verified live: four crates dropped a little above their resting heights settle at 0.50, 1.50, 2.50
-and 3.50 m, drift 0.00 cm over the following second — they go to sleep, which is itself part of the
-solver state lightyear rolls back — and the client agrees with the server to 0.0 cm. A burst into
-the bottom of the stack moves it by up to 10 cm, and the shove propagates up through the contacts.
+and 3.50 m and drift 0.00 cm over the following second. A burst into the bottom of the stack moves
+it by up to 10 cm, and the shove propagates up through the contacts. At 300 ms of ping with 15%
+packet loss the client's own simulation stays within 0.0 cm of the server's across 24 rollbacks and
+584 replayed ticks.
+
+**`max_rollback_ticks` has to be raised, and getting it wrong fails silently.** Lightyear keeps two
+separate bounds — how far ahead a client may predict, and how far back a rollback may reach — and
+takes the smaller. The rollback default is 20 ticks, which is 312 ms at 64 Hz, so at 300 ms of ping
+a correction is simply dropped: no rollback, no warning, and a predicted crate that was shoved froze
+ten centimetres from where the server had it and stayed there indefinitely. It worked at 60 ms and
+silently did not at 300 ms, which is the worst shape a bug can have. `PredictionManager` is now
+built with the rollback bound set from the same number that bounds prediction, because there is only
+one honest answer: a rollback can never need to reach further back than the client is allowed to run
+ahead.
 
 Making all of this possible took two generalisations, both of the same shape. A target used to be a
 feet position and a `crouching` flag: a player and nothing else, with the shape hard-coded in the
