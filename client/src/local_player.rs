@@ -61,7 +61,8 @@ pub struct LocalPlayerPlugin;
 
 impl Plugin for LocalPlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PointerOverUi>()
+        app.add_systems(Update, stop_smoothing_what_is_no_longer_predicted)
+            .init_resource::<PointerOverUi>()
             // Lightyear counts rollbacks but does not register the type, so nothing outside the
             // process can read it. It is the one number that says whether prediction is agreeing
             // with the server: a steady climb means the client is guessing wrong.
@@ -483,6 +484,36 @@ pub(crate) fn hold_your_fire(
     }
 }
 
+/// Update: takes frame interpolation off anything that has stopped being predicted.
+///
+/// Lightyear puts [`FrameInterpolate`] on what it predicts and leaves it there when prediction
+/// ends, and that marker is not inert. Frame interpolation writes a blend of the last two *fixed*
+/// ticks into the live component every frame — so on an entity nothing steps any more, it writes
+/// the same two dead values for the rest of the round, on top of the replicated pose that has
+/// replaced them.
+///
+/// Measured on a buggy stepped out of at 12.5 m/s: its `Position` sat still for twelve seconds,
+/// jittering 4 cm between two dead endpoints, while `LinearVelocity` held 12.46 m/s to the last
+/// digit and the server had the vehicle 90 m away and stopped. Taking the marker off moved it to
+/// the server's answer within one frame. Its wheels turned the whole time, because they are driven
+/// by how far the chassis has moved and the blend kept handing them a few centimetres of it — which
+/// is what made it look like a running vehicle rather than a dead value.
+///
+/// One system rather than a line in each handover, because it is not vehicles' business or crates'
+/// business: it is true of anything this client stops predicting. `still_here` is what keeps it off
+/// entities that were removed by being despawned.
+fn stop_smoothing_what_is_no_longer_predicted(
+    mut gave_up: RemovedComponents<Predicted>,
+    still_here: Query<(), With<FrameInterpolate>>,
+    mut commands: Commands,
+) {
+    for entity in gave_up.read() {
+        if still_here.get(entity).is_ok() {
+            commands.entity(entity).remove::<FrameInterpolate>();
+        }
+    }
+}
+
 /// What the screen is currently showing of everyone else, as two received snapshots and a fraction.
 ///
 /// A resource rather than something worked out inside the input system, for two reasons. It is
@@ -818,4 +849,50 @@ fn behind(vehicles: &Query<(&Rotation, &LinearVelocity, &Driven)>, peer: u64) ->
 fn shortest_turn(from: f32, to: f32) -> f32 {
     let turn = (to - from).rem_euclid(core::f32::consts::TAU);
     if turn > core::f32::consts::PI { turn - core::f32::consts::TAU } else { turn }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Frame interpolation has to come off whatever stops being predicted.
+    ///
+    /// Left on, it is not inert: it writes a blend of the last two fixed ticks into the live
+    /// component every frame, and on an entity nothing steps any more those two values never change
+    /// again. Measured on a buggy stepped out of at 12.5 m/s — see
+    /// [`stop_smoothing_what_is_no_longer_predicted`] — it pinned the vehicle to a dead pose for as
+    /// long as anybody watched, 90 m from where the server had it.
+    #[test]
+    fn giving_up_prediction_gives_up_the_smoothing_with_it() {
+        let mut app = App::new();
+        app.add_systems(Update, stop_smoothing_what_is_no_longer_predicted);
+
+        let released = app.world_mut().spawn((Predicted, FrameInterpolate)).id();
+        let kept = app.world_mut().spawn((Predicted, FrameInterpolate)).id();
+
+        app.world_mut().entity_mut(released).remove::<Predicted>();
+        app.update();
+
+        assert!(
+            app.world().entity(released).get::<FrameInterpolate>().is_none(),
+            "a released entity is still being smoothed against a history nothing fills",
+        );
+        assert!(
+            app.world().entity(kept).get::<FrameInterpolate>().is_some(),
+            "an entity still being predicted lost the smoothing it needs",
+        );
+    }
+
+    /// And an entity that stopped being predicted by being despawned must not be reached for.
+    #[test]
+    fn a_despawned_entity_is_left_alone() {
+        let mut app = App::new();
+        app.add_systems(Update, stop_smoothing_what_is_no_longer_predicted);
+
+        let gone = app.world_mut().spawn((Predicted, FrameInterpolate)).id();
+        app.world_mut().entity_mut(gone).despawn();
+        app.update();
+
+        assert!(app.world().get_entity(gone).is_err(), "the entity came back");
+    }
 }

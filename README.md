@@ -1718,6 +1718,35 @@ inside something. Asking about the neighbourhood of the point the server reporte
 that was actually meant; nothing the shot passed through can answer it, and now nothing the shot
 passed through is asked.
 
+#### A vehicle stepped out of stood still with its wheels turning
+
+Getting out of a moving buggy left it beside you, stationary, wheels spinning — and you could not
+get back in unless you walked to where it was really rolling. Pressing the key at the visible one
+snapped it to the truth for a moment, then it froze again.
+
+Lightyear puts `FrameInterpolate` on what it predicts and leaves it there when prediction ends. That
+marker is not inert: frame interpolation writes a blend of the last two **fixed** ticks into the
+live component every frame, so on an entity nothing steps any more it writes the same two dead
+values for the rest of the round, on top of the replicated pose that has replaced them.
+
+Measured, stepping out at 12.5 m/s and then only watching:
+
+| | released, before | released, after |
+|---|---|---|
+| `Position` over 12 s | still, jittering 4 cm between two dead endpoints | rolls 60 m and stops |
+| `LinearVelocity` | 12.46 m/s, unchanged to the last digit | 16.7 → 8.4 m/s, coasting |
+| where the server had it | 90 m away, stopped | the same place |
+
+Removing the marker by hand from the running client moved the vehicle 90 m in a single frame, which
+is what turned a suspicion into a cause. The wheels were the tell and the red herring at once: they
+are driven by how far the chassis has moved, and the dead blend kept handing them a few centimetres
+of it, so the one part of the vehicle that looked alive was the part reading a corpse's pulse.
+
+It is one system rather than a line in the vehicle's handover and another in the crate's, because it
+is true of anything this client stops predicting — the crates a driver predicts had it too, where
+nothing has wheels to give it away. Boarding again makes the vehicle predicted, and lightyear puts
+the marker back itself, so nothing is smoothed less than before.
+
 #### A seat comes back when its driver does not
 
 A player who disconnected while driving took their `Driver` and `Driven` with them into nothing.
