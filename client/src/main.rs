@@ -17,6 +17,8 @@ mod world;
 use bevy::app::{PluginGroupBuilder, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::ExitCondition;
+use bevy::render::settings::{PowerPreference, RenderCreation, WgpuSettings};
+use bevy::render::RenderPlugin;
 use core::time::Duration;
 use lightyear::prelude::*;
 use noob_tube_shared::tuning::NetConfig;
@@ -91,13 +93,46 @@ fn main() {
 /// a packaging question and is not one yet.
 pub const ASSETS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../assets");
 
+/// Which graphics adapter to draw with, and why it is not the fast one.
+///
+/// wgpu asks for `HighPerformance` by default, and on a laptop with two GPUs that means the
+/// discrete card. This game does not need it — a few thousand triangles and no post-processing —
+/// and on the machine this was written on the discrete card is a GeForce driven by Mesa's NVK,
+/// which took the whole machine down twice in an afternoon of running two clients side by side.
+/// Nothing here is fast enough to be worth that, so the integrated GPU is the default.
+///
+/// `WGPU_POWER_PREF=high` overrides it, and is the right thing to reach for on a machine where the
+/// discrete driver is solid. Setting the variable at all hands the choice back to wgpu, which is
+/// why this only fills in a preference that was not already expressed.
+///
+/// Two heavier hammers, for when the trouble is the driver being *loaded* rather than used — both
+/// are environment, not code, because they are about a machine rather than about this game:
+///
+/// ```text
+/// VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.json   # the only Vulkan driver in sight
+/// WGPU_BACKEND=gl                                          # skip Vulkan altogether
+/// ```
+fn draw_with_the_integrated_gpu() -> RenderPlugin {
+    let mut wgpu = WgpuSettings::default();
+    if PowerPreference::from_env().is_none() {
+        wgpu.power_preference = PowerPreference::LowPower;
+    }
+    RenderPlugin {
+        render_creation: RenderCreation::Automatic(Box::new(wgpu)),
+        ..default()
+    }
+}
+
 fn windowing() -> PluginGroupBuilder {
+    let plugins = DefaultPlugins
+        .set(AssetPlugin {
+            file_path: ASSETS.into(),
+            ..default()
+        })
+        .set(draw_with_the_integrated_gpu());
+
     if std::env::var("NOOB_TUBE_HEADLESS").is_ok_and(|value| value != "0") {
-        return DefaultPlugins
-            .set(AssetPlugin {
-                file_path: ASSETS.into(),
-                ..default()
-            })
+        return plugins
             .set(WindowPlugin {
                 primary_window: None,
                 // Without this the app exits the moment it notices it has no windows.
@@ -112,18 +147,13 @@ fn windowing() -> PluginGroupBuilder {
                 1.0 / 240.0,
             )));
     }
-    DefaultPlugins
-        .set(AssetPlugin {
-            file_path: ASSETS.into(),
+    plugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "Noob Tube".into(),
             ..default()
-        })
-        .set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Noob Tube".into(),
-                ..default()
-            }),
-            ..default()
-        })
+        }),
+        ..default()
+    })
 }
 
 /// Reads our own settings, then asks the server for the one it owns.

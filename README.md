@@ -315,6 +315,46 @@ tools/brp watch <entity> <type>...          # stream every change until interrup
 tools/brp --port 15712 list                 # the server instead
 ```
 
+### Which graphics card draws it
+
+On a laptop with two GPUs this now draws on the **integrated** one, and that is a change from
+Bevy's default rather than from the system's.
+
+The system was never the problem. `switcherooctl list` on the machine this was written on reports
+the Intel UHD as `Default: yes` and the GeForce as `Default: no` — GNOME and the kernel had already
+picked the integrated card. What overrode them was wgpu, which asks for `HighPerformance` by
+default, and on a hybrid laptop that means the discrete one. So the fix is not to tell the system
+something it already knew; it is to stop this game contradicting it.
+
+Why bother: nothing here needs a discrete GPU — a few thousand triangles, no post-processing — and
+the discrete driver on that machine is Mesa's **NVK**, which took the whole machine down twice in
+an afternoon of running two clients side by side. A card that is not worth using is not worth
+crashing for.
+
+```bash
+WGPU_POWER_PREF=high   ./target/debug/noob_tube_client   # back to the discrete card
+```
+
+Setting that variable at all hands the choice back to wgpu, because the code only fills in a
+preference nobody expressed. On a machine with a solid discrete driver it is the right thing to
+reach for.
+
+If the trouble is the driver being *loaded* rather than used, two heavier hammers, both environment
+rather than code because they are about a machine rather than about this game:
+
+```bash
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.json   # the only Vulkan driver in sight
+WGPU_BACKEND=gl                                          # skip Vulkan altogether
+```
+
+And the heaviest, which is a decision about the whole machine and not about this repository:
+blacklisting the `nouveau` kernel module removes the card from everything, and needs root and a
+reboot.
+
+Which adapter was actually chosen is printed at startup — `AdapterInfo { name: ... }` — and that
+line is the only thing worth believing, because every layer above it can be overridden by a layer
+below.
+
 ### Looking at an asset
 
 A `.glb` is a JSON document with a blob of numbers stapled to it, and the JSON says almost
