@@ -18,8 +18,12 @@
 #
 # `--add` is for a single clip fetched from Mixamo on its own — "Driving", say, which the Rifle
 # pack has no equivalent of. The file name becomes the clip name, lower-cased with spaces turned
-# into underscores, so `Honking Horn.fbx` lands as `honking_horn.glb`. Download it **Without Skin**
-# if Mixamo offers the choice: the clip is the same and the file is a hundredth of the size.
+# into underscores, so `Honking Horn.fbx` lands as `honking_horn.glb`.
+#
+# Every converted clip then goes through `tools/glb strip`, which throws the character back out of
+# it. A Mixamo download carries the figure whether the clip needs it or not, and Bevy's glTF loader
+# builds every sub-asset of a file it opens — so an unstripped clip decodes and uploads 13 MB of
+# textures nothing will ever draw. Measured on Driving: 4.60 MB of file for 0.13 MB of animation.
 #
 # Nothing in the game *requires* the result. A checkout without it falls back to the Quaternius
 # character, which is CC0 and is committed — see client/src/character.rs.
@@ -54,7 +58,7 @@ if [ "${1:-}" = "--add" ]; then
     name="$(basename "${clip%.*}" | tr '[:upper:] ' '[:lower:]_')"
     "$converter" --binary --input "$clip" --output "$here/assets/anims/$name" >/dev/null 2>&1
     [ -f "$here/assets/anims/$name.glb" ] || fail "The conversion of $clip produced nothing."
-    echo "  $name.glb"
+    "$here/tools/glb" strip "$here/assets/anims/$name.glb"
   done
   step "Added. Check it is on the same skeleton, which is the failure that is silent:"
   echo "  tools/glb rigs assets/characters/swat.glb assets/anims/<name>.glb"
@@ -98,6 +102,10 @@ elif [ -d "$rifle" ]; then
 else
   fail "Neither $converted nor $rifle exists — nowhere to get the clips from."
 fi
+
+step "Dropping the character out of the clips"
+find "$here/assets/anims" -maxdepth 1 -name '*.glb' -print0 |
+  xargs -0 --no-run-if-empty "$here/tools/glb" strip
 
 clips=$(find "$here/assets/anims" -maxdepth 1 -name '*.glb' | wc -l)
 step "Done: 1 character and $clips clips"

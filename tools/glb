@@ -12,6 +12,7 @@ Usage:
   tools/glb skeleton <file>         the joint tree, and each joint's place in the bind pose
   tools/glb animations <file>       per clip: length, which joints move, whether it loops
   tools/glb rigs <file>...          do these skeletons match? — whose clips can drive whose model
+  tools/glb strip <file>...         throw away everything but the skeleton and the clips
 
 Both `.glb` and `.gltf` are read; a `.gltf` finds its `.bin` beside it, and data: URIs work too.
 
@@ -23,6 +24,13 @@ which is what Sketchfab writes on export, so a credit entry can be copied rather
 `rigs` answers the question a mixed pile of downloads keeps asking. Bevy binds an animation to a
 skeleton by the *path* of bone names, so a clip drives a model only if the model has a bone at the
 same path — and that is a thing to check before building on it, not after.
+
+`strip` is the one command that writes. A clip downloaded with its character attached carries a
+copy of the mesh and its textures, and Bevy's glTF loader builds *every* sub-asset of a file it
+opens — asking for `Animation(0)` still decodes the textures and uploads them. So a 4.5 MB clip
+costs 13 MB of graphics memory to hold an animation worth 50 KB. This drops the meshes, skins,
+materials and images, keeps every node so the bone paths still line up, and rewrites the file in
+place.
 
 What this cannot do is show you the model. For that, see the README under "Looking at an asset".
 """
@@ -48,6 +56,7 @@ COUNTS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT2": 4, "MAT3": 9, "M
 
 GLB_MAGIC = 0x46546C67
 CHUNK_JSON = 0x4E4F534A
+CHUNK_BIN = 0x004E4942
 
 
 class Gltf:
@@ -121,6 +130,26 @@ class Gltf:
             struct.unpack_from("<" + fmt * width, blob, start + i * stride)
             for i in range(spec["count"])
         ]
+
+    def bytes_of(self, accessor):
+        """One accessor's values as raw bytes, packed tight — no stride, no offset.
+
+        `read` turns them into numbers, which is what a question about an asset needs. This keeps
+        them as they are, which is what copying one into a new file needs: a float that has been
+        through Python is a float that has been rounded.
+        """
+        spec = self.get("accessors")[accessor]
+        if "sparse" in spec:
+            raise SystemExit(f"{self.path}: sparse accessors are not handled")
+        view = self.get("bufferViews")[spec["bufferView"]]
+        start = view.get("byteOffset", 0) + spec.get("byteOffset", 0)
+        _fmt, size = COMPONENTS[spec["componentType"]]
+        width = size * COUNTS[spec["type"]]
+        stride = view.get("byteStride") or width
+        blob = self.buffers[view.get("buffer", 0)]
+        return b"".join(
+            blob[start + i * stride : start + i * stride + width] for i in range(spec["count"])
+        )
 
     def parents(self):
         out = {}
@@ -447,12 +476,98 @@ def rigs(paths):
             print(f"      extra:   {name}")
 
 
+def strip(paths):
+    """Rewrite each file with its meshes and textures gone, keeping the skeleton and the clips.
+
+    In place, because these files are the *output* of a conversion — `tools/setup-assets` makes
+    them again from the download at any time — and a `.stripped.glb` beside every clip would be one
+    more thing for the loader to pick the wrong one of.
+    """
+    for path in paths:
+        glb = Gltf(path)
+        if not glb.get("animations"):
+            raise SystemExit(f"{path}: no animations — stripping it would leave nothing")
+        before = os.path.getsize(path)
+        document, blob = _clips_only(glb)
+        _write_glb(path, document, blob)
+        after = os.path.getsize(path)
+        print(f"  {os.path.basename(path):32} {before / 1e6:6.2f} MB -> {after / 1e6:6.2f} MB")
+
+
+def _clips_only(glb):
+    """The same file with only what an animation needs: the nodes, and the curves that move them.
+
+    Every node is kept, including the ones that only ever held a mesh. Bevy binds a clip to a
+    skeleton by the *path* of names down from the scene root, so a node dropped out of the middle
+    would rename everything below it — and `rigs` would then report a mismatch that is this
+    command's own doing.
+    """
+    document = {"asset": glb.json.get("asset", {"version": "2.0"})}
+    for key in ("scene", "scenes"):
+        if key in glb.json:
+            document[key] = glb.json[key]
+    document["nodes"] = [
+        {key: value for key, value in node.items() if key not in ("mesh", "skin")}
+        for node in glb.get("nodes")
+    ]
+
+    accessors, views, blob, moved = [], [], bytearray(), {}
+
+    def keep(index):
+        """Copy one accessor across, once, and say where it landed."""
+        if index not in moved:
+            data = glb.bytes_of(index)
+            # glTF wants a view's offset aligned to its component size; four covers every type
+            # an animation sampler uses.
+            blob.extend(b"\0" * (-len(blob) % 4))
+            views.append({"buffer": 0, "byteOffset": len(blob), "byteLength": len(data)})
+            blob.extend(data)
+            spec = dict(glb.get("accessors")[index])
+            spec["bufferView"] = len(views) - 1
+            spec.pop("byteOffset", None)
+            moved[index] = len(accessors)
+            accessors.append(spec)
+        return moved[index]
+
+    document["animations"] = [
+        {
+            **clip,
+            "samplers": [
+                {**sampler, "input": keep(sampler["input"]), "output": keep(sampler["output"])}
+                for sampler in clip["samplers"]
+            ],
+        }
+        for clip in glb.get("animations")
+    ]
+    document["accessors"] = accessors
+    document["bufferViews"] = views
+    document["buffers"] = [{"byteLength": len(blob)}]
+    return document, bytes(blob)
+
+
+def _write_glb(path, document, blob):
+    """Two chunks and a header. Written beside the target and moved over it, so an interrupted
+    run leaves the old file rather than half a new one."""
+    text = json.dumps(document, separators=(",", ":")).encode()
+    text += b" " * (-len(text) % 4)
+    blob += b"\0" * (-len(blob) % 4)
+    beside = path + ".new"
+    with open(beside, "wb") as out:
+        out.write(struct.pack("<III", GLB_MAGIC, 2, 12 + 8 + len(text) + 8 + len(blob)))
+        out.write(struct.pack("<II", len(text), CHUNK_JSON))
+        out.write(text)
+        out.write(struct.pack("<II", len(blob), CHUNK_BIN))
+        out.write(blob)
+    os.replace(beside, path)
+
+
 COMMANDS = {
     "info": info,
     "nodes": nodes,
     "skeleton": skeleton,
     "animations": animations,
     "rigs": rigs,
+    "strip": strip,
 }
 
 
@@ -461,7 +576,7 @@ def main():
     if len(args) < 2 or args[0] not in COMMANDS:
         raise SystemExit(__doc__)
     command, files = args[0], args[1:]
-    if command in ("info", "rigs"):
+    if command in ("info", "rigs", "strip"):
         COMMANDS[command](files)
     else:
         if len(files) != 1:

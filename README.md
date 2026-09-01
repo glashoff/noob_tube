@@ -424,6 +424,7 @@ tools/glb nodes <file>            # the node tree and mesh sizes
 tools/glb skeleton <file>         # the joint tree, in bind pose
 tools/glb animations <file>       # per clip: what moves, and whether it loops
 tools/glb rigs <file>...          # do these skeletons match — whose clips drive whose model
+tools/glb strip <file>...         # throw the character back out of a clip (rewrites in place)
 ```
 
 Both `.glb` and `.gltf` are read; a `.gltf` finds its `.bin` beside it.
@@ -441,6 +442,14 @@ section calls the significant one. Bevy binds an animation to a skeleton by the 
 names, so a clip drives a model only if that model has a bone at the same path — names alone are
 not enough, since two rigs can use the same names in a different hierarchy. `rigs` compares full
 paths and says plainly whether clips interchange, drive a model in part, or need retargeting.
+
+`strip` is the one command that writes, and it exists because a downloaded clip is usually not
+only a clip. Mixamo hands out "Driving" with the whole soldier attached — mesh, four textures — and
+Bevy's glTF loader builds *every* sub-asset of a file it opens, so asking for `Animation(0)` still
+decodes those textures and uploads them. The clip is worth 130 KB and the file cost 4.6 MB and 13 MB
+of graphics memory. `strip` drops the meshes, skins, materials and images and keeps every node, so
+the bone paths — and therefore `rigs` — come out unchanged. `tools/setup-assets` runs it over every
+clip it converts, and the whole `assets/anims` directory went from 12 MB to 3 MB the first time.
 
 What `tools/glb` cannot do is show you the model. For that:
 
