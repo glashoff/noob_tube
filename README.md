@@ -315,6 +315,40 @@ tools/brp watch <entity> <type>...          # stream every change until interrup
 tools/brp --port 15712 list                 # the server instead
 ```
 
+### Looking at an asset
+
+A `.glb` is a JSON document with a blob of numbers stapled to it, and the JSON says almost
+everything a decision about the asset depends on: who made it and under what licence, how many
+triangles it costs, what the skeleton is called, which animations are in there and how long they
+run. None of that needs a renderer. `tools/glb` is a dependency-free reader for it, in the same
+spirit as `tools/brp`:
+
+```bash
+tools/glb info ~/Downloads/mira.glb ~/Downloads/'mira(1).glb'   # compare two quality levels
+tools/glb nodes <file>                                          # the node tree and mesh sizes
+tools/glb skeleton <file>                                       # the joint tree, in bind pose
+tools/glb animations <file>                                     # per clip: what moves, and whether it loops
+```
+
+`info` takes several files on purpose. A Sketchfab download usually offers two quality levels, and
+the useful question is whether they differ in geometry or only in texture size — if the geometry
+lines match, keep the small one. Both the Warthog and the mounted gun turned out that way.
+
+The author and licence come out of `asset.extras`, which is what Sketchfab writes on export. That is
+where every entry in `assets/CREDITS.md` came from: it can be read back out of the file at any time
+rather than trusted to a browser tab.
+
+What `tools/glb` cannot do is show you the model. For that:
+
+- **[gltf-viewer.donmccurdy.com](https://gltf-viewer.donmccurdy.com/)** — drag the file in. Nothing
+  to install, it lists the animation clips and plays them. The quickest way to answer "what does
+  this clip actually look like".
+- **Blender** — `File ▸ Import ▸ glTF 2.0`. The Dope Sheet's *Action Editor* lists every clip and
+  the Outliner shows the armature. This is also the only one of the three that can *change*
+  anything: retargeting, splitting one long take into clips, deleting a skeleton's unused half.
+- **The game itself**, once a model is wired up. Slowest to reach, and the only one that answers
+  whether it looks right at the size and framing it will actually be seen at.
+
 ### Baking a collision shape
 
 `tools/bake_collider` turns a vehicle's `.glb` into the convex hulls the game collides and shoots

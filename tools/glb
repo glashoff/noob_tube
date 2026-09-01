@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""What is inside a .glb, without opening a 3D program.
+
+A glTF binary file is a JSON document with a blob of numbers stapled to it. The JSON says
+everything a decision about the asset depends on — who made it and under what licence, how many
+triangles it costs, what the skeleton is called, which animations are in there and how long they
+run — and none of it needs a renderer to read.
+
+Usage:
+  tools/glb info <file>...          licence, counts, geometry, skins, animation summary
+  tools/glb nodes <file>            the node tree, with each mesh's size in its own units
+  tools/glb skeleton <file>         the joint tree, and each joint's place in the bind pose
+  tools/glb animations <file>       per clip: length, which joints move, whether it loops
+
+`info` takes several files, which is the way to compare two quality levels of the same download:
+if their geometry lines match, they differ only in texture size and the small one is the one to
+keep. See `assets/CREDITS.md` — the author and licence `info` prints come out of `asset.extras`,
+which is what Sketchfab writes on export, so a credit entry can be copied rather than typed.
+
+What this cannot do is show you the model. For that, see the README under "Looking at an asset".
+"""
+
+import json
+import math
+import struct
+import sys
+
+# glTF's component types, as (struct format, size in bytes).
+COMPONENTS = {
+    5120: ("b", 1),
+    5121: ("B", 1),
+    5122: ("h", 2),
+    5123: ("H", 2),
+    5125: ("I", 4),
+    5126: ("f", 4),
+}
+COUNTS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT2": 4, "MAT3": 9, "MAT4": 16}
+
+GLB_MAGIC = 0x46546C67
+CHUNK_JSON = 0x4E4F534A
+
+
+class Glb:
+    """A parsed .glb: its JSON document, and the binary chunk the accessors point into."""
+
+    def __init__(self, path):
+        self.path = path
+        with open(path, "rb") as handle:
+            magic, _version, total = struct.unpack("<III", handle.read(12))
+            if magic != GLB_MAGIC:
+                raise SystemExit(f"{path}: not a .glb (a .gltf is plain JSON — read it directly)")
+            self.json = None
+            self.blob = None
+            while handle.tell() < total:
+                length, kind = struct.unpack("<II", handle.read(8))
+                chunk = handle.read(length)
+                if kind == CHUNK_JSON:
+                    self.json = json.loads(chunk)
+                elif self.blob is None:
+                    self.blob = chunk
+        if self.json is None:
+            raise SystemExit(f"{path}: no JSON chunk")
+
+    def get(self, key):
+        return self.json.get(key, [])
+
+    def name(self, index):
+        return self.get("nodes")[index].get("name") or f"<node {index}>"
+
+    def read(self, accessor):
+        """One accessor's values, as a list of tuples."""
+        spec = self.get("accessors")[accessor]
+        view = self.get("bufferViews")[spec["bufferView"]]
+        start = view.get("byteOffset", 0) + spec.get("byteOffset", 0)
+        fmt, size = COMPONENTS[spec["componentType"]]
+        width = COUNTS[spec["type"]]
+        stride = view.get("byteStride") or size * width
+        return [
+            struct.unpack_from("<" + fmt * width, self.blob, start + i * stride)
+            for i in range(spec["count"])
+        ]
+
+    def parents(self):
+        out = {}
+        for index, node in enumerate(self.get("nodes")):
+            for child in node.get("children", []):
+                out[child] = index
+        return out
+
+
+def info(paths):
+    for path in paths:
+        glb = Glb(path)
+        extras = glb.json.get("asset", {}).get("extras") or {}
+        print("=" * 78)
+        print(path)
+        print("=" * 78)
+        if extras:
+            for key in ("title", "author", "license", "source"):
+                if extras.get(key):
+                    print(f"{key:10} {extras[key]}")
+        else:
+            print("no asset.extras — this file carries no author or licence of its own")
+        print(f"{'generator':10} {glb.json.get('asset', {}).get('generator')}")
+
+        vertices = triangles = skinned = 0
+        for mesh in glb.get("meshes"):
+            for primitive in mesh.get("primitives", []):
+                attributes = primitive.get("attributes", {})
+                if "POSITION" in attributes:
+                    vertices += glb.get("accessors")[attributes["POSITION"]]["count"]
+                if "JOINTS_0" in attributes:
+                    skinned += 1
+                if "indices" in primitive:
+                    triangles += glb.get("accessors")[primitive["indices"]]["count"] // 3
+        print()
+        print(f"{'geometry':10} {vertices} vertices, {triangles} triangles"
+              f"{f', {skinned} skinned primitives' if skinned else ''}")
+        print(f"{'meshes':10} " + ", ".join(
+            f"{mesh.get('name') or '<unnamed>'}" for mesh in glb.get("meshes")) or "none")
+        print(f"{'materials':10} {len(glb.get('materials'))}, "
+              f"{len(glb.get('textures'))} textures, {len(glb.get('images'))} images")
+
+        for index, skin in enumerate(glb.get("skins")):
+            print(f"{'skin ' + str(index):10} {len(skin.get('joints', []))} joints")
+
+        clips = glb.get("animations")
+        print(f"{'animations':10} {len(clips)}")
+        for index, clip in enumerate(clips):
+            print(f"           {index:3} {clip.get('name') or '<unnamed>':32} "
+                  f"{_duration(glb, clip):6.2f} s, {len(clip.get('channels', []))} channels")
+        print()
+
+
+def _duration(glb, clip):
+    longest = 0.0
+    for sampler in clip.get("samplers", []):
+        end = glb.get("accessors")[sampler["input"]].get("max")
+        if end:
+            longest = max(longest, end[0])
+    return longest
+
+
+def nodes(path):
+    glb = Glb(path)
+    scene = glb.get("scenes")[glb.json.get("scene", 0)]
+    meshes = glb.get("meshes")
+    accessors = glb.get("accessors")
+
+    def walk(index, depth):
+        node = glb.get("nodes")[index]
+        line = "  " * depth + glb.name(index)
+        if "mesh" in node:
+            sizes = []
+            for primitive in meshes[node["mesh"]].get("primitives", []):
+                spec = accessors[primitive["attributes"]["POSITION"]]
+                size = [high - low for low, high in zip(spec["min"], spec["max"])]
+                sizes.append(f"{size[0]:.2f} x {size[1]:.2f} x {size[2]:.2f}")
+            line = f"{line:<44} mesh: " + "; ".join(sizes)
+        print(line)
+        for child in node.get("children", []):
+            walk(child, depth + 1)
+
+    for root in scene["nodes"]:
+        walk(root, 0)
+
+
+def skeleton(path):
+    glb = Glb(path)
+    if not glb.get("skins"):
+        raise SystemExit(f"{path}: no skin, so nothing here is a skeleton")
+    parents = glb.parents()
+    for index, skin in enumerate(glb.get("skins")):
+        joints = skin["joints"]
+        places = _bind_positions(glb, skin)
+        print(f"skin {index}: {len(joints)} joints")
+        for root in (j for j in joints if parents.get(j) not in set(joints)):
+            _walk_joints(glb, root, set(joints), places, 0)
+        print()
+
+
+def _bind_positions(glb, skin):
+    """Where each joint sits in the bind pose, from the inverse bind matrices.
+
+    A joint's bind matrix is the inverse of the matrix stored here, and the translation of a
+    rigid transform's inverse is `-R^T t` — so the joint's place comes back without inverting a
+    4x4 by hand. Scale in the rig would skew this; it is a sanity check, not a measurement.
+    """
+    if "inverseBindMatrices" not in skin:
+        return {}
+    out = {}
+    for joint, m in zip(skin["joints"], glb.read(skin["inverseBindMatrices"])):
+        rows = [(m[0], m[4], m[8]), (m[1], m[5], m[9]), (m[2], m[6], m[10])]
+        t = (m[12], m[13], m[14])
+        out[joint] = tuple(
+            -sum(rows[r][i] * t[r] for r in range(3)) for i in range(3)
+        )
+    return out
+
+
+def _walk_joints(glb, index, joints, places, depth):
+    place = places.get(index)
+    line = "  " * depth + glb.name(index)
+    if place:
+        line = f"{line:<52} ({place[0]:8.1f}, {place[1]:8.1f}, {place[2]:8.1f})"
+    print(line)
+    for child in glb.get("nodes")[index].get("children", []):
+        if child in joints:
+            _walk_joints(glb, child, joints, places, depth + 1)
+
+
+def animations(path):
+    glb = Glb(path)
+    clips = glb.get("animations")
+    if not clips:
+        raise SystemExit(f"{path}: no animations")
+    for index, clip in enumerate(clips):
+        print("=" * 78)
+        print(f"{index}: {clip.get('name') or '<unnamed>'}   {_duration(glb, clip):.2f} s, "
+              f"{len(clip.get('channels', []))} channels")
+        print("=" * 78)
+
+        moving = []
+        still = 0
+        loops = 0
+        for channel in clip.get("channels", []):
+            sampler = clip["samplers"][channel["sampler"]]
+            values = glb.read(sampler["output"])
+            target = channel["target"]
+            span = max(
+                max(abs(value[i] - values[0][i]) for i in range(len(value)))
+                for value in values
+            )
+            if span < 1e-6:
+                still += 1
+                continue
+            ends = max(abs(a - b) for a, b in zip(values[0], values[-1]))
+            loops += ends < span * 0.02
+            moving.append((span, glb.name(target["node"]), target["path"], len(values)))
+
+        moving.sort(reverse=True)
+        print(f"{len(moving)} channels move, {still} never do; "
+              f"{loops} of the moving ones end where they started")
+        print(f"  {'span':>9}  {'joint':36} {'path':12} keys")
+        for span, name, kind, keys in moving[:20]:
+            print(f"  {span:9.3f}  {name:36} {kind:12} {keys}")
+        if len(moving) > 20:
+            print(f"  ... and {len(moving) - 20} more")
+        print()
+
+
+COMMANDS = {"info": info, "nodes": nodes, "skeleton": skeleton, "animations": animations}
+
+
+def main():
+    args = sys.argv[1:]
+    if len(args) < 2 or args[0] not in COMMANDS:
+        raise SystemExit(__doc__)
+    command, files = args[0], args[1:]
+    if command == "info":
+        info(files)
+    else:
+        if len(files) != 1:
+            raise SystemExit(f"{command} takes one file")
+        COMMANDS[command](files[0])
+
+
+if __name__ == "__main__":
+    main()
