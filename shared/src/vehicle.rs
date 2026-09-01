@@ -1240,6 +1240,79 @@ mod tests {
         assert!(y > 0.0, "it is still at y {y:.3}, under the floor it was dropped through");
     }
 
+    /// The tyre rests *on* the ground, not in it, once it has settled.
+    ///
+    /// The contact point is worked back from the strut's travel rather than taken from where the
+    /// ray hit, so that the bump stop has somewhere to put a wheel it has stopped. The two agree
+    /// everywhere the stop is not touching, and this is what says so.
+    #[test]
+    fn the_tyre_rests_on_the_ground_rather_than_in_it() {
+        let spec = VehicleKind::Buggy.spec();
+        let mut app = driving_app();
+        let car = park(&mut app, Vec3::Y * (spec.ride_height() + 0.2));
+        run(&mut app, 3.0);
+
+        for wheel in app.world().get::<Wheels>(car).expect("wheels").0 {
+            let tread = wheel.centre.y - spec.wheel_radius;
+            assert!(
+                tread.abs() < 0.01,
+                "the tread sits {:.1} cm {} the ground",
+                tread.abs() * 100.0,
+                if tread < 0.0 { "under" } else { "above" },
+            );
+        }
+    }
+
+    /// How far a tyre sinks into the road under a hard corner, which is a known limit rather than
+    /// a check.
+    ///
+    /// Full lock at 19 m/s puts about 19 kN through an outside strut, and this one can only answer
+    /// with `stiffness × rest_length` = 15.7 kN. So the suspension bottoms out, the body keeps
+    /// coming down, and the tread ends up 7.8 cm into the road. Before the travel was clamped the
+    /// same over-travel showed at the other end instead — the wheel centre above the point it hangs
+    /// from, a tyre drawn up through the bonnet. It is one fault with two faces and neither is
+    /// hidden by the other.
+    ///
+    /// Two fixes were tried and both were worse. A stiff bump stop stops the sinking (7.8 cm down
+    /// to 2.0 at eight times the spring rate) and stops a vehicle on its side from righting itself,
+    /// because the same force that catches a corner also holds a fallen car off the ground.
+    /// Correcting the ray for a round tyre on a tilted strut — `radius / cos(lean)`, which is
+    /// geometrically right — runs away as the strut turns towards horizontal, and made both the
+    /// sinking and the righting worse. What is actually wanted is more suspension travel or a
+    /// vehicle that leans less, and that is a handling decision rather than a bug fix.
+    ///
+    /// Ignored, because it is a measurement and not a check. Run it with
+    /// `cargo test -p noob_tube_shared -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn how_deep_a_tyre_goes_in_a_hard_corner() {
+        let spec = VehicleKind::Buggy.spec();
+        let mut app = driving_app();
+        let car = park(&mut app, Vec3::Y * (spec.ride_height() + 0.2));
+        run(&mut app, 1.0);
+        hands(&mut app, car, 1.0, 0.0);
+        run(&mut app, 4.0);
+        let entry = speed(&app, car).length();
+        hands(&mut app, car, 1.0, 1.0);
+
+        let mut worst: f32 = 0.0;
+        let mut stopped = 0;
+        for _ in 0..(6.0 * HZ as f32) as usize {
+            app.update();
+            for wheel in app.world().get::<Wheels>(car).expect("wheels").0 {
+                worst = worst.max(spec.wheel_radius - wheel.centre.y);
+                if wheel.compression >= spec.rest_length - 1e-4 {
+                    stopped += 1;
+                }
+            }
+        }
+        println!(
+            "into the corner at {entry:.1} m/s: deepest tread {:.1} cm under the road, \
+             the strut on its stop for {stopped} wheel-ticks",
+            worst * 100.0
+        );
+    }
+
     /// A tyre resists sideways much harder than it resists rolling. That difference *is* the tyre:
     /// without it a vehicle is a sledge, and steering it would do nothing but change which way it
     /// points while it kept going the way it was.
