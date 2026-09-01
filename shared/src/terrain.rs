@@ -70,10 +70,107 @@ pub const DEFAULT_SPACING: f32 = 1.0;
 pub const DEFAULT_MIN_Y: f32 = -64.0;
 pub const DEFAULT_MAX_Y: f32 = 64.0;
 
-/// That map: flat at half height, which for this range is the plane the level already stood on.
+/// How far around the origin the ground is left exactly flat, and where the shaping reaches full
+/// strength.
+///
+/// The spawn points, both vehicle starts, the ramp and every crate stand inside the first radius,
+/// on the plane they were placed on. Shaping the ground under them would either bury them or leave
+/// them hanging, and neither is a thing to discover by walking into it — the furthest of them is
+/// the ramp at 24 m, so 40 leaves room for the next one.
+const HOME_FLAT: f32 = 40.0;
+const HOME_BLEND: f32 = 90.0;
+
+/// A rounded hill, or a hollow when the height is negative.
+struct Swell {
+    at: Vec2,
+    radius: f32,
+    height: f32,
+}
+
+/// A ravine, cut along a line rather than around a point.
+struct Ravine {
+    from: Vec2,
+    to: Vec2,
+    width: f32,
+    depth: f32,
+}
+
+/// Somewhere to walk that is not a table.
+///
+/// Placed by hand rather than generated: four hills and two ravines are enough to tell whether the
+/// ground, the slope limit and the camera behave, and a handful of numbers can be moved when they
+/// turn out to be in the wrong place. Noise comes later, if at all.
+const HILLS: [Swell; 5] = [
+    Swell { at: Vec2::new(-140.0, 60.0), radius: 110.0, height: 22.0 },
+    Swell { at: Vec2::new(170.0, -120.0), radius: 130.0, height: 28.0 },
+    Swell { at: Vec2::new(60.0, 180.0), radius: 90.0, height: 16.0 },
+    Swell { at: Vec2::new(-190.0, -150.0), radius: 140.0, height: 34.0 },
+    // A bowl, so that "down" is reachable without walking to a ravine.
+    Swell { at: Vec2::new(150.0, 130.0), radius: 100.0, height: -20.0 },
+];
+
+const RAVINES: [Ravine; 2] = [
+    Ravine { from: Vec2::new(-60.0, -70.0), to: Vec2::new(-230.0, 40.0), width: 22.0, depth: 18.0 },
+    Ravine { from: Vec2::new(120.0, 40.0), to: Vec2::new(30.0, 210.0), width: 18.0, depth: 14.0 },
+];
+
+/// Smoothstep, the polynomial one, on a value already clamped to 0..1.
+///
+/// Every shaping function here is a polynomial in the *squared* distance and never takes a square
+/// root, which is the rule §6 sets for brushes and applies just as much to this: `sqrt`, `powf`,
+/// `sin` and `hypot` go through `libm`, which is not required to be correctly rounded and may
+/// differ in the last ulp between platforms. Client and server both generate this map until step
+/// five sends it, so they have to agree on it exactly.
+fn smoothstep(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// How much of a feature applies at a squared distance from it: 1 at the middle, 0 at the rim, and
+/// flat at both ends.
+fn falloff(distance_squared: f32, radius: f32) -> f32 {
+    let t = distance_squared / (radius * radius);
+    if t >= 1.0 { 0.0 } else { smoothstep(1.0 - t) }
+}
+
+/// The squared distance from a point to a segment. No square root anywhere in it.
+fn to_segment_squared(point: Vec2, from: Vec2, to: Vec2) -> f32 {
+    let along = to - from;
+    let length_squared = along.length_squared();
+    let t = if length_squared <= 0.0 {
+        0.0
+    } else {
+        ((point - from).dot(along) / length_squared).clamp(0.0, 1.0)
+    };
+    (point - (from + along * t)).length_squared()
+}
+
+/// That map: hills and ravines, and flat where the level already stands.
 pub fn default_terrain() -> Terrain {
-    Terrain::new(DEFAULT_EXTENT, DEFAULT_EXTENT, DEFAULT_SPACING, DEFAULT_MIN_Y, DEFAULT_MAX_Y)
-        .expect("the default map is within its own caps")
+    let mut terrain =
+        Terrain::new(DEFAULT_EXTENT, DEFAULT_EXTENT, DEFAULT_SPACING, DEFAULT_MIN_Y, DEFAULT_MAX_Y)
+            .expect("the default map is within its own caps");
+    let grid = terrain.grid;
+    let flat = HOME_FLAT * HOME_FLAT;
+    let blend = HOME_BLEND * HOME_BLEND;
+    for iz in 0..grid.nz {
+        for ix in 0..grid.nx {
+            let here = grid.world_of(ix, iz);
+            let mut y = 0.0;
+            for hill in &HILLS {
+                y += hill.height * falloff((here - hill.at).length_squared(), hill.radius);
+            }
+            for ravine in &RAVINES {
+                let across = to_segment_squared(here, ravine.from, ravine.to);
+                y -= ravine.depth * falloff(across, ravine.width);
+            }
+            // Held down to nothing over the level everything already stands on.
+            let home = ((here.length_squared() - flat) / (blend - flat)).clamp(0.0, 1.0);
+            y *= smoothstep(home);
+            let index = grid.index(ix, iz);
+            terrain.heights[index] = grid.quantise(y);
+        }
+    }
+    terrain
 }
 
 /// Why a map was refused.
@@ -567,18 +664,74 @@ mod tests {
         assert!(ground_at(&mut app, 0.0, 9.0).is_none(), "there is ground past the edge");
     }
 
-    /// The map the level starts on, and the one number about it that everything else assumes.
+    /// The map the level starts on.
     #[test]
-    fn the_default_map_is_the_ground_plane_it_replaces() {
+    fn the_default_map_is_the_canonical_grid() {
         let terrain = default_terrain();
         assert_eq!((terrain.grid.nx, terrain.grid.nz), (513, 513), "the canonical grid");
         assert_eq!(terrain.grid.extent_x(), 512.0);
-        let y = terrain.height_at(0, 0);
-        assert!(y.abs() < 0.002, "the default ground is at {y}, not at the plane it replaces");
-        assert!(
-            terrain.heights.iter().all(|&h| h == terrain.heights[0]),
-            "the default map is not flat",
-        );
+    }
+
+    /// Flat where the level already stands, so nothing that was placed on the plane is buried by
+    /// or left hanging over the ground.
+    #[test]
+    fn the_ground_the_level_stands_on_is_left_alone() {
+        let terrain = default_terrain();
+        let grid = terrain.grid;
+        for iz in 0..grid.nz {
+            for ix in 0..grid.nx {
+                let here = grid.world_of(ix, iz);
+                if here.length_squared() > HOME_FLAT * HOME_FLAT {
+                    continue;
+                }
+                let y = terrain.height_at(ix, iz);
+                assert!(y.abs() < 0.01, "the ground at {here:?} is at {y:.3}, not on the plane");
+            }
+        }
+    }
+
+    /// And not flat anywhere else, which is the whole point of putting hills in it.
+    #[test]
+    fn there_are_hills_to_climb_and_ravines_to_fall_into() {
+        let terrain = default_terrain();
+        let grid = terrain.grid;
+        let (mut lowest, mut highest) = (f32::MAX, f32::MIN);
+        for iz in 0..grid.nz {
+            for ix in 0..grid.nx {
+                let y = terrain.height_at(ix, iz);
+                lowest = lowest.min(y);
+                highest = highest.max(y);
+            }
+        }
+        assert!(highest > 15.0, "the tallest thing on the map is {highest:.1} m");
+        assert!(lowest < -10.0, "the deepest thing on the map is {lowest:.1} m");
+        // And inside the range it was quantised against, or the shaping is being clipped.
+        assert!(highest < grid.max_y && lowest > grid.min_y, "the shaping ran out of range");
+    }
+
+    /// Nothing outside the tests may reach for a square root or a transcendental.
+    ///
+    /// Client and server both generate the default map until step five sends it instead, so they
+    /// have to agree on it exactly — and `sqrt`, `powf`, `sin` and `hypot` go through `libm`, which
+    /// is not required to be correctly rounded and may differ in the last ulp between platforms.
+    /// `mul_add` is out for a different reason: it is a *different* result from `a * b + c`,
+    /// exactly and deliberately, and whether it lowers to one instruction or two is a property of
+    /// the target.
+    ///
+    /// Everything before `#[cfg(test)]` rather than the generator alone. The first version of this
+    /// scanned from `fn default_terrain` to the next occurrence of the same string, which happened
+    /// to end where the function does — a boundary that held by accident and would have moved
+    /// silently the day somebody wrote that name a third time.
+    #[test]
+    fn nothing_that_both_sides_run_reaches_for_a_transcendental() {
+        let source = include_str!("terrain.rs");
+        let shipped = source.split("#[cfg(test)]").next().expect("a file");
+        assert!(shipped.contains("fn default_terrain"), "the split lost the generator");
+        for forbidden in
+            [".sqrt()", ".powf(", ".powi(", ".sin(", ".cos(", ".exp(", ".hypot(", "mul_add"]
+        {
+            assert!(!shipped.contains(forbidden), "something outside the tests uses {forbidden}");
+        }
     }
 
     /// The two numbers an author types, and the grid they mean.
