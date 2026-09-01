@@ -4,7 +4,8 @@
 //! numbers. This module only turns them into meshes.
 
 use bevy::prelude::*;
-use noob_tube_shared::level::{self, CRATES, CRATE_HALF_EXTENT, HALF_EXTENT, RAMP_HALF_EXTENTS};
+use noob_tube_shared::level::{self, CRATES, CRATE_HALF_EXTENT, RAMP_HALF_EXTENTS};
+use noob_tube_shared::terrain::DEFAULT_EXTENT;
 use noob_tube_shared::types::Authored;
 
 pub struct WorldPlugin;
@@ -63,11 +64,10 @@ fn spawn_ground(
     commands.spawn((
         Name::from("Ground"),
         Authored,
-        Mesh3d(meshes.add(
-            Plane3d::default()
-                .mesh()
-                .size(HALF_EXTENT * 2.0, HALF_EXTENT * 2.0),
-        )),
+        // As big as the height field is, rather than as big as the plane used to be. A flat plane
+        // is a stand-in until the terrain is drawn as terrain in step four; what it must not be is
+        // a different size from the thing players collide with, which is a rim of invisible ground.
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(DEFAULT_EXTENT, DEFAULT_EXTENT))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.30, 0.33, 0.30),
             perceptual_roughness: 0.95,

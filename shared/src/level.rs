@@ -14,9 +14,6 @@ use bevy::prelude::*;
 
 use crate::physics::{level_geometry, level_geometry_facing};
 
-/// Half the side length of the ground plane, in metres.
-pub const HALF_EXTENT: f32 = 250.0;
-
 /// Half-extents of one crate. They are cubes, 2 m on a side.
 pub const CRATE_HALF_EXTENT: f32 = 1.0;
 
@@ -90,18 +87,13 @@ pub fn spawn_point(index: usize) -> Vec3 {
 /// we will actually ship keeps the awkward cases — a shape cast against a triangle mesh is accurate
 /// only to a few millimetres — in front of us rather than behind a placeholder.
 pub fn spawn_level(mut commands: Commands) {
-    commands.spawn(level_geometry(
-        Collider::trimesh(
-            vec![
-                Vec3::new(-HALF_EXTENT, 0.0, -HALF_EXTENT),
-                Vec3::new(HALF_EXTENT, 0.0, -HALF_EXTENT),
-                Vec3::new(HALF_EXTENT, 0.0, HALF_EXTENT),
-                Vec3::new(-HALF_EXTENT, 0.0, HALF_EXTENT),
-            ],
-            vec![[0, 1, 2], [0, 2, 3]],
-        ),
-        Vec3::ZERO,
-    ));
+    // The ground is a height field now, and the point of this line being one line is that nothing
+    // else here had to change: `level_geometry` already gives it the static body and the level
+    // layer that `Level`'s sweeps and rays need, and every query downstream goes through Avian.
+    //
+    // Flat at half height until maps arrive, which is the same plane the trimesh it replaces was.
+    let (ground, at) = crate::terrain::default_terrain().collider();
+    commands.spawn(level_geometry(ground, at));
     let (at, facing) = ramp_pose();
     commands.spawn(level_geometry_facing(
         Collider::cuboid(
@@ -128,6 +120,76 @@ pub fn spawn_level(mut commands: Commands) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::physics::test_support::{ask, bare_app};
+
+    /// The level a round is actually played on, built by the system that builds it for real.
+    ///
+    /// `spawn_level` is run directly rather than added to `Startup`: the harness hands back an app
+    /// that has already started, so a system added afterwards never runs and every probe would
+    /// come back empty — which is a test that passes for the wrong reason on the day the ground
+    /// disappears.
+    fn played_level() -> App {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = bare_app();
+        app.world_mut().run_system_once(spawn_level).expect("the level spawns");
+        app.update();
+        app
+    }
+
+    /// Straight down from overhead, and the world y it landed on.
+    fn ground_at(app: &mut App, x: f32, z: f32) -> Option<f32> {
+        ask(app, move |level| level.raycast(Vec3::new(x, 500.0, z), Vec3::NEG_Y, 1000.0))
+            .map(|distance| 500.0 - distance)
+    }
+
+    /// The ground is a height field now, and everything that stood on the plane still does.
+    ///
+    /// This is the whole claim of the swap: `Level`'s rays and sweeps go through Avian, so a
+    /// height field is ground in exactly the way a triangle mesh was, without a line of change
+    /// anywhere downstream. If that were not true it would show here first.
+    #[test]
+    fn the_ground_is_still_under_everything_that_starts_on_it() {
+        let mut app = played_level();
+        for (at, _) in VEHICLE_STARTS {
+            let y = ground_at(&mut app, at.x, at.y).expect("no ground under a vehicle start");
+            assert!(y.abs() < 0.01, "the ground under {at:?} is at {y:.3}, not at the plane");
+        }
+        for index in 0..4 {
+            let at = spawn_point(index);
+            let y = ground_at(&mut app, at.x, at.z).expect("no ground under a spawn point");
+            assert!(y.abs() < 0.01, "the ground under spawn {index} is at {y:.3}");
+        }
+        // And a player stands on it rather than through it.
+        assert!(ask(&mut app, |level| level.is_grounded(Vec3::ZERO, false)), "not standing on it");
+    }
+
+    /// The field reaches as far as the plane did, and stops where it says it stops.
+    #[test]
+    fn the_ground_covers_the_playable_area() {
+        let mut app = played_level();
+        let half = crate::terrain::DEFAULT_EXTENT / 2.0;
+        assert!(ground_at(&mut app, half - 1.0, half - 1.0).is_some(), "a corner is missing");
+        assert!(ground_at(&mut app, -half + 1.0, -half + 1.0).is_some(), "a corner is missing");
+        assert!(
+            ground_at(&mut app, half + 5.0, 0.0).is_none(),
+            "there is ground past the edge of the map",
+        );
+    }
+
+    /// The ramp and the crates are still there and still on top of the ground, which is what says
+    /// the swap did not move the level out from under them.
+    #[test]
+    fn the_scenery_still_sits_on_the_ground() {
+        let mut app = played_level();
+        let ramp = ground_at(&mut app, RAMP_CENTRE.x, RAMP_CENTRE.y).expect("no ramp");
+        assert!(ramp > 0.5, "the ramp reads as {ramp:.2} m up, which is the ground, not the ramp");
+        for centre in CRATES {
+            let top = ground_at(&mut app, centre.x, centre.z).expect("no crate");
+            let want = centre.y + CRATE_HALF_EXTENT;
+            assert!((top - want).abs() < 0.01, "a crate top is at {top:.2}, not {want:.2}");
+        }
+    }
 
     /// Two vehicles that start inside each other, or inside a crate, spend the first tick of the
     /// round being pushed apart — which looks like a bug and is one. Nothing checks this at spawn,

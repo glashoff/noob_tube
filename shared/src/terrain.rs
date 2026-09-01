@@ -26,6 +26,9 @@
 //! and 3.2 GB. They live here so the menu can grey out an over-cap input against the same
 //! constants the server enforces, rather than against a second copy that drifts.
 
+use avian3d::parry::shape::SharedShape;
+use avian3d::parry::utils::Array2;
+use avian3d::prelude::*;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +58,23 @@ pub const MAX_BASELINE_BYTES: usize = 4 << 20;
 
 /// The most samples a map may have in total, from [`MAX_BASELINE_BYTES`].
 pub const MAX_SAMPLES: u32 = (MAX_BASELINE_BYTES / core::mem::size_of::<u16>()) as u32;
+
+/// The map a level has until maps can be made and loaded, in step six.
+///
+/// 512 m at 1 m spacing, which covers the playable area the ground plane it replaces had and lands
+/// on 513² — the size heightmap tools export, so an imported field will not need resampling. The
+/// range is the one the quantisation was costed against: 128 m, resolved to 2 mm, and deeper than
+/// anyone walks out of.
+pub const DEFAULT_EXTENT: f32 = 512.0;
+pub const DEFAULT_SPACING: f32 = 1.0;
+pub const DEFAULT_MIN_Y: f32 = -64.0;
+pub const DEFAULT_MAX_Y: f32 = 64.0;
+
+/// That map: flat at half height, which for this range is the plane the level already stood on.
+pub fn default_terrain() -> Terrain {
+    Terrain::new(DEFAULT_EXTENT, DEFAULT_EXTENT, DEFAULT_SPACING, DEFAULT_MIN_Y, DEFAULT_MAX_Y)
+        .expect("the default map is within its own caps")
+}
 
 /// Why a map was refused.
 ///
@@ -320,6 +340,46 @@ impl Terrain {
         Ok(Self { grid, water_y, heights })
     }
 
+    /// The shape the ground is, and where to put it.
+    ///
+    /// Avian takes a nested `Vec<Vec<Scalar>>` and derives the grid dimensions from the structure,
+    /// which eats a whole class of mistake the equivalent Rapier call leaves open. Two traps
+    /// survive it and both fail *silently*, so both are settled by
+    /// [`the_ramp_runs_the_way_it_was_built`](tests::the_ramp_runs_the_way_it_was_built) against
+    /// the installed crate rather than by reading anybody's documentation:
+    ///
+    /// - **Which index is which axis.** Avian's own doc comment says the number of rows is the
+    ///   subdivisions along X. Underneath, parry's `Array2` is *column-major* —
+    ///   `flat_index(i, j) = i + j * nrows` — while Avian flattens the nesting row-major, and
+    ///   parry's accessors read `j` as x and `i` as z. Getting it wrong transposes the terrain
+    ///   about its diagonal with no error of any kind: a ramp authored along +X comes out running
+    ///   along +Z.
+    /// - **Centring.** parry's height field is centred on its own origin, so the body belongs at
+    ///   the field's *centre* — not at `origin`, which points at the min corner.
+    ///
+    /// The heights are handed over in metres and the vertical scale is 1, rather than passing a
+    /// span and letting parry multiply. One less place for a factor to be applied twice.
+    pub fn collider(&self) -> (Collider, Vec3) {
+        let grid = self.grid;
+        // parry's `Array2` is column-major — `flat_index(i, j) = i + j * nrows` — and its accessors
+        // read `i` as z and `j` as x. So the data has to run z-fastest, with `nrows` counting the
+        // samples along z.
+        let mut data = vec![0.0f32; grid.samples()];
+        for ix in 0..grid.nx {
+            for iz in 0..grid.nz {
+                data[iz as usize + ix as usize * grid.nz as usize] = self.height_at(ix, iz);
+            }
+        }
+        let heights = Array2::new(grid.nz as usize, grid.nx as usize, data);
+        let centre = Vec3::new(
+            grid.origin_x + grid.extent_x() / 2.0,
+            0.0,
+            grid.origin_z + grid.extent_z() / 2.0,
+        );
+        let scale = Vec3::new(grid.extent_x(), 1.0, grid.extent_z());
+        (Collider::from(SharedShape::heightfield(heights, scale)), centre)
+    }
+
     /// What goes in the `.json` beside the blob.
     pub fn manifest(&self) -> Manifest {
         Manifest {
@@ -396,6 +456,130 @@ pub struct Marker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::test_support::{ask, bare_app};
+
+    /// A terrain that is flat along z and a ramp along x, so a transpose cannot hide.
+    ///
+    /// Deliberately not square either: parry's `Array2` is column-major and Avian flattens the
+    /// nesting row-major, and those two only agree when the sample counts match. A square probe
+    /// would pass whatever the answer is, which is the same reason the ramp is asymmetric.
+    fn asymmetric_ramp() -> Terrain {
+        let mut terrain = Terrain::new(32.0, 16.0, 8.0, -64.0, 64.0).expect("a probe");
+        assert_eq!((terrain.grid.nx, terrain.grid.nz), (5, 3), "the probe is not square");
+        for ix in 0..terrain.grid.nx {
+            for iz in 0..terrain.grid.nz {
+                let index = terrain.grid.index(ix, iz);
+                terrain.heights[index] = terrain.grid.quantise(ix as f32 * 2.0);
+            }
+        }
+        terrain
+    }
+
+    /// The probe world: this terrain as the only thing in it.
+    fn probe(terrain: &Terrain) -> App {
+        let mut app = bare_app();
+        let (collider, centre) = terrain.collider();
+        app.world_mut().spawn(crate::physics::level_geometry(collider, centre));
+        app.update();
+        app
+    }
+
+    /// Straight down from well overhead, and the world y it landed on.
+    fn ground_at(app: &mut App, x: f32, z: f32) -> Option<f32> {
+        ask(app, move |level| level.raycast(Vec3::new(x, 500.0, z), Vec3::NEG_Y, 1000.0))
+            .map(|distance| 500.0 - distance)
+    }
+
+    /// Prints the authored field beside the collider that came out of it.
+    ///
+    /// Ignored, because it is a diagnostic and not a check. When an axis or a stride is wrong the
+    /// assertion above says *that* it is wrong; this says *how*, which is the difference between
+    /// an afternoon and a minute. A transpose shows as the ramp running down the other axis; a
+    /// stride mismatch shows as rows that are each shifted a little further than the last, which is
+    /// what Avian's own `Collider::heightfield` produced here.
+    ///
+    /// Run it with `cargo test -p noob_tube_shared -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a diagnostic, not a check"]
+    fn print_the_shape_the_collider_came_out() {
+        let terrain = asymmetric_ramp();
+        println!("authored, height_at(ix, iz) — should climb with ix only:");
+        for iz in 0..terrain.grid.nz {
+            let row: Vec<String> = (0..terrain.grid.nx)
+                .map(|ix| format!("{:6.2}", terrain.height_at(ix, iz)))
+                .collect();
+            println!("  iz {iz}: {}", row.join(" "));
+        }
+        let mut app = probe(&terrain);
+        println!("collider, sampled on the same lattice:");
+        for iz in 0..terrain.grid.nz {
+            let z = terrain.grid.world_of(0, iz).y * 0.98;
+            let row: Vec<String> = (0..terrain.grid.nx)
+                .map(|ix| {
+                    let x = terrain.grid.world_of(ix, 0).x * 0.98;
+                    match ground_at(&mut app, x, z) {
+                        Some(y) => format!("{y:6.2}"),
+                        None => "  ----".to_string(),
+                    }
+                })
+                .collect();
+            println!("  iz {iz}: {}", row.join(" "));
+        }
+    }
+
+    /// The one test this whole step turns on: does the ground run the way it was authored?
+    ///
+    /// Both of the traps here fail silently, and a casual test cannot catch either. A transpose
+    /// swaps x for z, so a symmetric shape comes out identical; a centring mistake shifts the field
+    /// by half its extent, which a field centred on the origin already is. Hence a ramp that is
+    /// asymmetric in shape *and* on a grid that is not square.
+    #[test]
+    fn the_ramp_runs_the_way_it_was_built() {
+        let terrain = asymmetric_ramp();
+        let mut app = probe(&terrain);
+
+        // Two metres per sample, eight metres apart, climbing along +x from the min corner at -16.
+        for x in [-15.0, -8.0, 0.0, 8.0, 15.0] {
+            let want = (x + 16.0) * 0.25;
+            let found = ground_at(&mut app, x, 0.0).expect("no ground under the probe at all");
+            assert!(
+                (found - want).abs() < 0.05,
+                "at x {x} the ground is at {found:.2} where the ramp says {want:.2} \
+                 — the field is transposed or off-centre",
+            );
+        }
+
+        // And flat the other way, which is what says it is not merely sloped somewhere.
+        for z in [-7.0, 0.0, 7.0] {
+            let found = ground_at(&mut app, 0.0, z).expect("no ground");
+            assert!((found - 4.0).abs() < 0.05, "at z {z} the ground is at {found:.2}, not flat");
+        }
+    }
+
+    /// The field covers what the grid says it covers, and stops there.
+    #[test]
+    fn the_field_reaches_its_own_corners_and_no_further() {
+        let terrain = asymmetric_ramp();
+        let mut app = probe(&terrain);
+        assert!(ground_at(&mut app, -15.9, -7.9).is_some(), "a corner is missing");
+        assert!(ground_at(&mut app, 15.9, 7.9).is_some(), "the far corner is missing");
+        assert!(ground_at(&mut app, 17.0, 0.0).is_none(), "there is ground past the edge");
+        assert!(ground_at(&mut app, 0.0, 9.0).is_none(), "there is ground past the edge");
+    }
+
+    /// The map the level starts on, and the one number about it that everything else assumes.
+    #[test]
+    fn the_default_map_is_the_ground_plane_it_replaces() {
+        let terrain = default_terrain();
+        assert_eq!((terrain.grid.nx, terrain.grid.nz), (513, 513), "the canonical grid");
+        assert_eq!(terrain.grid.extent_x(), 512.0);
+        let y = terrain.height_at(0, 0);
+        assert!(y.abs() < 0.002, "the default ground is at {y}, not at the plane it replaces");
+        assert!(
+            terrain.heights.iter().all(|&h| h == terrain.heights[0]),
+            "the default map is not flat",
+        );
+    }
 
     /// The two numbers an author types, and the grid they mean.
     #[test]
