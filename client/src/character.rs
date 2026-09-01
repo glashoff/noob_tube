@@ -15,6 +15,7 @@
 //! reports the five files in `assets/` as identical. That check is the whole reason this is a
 //! handful of systems rather than a retargeting project — see the README under "Character assets".
 
+use bevy::animation::{AnimatedBy, AnimationTargetId};
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use core::time::Duration;
@@ -166,7 +167,7 @@ impl Plugin for CharacterPlugin {
                     // Both need the graph, and it does not exist until the library has finished
                     // loading — a few frames in, and longer on a cold disk. Gating them is what
                     // keeps that from being a panic on the first frame.
-                    (adopt_the_skeletons, choose_the_motion).run_if(resource_exists::<Clips>),
+                    (wire_up_the_skeleton, choose_the_motion).run_if(resource_exists::<Clips>),
                 )
                     .chain()
                     // The same reason `remote_players` waits: interpolation writes the smoothed
@@ -189,6 +190,10 @@ struct CharacterAssets {
 struct Clips {
     graph: Handle<AnimationGraph>,
     nodes: Vec<(Motion, AnimationNodeIndex)>,
+    /// One clip, kept only so the wiring can check itself against it. See
+    /// [`wire_up_the_skeleton`], which counts how many of the bones it just labelled this clip
+    /// actually has a curve for — a number that is either "most of them" or "none".
+    probe: Handle<AnimationClip>,
 }
 
 impl Clips {
@@ -201,6 +206,12 @@ impl Clips {
 /// simulation writes.
 #[derive(Component)]
 struct CharacterBody;
+
+/// A player that has just been replicated to us and has nothing to be seen as yet.
+type JustArrived = (With<client::Remote>, Without<Predicted>, Added<PlayerState>);
+
+/// A body whose model has spawned but whose skeleton has not been given its plumbing.
+type NotWiredYet = (With<CharacterBody>, Without<Wired>);
 
 /// On the entity Bevy gave an [`AnimationPlayer`] to, naming the player it belongs to.
 ///
@@ -233,15 +244,21 @@ fn build_the_clip_graph(
     };
     let mut graph = AnimationGraph::new();
     let mut nodes = Vec::new();
+    let mut probe = None;
     for motion in Motion::all() {
         let Some(clip) = gltf.named_animations.get(motion.clip()) else {
             error!("{CLIPS} has no clip called {}", motion.clip());
             continue;
         };
+        probe.get_or_insert_with(|| clip.clone());
         nodes.push((motion, graph.add_clip(clip.clone(), 1.0, graph.root)));
     }
+    let Some(probe) = probe else {
+        error!("{CLIPS} held none of the clips this game asks for");
+        return;
+    };
     info!("{} animation clips ready", nodes.len());
-    commands.insert_resource(Clips { graph: graphs.add(graph), nodes });
+    commands.insert_resource(Clips { graph: graphs.add(graph), nodes, probe });
 }
 
 /// Update: hangs a model under a player that has just arrived.
@@ -252,10 +269,7 @@ fn build_the_clip_graph(
 /// and facing −Z, and this carries the half turn and the scale that make a glTF model agree with
 /// that.
 fn give_bodies(
-    arrived: Query<
-        (Entity, &Player),
-        (With<client::Remote>, Without<Predicted>, Added<PlayerState>),
-    >,
+    arrived: Query<(Entity, &Player), JustArrived>,
     assets: Res<CharacterAssets>,
     mut commands: Commands,
 ) {
@@ -274,37 +288,153 @@ fn give_bodies(
     }
 }
 
-/// Update: gives each newly spawned skeleton the graph, and tells it whose it is.
+/// Marks a body whose skeleton has been wired, so it is done once rather than every frame.
+#[derive(Component)]
+struct Wired;
+
+/// Update: gives a body's skeleton the animation plumbing its own file did not come with.
 ///
-/// The scene arrives some frames after it was asked for, and Bevy puts the `AnimationPlayer` on the
-/// entity for the glTF's own animation root — several levels below the player. Walking back up
-/// `ChildOf` is what recovers the owner; the walk is bounded because a skeleton is not deep.
-fn adopt_the_skeletons(
-    arrived: Query<Entity, Added<AnimationPlayer>>,
-    parents: Query<&ChildOf>,
-    players: Query<(), With<PlayerState>>,
+/// **This is the part that is not obvious.** Bevy's glTF loader builds its list of animation roots
+/// while walking a file's *animations* — so a file with none, which is exactly what a character
+/// model without clips is, comes out with a full skeleton and no `AnimationPlayer` on it and no
+/// `AnimationTargetId` on any bone. Nothing is missing from the file and nothing is wrong with the
+/// loader; the plumbing simply had nothing to be built from. Left alone the figure appears,
+/// correctly posed, and never moves — which is precisely what it did.
+///
+/// So it is laid by hand, the same way the loader lays it: one bone is the animation root, and
+/// every bone under it is labelled with the hash of the chain of names from that root down —
+/// `Armature/root/pelvis/spine_01` and so on. The clips were labelled from the same paths when
+/// *they* were loaded, which is what makes them meet.
+///
+/// **Which bone is the root is found rather than assumed**, and that is not defensive coding. The
+/// first version took the spawned scene's top entity, which was wrong: Bevy wraps a spawned scene
+/// in a node of its own, so every path came out as `Scene/Armature/root/...` against a library
+/// spelling `Armature/root/...`, and not one bone of seventy-three was recognised. A wrapper is
+/// Bevy's business and may change; what cannot change is that the right root is the one whose
+/// paths the library knows. So every candidate is tried and the best-matching one wins, which is
+/// both the fix and a check that the two files agree at all.
+fn wire_up_the_skeleton(
+    unwired: Query<(Entity, &ChildOf, Option<&Children>), NotWiredYet>,
+    children: Query<&Children>,
+    named: Query<&Name>,
+    already: Query<(), With<AnimationPlayer>>,
     clips: Res<Clips>,
+    library: Res<Assets<AnimationClip>>,
     mut commands: Commands,
 ) {
-    for skeleton in arrived.iter() {
-        let mut walker = skeleton;
-        let owner = loop {
-            let Ok(parent) = parents.get(walker) else {
-                break None;
-            };
-            walker = parent.parent();
-            if players.contains(walker) {
-                break Some(walker);
-            }
-        };
-        let Some(owner) = owner else {
+    for (body, hangs_from, spawned) in unwired.iter() {
+        // No children yet: the scene has not spawned. Ordinary for a body's first frames.
+        if spawned.is_none_or(Children::is_empty) {
+            continue;
+        }
+        let Some(clip) = library.get(&clips.probe) else {
             continue;
         };
-        commands.entity(skeleton).insert((
-            Animates(owner),
+        let Some((root, labelled, known)) =
+            find_the_animation_root(body, &children, &named, clip)
+        else {
+            error!(
+                "nothing under {body} answers to a bone path this library knows. The model and \
+                 the clips are on different skeletons — `tools/glb rigs` compares the two files.",
+            );
+            commands.entity(body).insert(Wired);
+            continue;
+        };
+
+        commands.entity(root).insert((
+            Animates(hangs_from.parent()),
             AnimationGraphHandle(clips.graph.clone()),
             AnimationTransitions::new(),
         ));
+        // A model that brought its own clips already has all of this, and doing it twice would
+        // relabel bones the loader had labelled correctly.
+        if !already.contains(root) {
+            commands.entity(root).insert(AnimationPlayer::default());
+            let name = named.get(root).cloned().unwrap_or_default();
+            label_the_bones(root, name, &children, &named, &mut commands);
+        }
+        info!("{known} of {labelled} bones under {root} are animated by the library");
+        commands.entity(body).insert(Wired);
+    }
+}
+
+/// Which bone under `body` the library's paths are spelt from, and how well it fits.
+///
+/// Every named descendant is a candidate, because the depth the scene's own root sits at is
+/// Bevy's business rather than a fact about the model. The winner is whichever candidate the clip
+/// recognises the most bones under — a wrong root recognises none at all rather than a few, so
+/// this is a choice between one answer and nothing, not a close-run thing.
+fn find_the_animation_root(
+    body: Entity,
+    children: &Query<&Children>,
+    named: &Query<&Name>,
+    clip: &AnimationClip,
+) -> Option<(Entity, usize, usize)> {
+    let mut best: Option<(Entity, usize, usize)> = None;
+    for candidate in children.iter_descendants(body) {
+        let Ok(name) = named.get(candidate) else {
+            continue;
+        };
+        let (labelled, known) = count_what_the_clip_knows(candidate, name.clone(), children, named, clip);
+        if known > 0 && best.is_none_or(|(_, _, most)| known > most) {
+            best = Some((candidate, labelled, known));
+        }
+    }
+    best
+}
+
+/// How many bones under `root` the clip has a curve for, if the paths are spelt from `root` down.
+fn count_what_the_clip_knows(
+    root: Entity,
+    root_name: Name,
+    children: &Query<&Children>,
+    named: &Query<&Name>,
+    clip: &AnimationClip,
+) -> (usize, usize) {
+    let mut labelled = 0;
+    let mut known = 0;
+    walk_the_bones(root, root_name, children, named, &mut |_, id| {
+        labelled += 1;
+        known += usize::from(clip.curves_for_target(id).is_some());
+    });
+    (labelled, known)
+}
+
+/// Labels every bone under `root` with the hash of its path of names.
+fn label_the_bones(
+    root: Entity,
+    root_name: Name,
+    children: &Query<&Children>,
+    named: &Query<&Name>,
+    commands: &mut Commands,
+) {
+    walk_the_bones(root, root_name, children, named, &mut |bone, id| {
+        commands.entity(bone).insert((id, AnimatedBy(root)));
+    });
+}
+
+/// Walks `root` and everything named under it, handing each one the id its path hashes to.
+fn walk_the_bones(
+    root: Entity,
+    root_name: Name,
+    children: &Query<&Children>,
+    named: &Query<&Name>,
+    each: &mut impl FnMut(Entity, AnimationTargetId),
+) {
+    let mut walking = vec![(root, vec![root_name])];
+    while let Some((bone, path)) = walking.pop() {
+        each(bone, AnimationTargetId::from_names(path.iter()));
+        let Ok(below) = children.get(bone) else {
+            continue;
+        };
+        for child in below.iter() {
+            let Ok(name) = named.get(child) else {
+                continue;
+            };
+            let mut deeper = path.clone();
+            deeper.push(name.clone());
+            walking.push((child, deeper));
+        }
     }
 }
 

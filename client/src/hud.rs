@@ -26,8 +26,14 @@
 //!
 //! **Correction** is the part left over from a rollback, the one [`VIEW_LEASH`](crate::local_player)
 //! governs, and the one that is zero until the client guesses wrong.
+//!
+//! Top left is the frame rate, which answers a different question again: not whether the drawing
+//! agrees with the simulation, but whether there is enough drawing. Both are on screen because a
+//! stutter feels the same from the player's chair whichever of them caused it.
 
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
+use noob_tube_shared::tuning::NetConfig;
 
 use crate::corrections::Corrections;
 use crate::local_player::VIEW_LEASH;
@@ -37,17 +43,25 @@ const MARGIN: f32 = 12.0;
 const FONT_SIZE: f32 = 13.0;
 /// Breathing room inside the backing panel.
 const PADDING: f32 = 5.0;
+/// How often the frame rate is rewritten, in seconds.
+const FRAME_RATE_PERIOD: f32 = 1.0;
 
 pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_readout)
-            .add_systems(Update, (update_readout, toggle_readout));
+        app.add_plugins(FrameTimeDiagnosticsPlugin::default())
+            .add_systems(Startup, (spawn_readout, spawn_frame_rate))
+            .add_systems(Update, (update_readout, update_frame_rate, toggle_readout));
     }
 }
 
-/// The line itself.
+/// Anything F3 hides. Separate from the two markers below because those have to stay unique —
+/// each names exactly one entity, and a `Single` query that matches two matches neither.
+#[derive(Component)]
+struct Readout;
+
+/// The correction line itself.
 #[derive(Component)]
 struct ViewReadout;
 
@@ -61,6 +75,7 @@ fn spawn_readout(window: Option<Single<Entity, With<Window>>>, mut commands: Com
     }
     commands.spawn((
         Name::from("View readout"),
+        Readout,
         ViewReadout,
         Text::default(),
         TextFont {
@@ -116,18 +131,101 @@ fn update_readout(
     };
 }
 
+/// The frame-rate line.
+#[derive(Component)]
+struct FrameRate;
+
+/// Startup: puts the frame rate in the top left, if there is a screen.
+fn spawn_frame_rate(window: Option<Single<Entity, With<Window>>>, mut commands: Commands) {
+    if window.is_none() {
+        return;
+    }
+    commands.spawn((
+        Name::from("Frame rate"),
+        Readout,
+        FrameRate,
+        Text::default(),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(FONT_SIZE),
+            ..default()
+        },
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(MARGIN),
+            top: Val::Px(MARGIN),
+            padding: UiRect::axes(Val::Px(PADDING * 1.4), Val::Px(PADDING)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+        Pickable::IGNORE,
+    ));
+}
+
+/// Update: writes the frame rate, and colours it against the tick rate.
+///
+/// Against the *tick rate* rather than against 60, because that is the number it means something
+/// relative to: the simulation produces a state every tick, and drawing slower than that means
+/// states are being computed and never seen. It is also the one threshold in this game that moves
+/// — the server owns the tick rate and a client adopts it, so a hard-coded 60 would be right by
+/// coincidence.
+///
+/// The frame time is beside it because that is the figure that says what changed. Frame rate is a
+/// reciprocal, so the step from 120 to 60 and the step from 60 to 40 look very different as rates
+/// and are the same 8 ms of extra work.
+///
+/// Rewritten once a second rather than every frame. A number that changes sixty times a second is
+/// not a number anybody reads — it is a blur that happens to be near the right value — and the
+/// figure behind it is already a rolling average, so a fresh sample every frame says nothing new.
+/// It also keeps the readout still enough to be read off a screenshot.
+fn update_frame_rate(
+    diagnostics: Res<DiagnosticsStore>,
+    net: Res<NetConfig>,
+    time: Res<Time>,
+    mut since: Local<f32>,
+    readout: Option<Single<(&mut Text, &mut TextColor), With<FrameRate>>>,
+) {
+    // Real time, not the fixed timestep: this is about how often a person's eye is asked to take
+    // in a new number, which has nothing to do with the simulation's clock.
+    *since += time.delta_secs();
+    if *since < FRAME_RATE_PERIOD {
+        return;
+    }
+    *since = 0.0;
+    let Some(readout) = readout else {
+        return;
+    };
+    let (mut text, mut colour) = readout.into_inner();
+    let Some(fps) = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FPS)
+        .and_then(|fps| fps.smoothed())
+    else {
+        // The first frames, before there is a second measurement to average.
+        text.0 = "fps --".into();
+        return;
+    };
+    text.0 = format!("fps {fps:.0}   ({:.1} ms)", 1000.0 / fps.max(1e-3));
+    let tick = net.tick_hz;
+    colour.0 = if fps < tick * 0.5 {
+        Color::srgb(0.95, 0.35, 0.30)
+    } else if fps < tick {
+        Color::srgb(0.95, 0.75, 0.30)
+    } else {
+        Color::srgb(0.75, 0.78, 0.80)
+    };
+}
+
 /// Update: F3 hides it.
 ///
 /// Default on, because it is being watched for; a key to hide it, because it is in the way of a
 /// screenshot.
 fn toggle_readout(
     keys: Res<ButtonInput<KeyCode>>,
-    readout: Option<Single<&mut Visibility, With<ViewReadout>>>,
+    mut readouts: Query<&mut Visibility, With<Readout>>,
 ) {
     if !keys.just_pressed(KeyCode::F3) {
         return;
     }
-    if let Some(mut visibility) = readout {
+    for mut visibility in readouts.iter_mut() {
         visibility.toggle_visible_hidden();
     }
 }
