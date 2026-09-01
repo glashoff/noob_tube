@@ -19,7 +19,7 @@ use crate::player::{Aim, Player, PlayerInput, PlayerState};
 use crate::props::{Density, Prop};
 use crate::vehicle::{Controls, Driven, Driving, VehicleKind};
 use crate::shooting::{Health, ShotFired};
-use crate::terrain::TerrainBaseline;
+use crate::terrain::{MapList, MapRequest, TerrainBaseline};
 use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
 
@@ -123,8 +123,15 @@ impl Plugin for ProtocolPlugin {
             mode: ChannelMode::OrderedReliable(ReliableSettings::default()),
             ..default()
         })
-        .add_direction(NetworkDirection::ServerToClient);
+        .add_direction(NetworkDirection::Bidirectional);
         app.register_message::<TerrainBaseline>()
+            .add_direction(NetworkDirection::ServerToClient);
+        // Map management rides the same channel, and belongs there: a load is followed immediately
+        // by the baseline it implies, and ordered delivery is what stops a client applying them the
+        // other way round and playing the old map under the new name.
+        app.register_message::<MapRequest>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<MapList>()
             .add_direction(NetworkDirection::ServerToClient);
 
         // Physics bodies, last: this registers `Position`, `Rotation`, `LinearVelocity` and

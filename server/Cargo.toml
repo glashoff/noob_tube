@@ -10,6 +10,9 @@ noob_tube_shared = { workspace = true }
 avian3d = { workspace = true }
 bevy = { workspace = true, features = ["bevy_log", "bevy_state"] }
 lightyear = { workspace = true }
+# Map manifests. The heights are binary because they have to be; everything else is JSON
+# because it changes constantly while the design is young — see terrain.md §1.
+serde_json = { workspace = true }
 
 [features]
 remote = ["noob_tube_shared/remote"]

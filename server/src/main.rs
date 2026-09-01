@@ -4,6 +4,9 @@
 //! renderer, no window and no audio — see this crate's `Cargo.toml`, where Bevy's default features
 //! are switched off.
 
+
+mod maps;
+
 use bevy::prelude::*;
 use lightyear::prelude::*;
 use lightyear::prelude::input::native::ActionState;
@@ -21,7 +24,7 @@ use noob_tube_shared::props::{self, Bobbing, Density};
 use noob_tube_shared::vehicle::{self, Controls, Driven, Driving, SEATED_FEET, VehicleKind};
 use noob_tube_shared::lag_compensation::HitboxHistory;
 use noob_tube_shared::shooting::{self, Health, ShotFired};
-use noob_tube_shared::terrain::{self, Ground, TerrainBaseline};
+use noob_tube_shared::terrain::{self, Ground, MapList, TerrainBaseline};
 use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin, TerrainChannel};
 use noob_tube_shared::types::Authored;
 use noob_tube_shared::PLACEHOLDER_PRIVATE_KEY;
@@ -51,6 +54,9 @@ fn main() {
         // there is one map and it is the built-in one. Every client is sent a copy of exactly
         // this on join; none of them may read one for itself.
         .insert_resource(Ground(terrain::default_terrain()))
+        // What maps there are, read once at startup. The built-in map is what a server starts on
+        // and it has no file behind it, so `current` is None until somebody saves or loads.
+        .insert_resource(maps::Maps::discover(maps::MAPS))
         .add_plugins(PhysicsPlugin)
         // The same geometry the client collides against, built from the same numbers. If the two
         // disagreed, every step near the difference would produce a correction the player sees.
@@ -67,9 +73,16 @@ fn main() {
         // The ground, whenever the map appears or changes. PreUpdate rather than Startup so that
         // the server and a client build it through the same path — see `level::build_the_ground`,
         // which is where the reason it cannot be Startup on a client is written down.
+        // Map requests first, so a map that changes this frame is the one this frame's ticks run
+        // against, and the ground is built from it in the same pass.
         .add_systems(
             PreUpdate,
-            level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
+            (
+                maps::serve_map_requests,
+                level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
+            )
+                .chain()
+                .after(MessageSystems::Receive),
         )
         .add_systems(
             FixedUpdate,
@@ -1045,6 +1058,7 @@ fn send_the_map(
     trigger: On<Add, Connected>,
     peers: Query<&RemoteId>,
     ground: Res<Ground>,
+    maps: Res<maps::Maps>,
     mut sender: ServerMultiMessageSender,
     server: Single<&Server>,
 ) {
@@ -1058,6 +1072,20 @@ fn send_the_map(
     {
         error!("could not send the map to {:?}: {error}", remote.0);
         return;
+    }
+    // And what else there is, so the menu has something in it before anybody opens it. It goes
+    // after the baseline on the same ordered channel, which is the order the client wants them in:
+    // the ground first, then its name.
+    let list = MapList {
+        maps: maps.names.clone(),
+        current: maps.current.clone(),
+        unsaved: maps.unsaved,
+        trouble: None,
+    };
+    if let Err(error) =
+        sender.send::<_, TerrainChannel>(&list, *server, &NetworkTarget::Single(remote.0))
+    {
+        warn!("could not send the map list to {:?}: {error}", remote.0);
     }
     info!("map sent to {:?}: {bytes} bytes of heights", remote.0);
 }

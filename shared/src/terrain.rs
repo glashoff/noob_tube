@@ -197,6 +197,18 @@ pub enum MapFault {
     BlobSize { expected: usize, found: usize },
     /// A version this code does not know how to read.
     Version(u32),
+    /// A map name with nothing usable left in it once it had been sanitised.
+    Name,
+    /// A name that is not one of the maps the server has.
+    ///
+    /// The same answer for a map that was never there and for one somebody is trying to reach
+    /// out of the directory with: a load resolves a name *against the list*, so there is no
+    /// second code path where the traversal check could be forgotten.
+    NoSuchMap,
+    /// A name that is already taken.
+    NameTaken,
+    /// Asking for maps faster than [`CREATE_INTERVAL`].
+    TooFast,
 }
 
 impl core::fmt::Display for MapFault {
@@ -215,8 +227,120 @@ impl core::fmt::Display for MapFault {
                 write!(f, "the heights are {found} bytes where the manifest says {expected}")
             }
             Self::Version(version) => write!(f, "map version {version} is not one this build reads"),
+            Self::Name => write!(f, "a map name needs letters or digits in it"),
+            Self::NoSuchMap => write!(f, "there is no map by that name"),
+            Self::NameTaken => write!(f, "there is already a map by that name"),
+            Self::TooFast => {
+                write!(f, "wait {} s between new maps", CREATE_INTERVAL.as_secs())
+            }
         }
     }
+}
+
+/// The longest a map name may be, in characters.
+///
+/// Not a technical limit — it is what fits in the menu's list without the eye having to work — but
+/// it is enforced on the server all the same, because a name is a file name and a client picks it.
+pub const MAX_NAME: usize = 40;
+
+/// How long a client must wait between creating maps.
+///
+/// Creating is the one action that writes a file that stays written, so it is the one that needs a
+/// rate of its own. Loading and saving are limited by the same thing that limits everything else —
+/// somebody has to be holding the menu open.
+pub const CREATE_INTERVAL: core::time::Duration = core::time::Duration::from_secs(5);
+
+/// What a client's map name is allowed to become.
+///
+/// Letters, digits, spaces, hyphens and underscores, trimmed, collapsed and capped. Everything else
+/// is dropped rather than rejected, so a name with a stray character in it still works — the point
+/// is a usable file name, not a lecture.
+///
+/// This is where `..`, `/` and every other path is disposed of, and it is deliberately an
+/// *allowlist*: a denylist of dangerous characters is a list somebody has to keep complete, and the
+/// set of things a map may be called is small and known. It is in `shared` so the menu can refuse a
+/// name against the same rule the server enforces rather than a second copy that drifts.
+///
+/// It is still not the guard that matters for loading. That one is [`MapFault::NoSuchMap`]: a load
+/// resolves a name against the list of maps the server itself found, so even a name this let
+/// through cannot reach a file that is not a map.
+pub fn sanitise_name(raw: &str) -> Result<String, MapFault> {
+    let mut name = String::with_capacity(raw.len().min(MAX_NAME));
+    let mut spaced = false;
+    for character in raw.chars() {
+        let keep = match character {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => character,
+            ' ' | '\t' => ' ',
+            _ => continue,
+        };
+        // One space at a time, and none at the front.
+        if keep == ' ' {
+            spaced = !name.is_empty();
+            continue;
+        }
+        if spaced && name.len() < MAX_NAME {
+            name.push(' ');
+        }
+        spaced = false;
+        if name.len() >= MAX_NAME {
+            break;
+        }
+        name.push(keep);
+    }
+    // A name of nothing but punctuation comes out empty, and a file called "" is not a map.
+    if name.chars().any(|c| c.is_ascii_alphanumeric()) {
+        Ok(name)
+    } else {
+        Err(MapFault::Name)
+    }
+}
+
+/// What a client asks the server to do with maps.
+///
+/// One message rather than four, because they are one conversation and the reply to all of them is
+/// the same [`MapList`]. Every one of them is something any connected player may do — there is no
+/// ownership here and no permissions, which is the stance the rest of the game takes; the
+/// protections are against accident and abuse of *size*, not against the player.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum MapRequest {
+    /// Make a new map and put everybody on it. Extent and spacing, never sample counts — those are
+    /// derived, and they are what the caps are enforced against.
+    Create {
+        name: String,
+        extent_x: f32,
+        extent_z: f32,
+        spacing: f32,
+        min_y: f32,
+        max_y: f32,
+    },
+    /// Switch everybody to a map that already exists.
+    Load { name: String },
+    /// Write the map as it currently stands, under this name.
+    Save { name: String },
+    /// Just tell me what there is.
+    List,
+}
+
+/// What the server says back: what maps there are, which one this is, and what went wrong.
+///
+/// Sent on join and after every [`MapRequest`], so a client never has to ask twice and never has to
+/// guess whether its request worked. The trouble travels with the list rather than as a message of
+/// its own, because the two are always looked at together — "that name is taken, and here is what
+/// is taken" is one answer.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct MapList {
+    /// Every map on the server, sorted. This is also the only list a load may resolve against.
+    pub maps: Vec<String>,
+    /// The map being played, or `None` for the built-in one, which has no file behind it.
+    pub current: Option<String>,
+    /// Whether the map in play differs from the file it came from.
+    ///
+    /// Nothing sets this yet: until sculpting arrives in step seven the map in play is always
+    /// exactly what was created or loaded. It is here now because the menu is the only place that
+    /// can say so, and a sculpt that exists only in memory is one disconnect from gone.
+    pub unsaved: bool,
+    /// What went wrong with the last request, in words a player can read.
+    pub trouble: Option<String>,
 }
 
 /// The lattice the heights sit on: where the samples are, and what a sample means.
@@ -405,6 +529,31 @@ impl Terrain {
     /// The height at one sample, in metres.
     pub fn height_at(&self, ix: u32, iz: u32) -> f32 {
         self.grid.height(self.heights[self.grid.index(ix, iz)])
+    }
+
+    /// The ground under a point, in metres, between the samples.
+    ///
+    /// Bilinear across the cell the point falls in, and clamped at the rim rather than wrapping or
+    /// failing: past the edge of the map the nearest edge sample is the honest answer, and every
+    /// caller so far is asking where to put something rather than whether the map reaches.
+    ///
+    /// This is how anything is placed *on* the ground without going through a collider — which is
+    /// what a map switch needs, since the collider for the new map does not exist yet when the
+    /// spawn points have to be found.
+    pub fn height_over(&self, x: f32, z: f32) -> f32 {
+        let grid = self.grid;
+        let along = |world: f32, origin: f32, n: u32| {
+            let cell = ((world - origin) / grid.spacing).clamp(0.0, (n - 1) as f32);
+            let low = (cell.floor() as u32).min(n - 2);
+            (low, (cell - low as f32).clamp(0.0, 1.0))
+        };
+        let (ix, tx) = along(x, grid.origin_x, grid.nx);
+        let (iz, tz) = along(z, grid.origin_z, grid.nz);
+        let (h00, h10) = (self.height_at(ix, iz), self.height_at(ix + 1, iz));
+        let (h01, h11) = (self.height_at(ix, iz + 1), self.height_at(ix + 1, iz + 1));
+        let south = h00 + (h10 - h00) * tx;
+        let north = h01 + (h11 - h01) * tx;
+        south + (north - south) * tz
     }
 
     /// The heights as they go on disk and on the wire: little-endian `u16`, row-major, x fastest.
@@ -798,6 +947,58 @@ mod tests {
         let mut fine = TerrainBaseline::of(&default_terrain());
         fine.grid.spacing = MIN_SPACING / 2.0;
         assert!(matches!(fine.adopt(), Err(MapFault::Spacing)), "a map below the spacing cap was adopted");
+    }
+
+    /// A name is an allowlist, and the things it must dispose of are paths.
+    #[test]
+    fn a_name_keeps_only_what_a_map_may_be_called() {
+        assert_eq!(sanitise_name("Dust  2").unwrap(), "Dust 2");
+        assert_eq!(sanitise_name("  trimmed  ").unwrap(), "trimmed");
+        assert_eq!(sanitise_name("under_score-and-dash").unwrap(), "under_score-and-dash");
+        // Every one of these is a path, and none of them comes out as one.
+        assert_eq!(sanitise_name("../../etc/passwd").unwrap(), "etcpasswd");
+        assert_eq!(sanitise_name("a/b").unwrap(), "ab");
+        assert_eq!(sanitise_name("map\0name").unwrap(), "mapname");
+        assert_eq!(sanitise_name("C:\\maps\\x").unwrap(), "Cmapsx");
+        // And a name with nothing usable in it is not a name.
+        assert!(matches!(sanitise_name(".."), Err(MapFault::Name)));
+        assert!(matches!(sanitise_name("   "), Err(MapFault::Name)));
+        assert!(matches!(sanitise_name("---"), Err(MapFault::Name)));
+    }
+
+    /// Long names are cut rather than refused, and cut to something that is still a name.
+    #[test]
+    fn a_name_is_capped_rather_than_rejected() {
+        let long = "x".repeat(MAX_NAME * 3);
+        let name = sanitise_name(&long).expect("a long name is still a name");
+        assert_eq!(name.len(), MAX_NAME);
+    }
+
+    /// The ground under a point, between the samples, is what puts a spawn on a map that has just
+    /// been switched — before there is a collider to cast a ray at.
+    #[test]
+    fn the_ground_under_a_point_is_read_between_the_samples() {
+        let terrain = default_terrain();
+        // On a sample, it is that sample exactly.
+        for (x, z) in [(0.0, 0.0), (-85.0, 60.0), (12.0, -34.0)] {
+            let grid = terrain.grid;
+            let ix = ((x - grid.origin_x) / grid.spacing).round() as u32;
+            let iz = ((z - grid.origin_z) / grid.spacing).round() as u32;
+            let want = terrain.height_at(ix, iz);
+            let got = terrain.height_over(x, z);
+            assert!((got - want).abs() < 1e-3, "at {x},{z}: {got} rather than {want}");
+        }
+        // Between two, it is between their heights.
+        let (low, high) = (terrain.height_over(-85.0, 60.0), terrain.height_over(-84.0, 60.0));
+        let middle = terrain.height_over(-84.5, 60.0);
+        assert!(
+            middle >= low.min(high) - 1e-4 && middle <= low.max(high) + 1e-4,
+            "{middle} is not between {low} and {high}",
+        );
+        // And past the rim it is the rim, not a panic and not a hole.
+        let half = DEFAULT_EXTENT / 2.0;
+        assert_eq!(terrain.height_over(-half - 50.0, 0.0), terrain.height_over(-half, 0.0));
+        assert_eq!(terrain.height_over(0.0, half + 50.0), terrain.height_over(0.0, half));
     }
 
     /// A hill you slide off is scenery, and a ravine you walk out of is a ditch. The limit that
