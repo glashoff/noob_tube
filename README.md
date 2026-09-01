@@ -1796,8 +1796,11 @@ crate end up inside the cabin: a new kind of stuck, for a fix that was only ever
 chased. What buys the last few centimetres is the willingness to split a part again — and past
 `0.002` the part count runs away for tenths of a centimetre.
 
-**Fifty-five parts.** Where the curve flattens. Everything past it costs collision work every
-substep, and rollback replays those substeps.
+**Fifty-five parts.** Where the curve flattens — and, it turns out, comfortably inside the budget.
+Collision work happens every substep and rollback replays those substeps, so the part count was the
+one real risk; measured, eight vehicles piled into contact cost 0.29 ms a tick against a single
+box's 0.14, which is two per cent of a 15.6 ms tick at 64 Hz. The measurement is kept as an ignored
+test, `what_a_tick_costs_with_this_shape`, for when the number is next up for debate.
 
 ##### The two ends that have to agree
 

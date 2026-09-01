@@ -844,6 +844,41 @@ mod tests {
         up.y.clamp(-1.0, 1.0).acos().to_degrees()
     }
 
+    /// What the collision shape costs, for when the part count is next up for debate.
+    ///
+    /// Ignored, because it is a measurement and not a check: it prints a number that depends on
+    /// the machine, and a threshold on it would fail on a loaded laptop and prove nothing on a
+    /// fast one. Run it with `cargo test --release -- --ignored --nocapture`.
+    ///
+    /// Eight vehicles two metres apart, which is close enough that they are all in contact with
+    /// each other — the worst case a round is likely to produce, and roughly twice the cost of the
+    /// same eight standing clear. On the machine this was written on: 0.14 ms a tick as a single
+    /// box, 0.29 ms as the fifty-five baked hulls. Against a 15.6 ms tick at 64 Hz that is two per
+    /// cent, which is what says fifty-five parts is affordable and a finer bake would still be.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn what_a_tick_costs_with_this_shape() {
+        let mut app = driving_app();
+        let cars: Vec<_> = (0..8)
+            .map(|index| park(&mut app, Vec3::new(index as f32 * 2.0, 2.0, 0.0)))
+            .collect();
+        for car in &cars {
+            hands(&mut app, *car, 1.0, 0.3);
+        }
+        // A second to settle onto the floor and find each other, so the timing is of a pile that
+        // is already in contact rather than of eight vehicles falling.
+        run(&mut app, 1.0);
+
+        let seconds = 10.0;
+        let start = std::time::Instant::now();
+        run(&mut app, seconds);
+        println!(
+            "{} vehicles in contact: {:.2} ms a tick",
+            cars.len(),
+            start.elapsed().as_secs_f64() * 1000.0 / (seconds as f64 * HZ),
+        );
+    }
+
     /// The whole point: a vehicle on its roof has no way back on its own, because the wheels find
     /// no ground and the entire model acts through the wheels.
     #[test]
