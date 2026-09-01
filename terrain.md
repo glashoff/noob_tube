@@ -187,7 +187,7 @@ A map is a readable manifest plus one blob of samples.
   grid      { nx, nz, spacing, origin_x, origin_z, min_y, max_y }
   water_y   number | null
   layers    [ { texture, tile_scale, rule parameters } ]
-  markers   [ { kind, x, z, y, rotation } ]        (§7)
+  markers   [ { kind, x, z, y, yaw | rotation } ]   (§7)
 
 <name>.heights    nx*nz u16, row-major, x fastest — and nothing else
 ```
@@ -571,10 +571,43 @@ vehicle parked facing down a ramp is pitched; a prop is not always upright. So a
 full `Quat`, which is also exactly what `Transform.rotation` wants, so nothing has to convert it on
 the way to spawning an entity.
 
-Not Euler angles, for one reason that has nothing to do with gimbal lock: **a quaternion has no
-convention to disagree about.** Three angles need an axis order and a handedness, both sides of the
-wire have to pick the same ones, and the failure when they do not is a marker that is subtly turned
-rather than an error anybody sees.
+Not Euler angles as the *representation*, for one reason that has nothing to do with gimbal lock:
+**a quaternion has no convention to disagree about.** Three angles need an axis order and a
+handedness, both sides have to pick the same ones, and the failure when they do not is a marker
+that is subtly turned rather than an error anybody sees.
+
+### But the file may write a yaw
+
+The manifest is JSON precisely so it can be read, and `[0, 0.383, 0, 0.924]` is not readable. Since
+the format is not a fixed-width record any more, a marker's rotation may be given either way:
+
+```json
+{ "kind": "vehicle", "x": 14, "z": -8, "yaw": 45 }
+{ "kind": "crate",   "x": -5, "z": -12, "rotation": [0.0, 0.383, 0.0, 0.924] }
+```
+
+Both parse to a `Quat`, and nothing downstream ever sees the difference. Three rules make that safe
+rather than merely convenient:
+
+- **Writing is canonical, not remembered.** When a rotation is a pure yaw — its x and z components
+  are zero within a small epsilon — the serialiser writes `yaw`, whatever the file said before.
+  This is what stops the shorthand being write-only: an "accept either form" reader paired with a
+  "always write the general form" writer turns every hand-written `yaw: 45` into a quaternion on
+  the first save, and the readability lasts exactly until the editor touches the file.
+- **Both fields present is an error, not a precedence rule.** Reject the map. A precedence rule is
+  a thing somebody has to remember correctly at 2 a.m.
+- **`yaw` is in degrees** in the file and radians everywhere in code, converted at the parse
+  boundary. Readability is the entire point of the shorthand, and `"yaw": 45` is readable where
+  `"yaw": 0.785` is not. The mixed units are a real hazard — `RAMP_ANGLE` is already `0.21` with a
+  comment saying "about 12°" — so the conversion belongs in exactly one place, in the parser.
+
+The convention the shorthand needs is the one `level.rs` already states and uses: a yaw in radians
+about +Y, applied to the −Z that is forward everywhere here.
+
+**Where this generalises and where it stops.** A shorthand is safe when it has an exact expansion
+*and* an exact contraction, so the canonical writer can detect it and give it back. `yaw` qualifies.
+A shorthand that loses information on the way in — anything the writer could not reconstruct — does
+not, and would leave the file quietly disagreeing with what the editor holds.
 
 An **align-to-ground** helper belongs beside the free rotation rather than replacing it — take the
 surface normal under the marker and rotate the up axis onto it, then let the author turn it from
