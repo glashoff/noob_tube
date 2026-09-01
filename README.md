@@ -1170,36 +1170,99 @@ the vehicle slid off the bottom of the screen. It is a **ratio** now — 0.17 of
 camera is — so winding the wheel changes how far away the vehicle is and nothing else. At the
 default seven metres that is 1.19 m against the old 1.2, so the view nobody asked to change did not.
 
-**V locks the view to the vehicle**, so it turns with the car instead of with the mouse. That is one
-switch over who owns the yaw, and the honest way to build it is to let the winner write it rather
-than to have two angles and pick one: locked, `look` stops applying the mouse's horizontal movement
-and the camera's own placement writes the vehicle's heading into the same field. Pitch stays with
-the mouse either way, so you can still look down at the car or up at the horizon.
+**V takes the driver's weapon out, and puts it away again**, and the camera follows from that.
+
+The switch is over the weapon rather than over the camera because the two cannot both be had. A
+camera that pulls itself back behind the vehicle is pulling the crosshair with it — the yaw is one
+number, and it is both where you are looking and where you are aiming. So: weapon stowed, the camera
+is steered for you and the trigger does nothing; weapon out, you aim, and the camera is yours to
+hold.
+
+Halo could have this both ways, and it is worth being clear about why. Its Warthog driver has no
+weapon at all — the chain gun is a second seat and a second player's view — so there was never a
+crosshair for its camera to drag. We do not have passengers, so we have the conflict, and this is
+the cheap way out of it: never have the camera and the aim disagree about who owns them.
+
+**Stowed, the camera is sprung back behind the vehicle, harder the faster it is going.** An
+exponential approach — `1 - exp(-rate * dt)`, so it behaves the same at 30 fps and at 300 — with the
+rate scaled by speed up to 6 m/s and no further. That scaling is what leaves a parked vehicle alone:
+standing still there is nothing behind to be pulled towards, and a driver looking around their own
+car should be able to. Measured, from a standing start:
+
+| speed | off the vehicle's nose |
+|---|---|
+| parked, two seconds | pushed 147.3 degrees aside and **still 147.3** |
+| 2.5 m/s | 89.1 |
+| 5.3 m/s | 26.2 |
+| 7.6 m/s | 4.6 |
+| 9.7 m/s | 0.8 |
+| 13.2 m/s and up | **0.0** |
+
+It is a spring and not a lock, so the mouse still wins while it is pulling: a 500 px sweep at speed
+threw the view 29.7 degrees aside, and it slid back through 5.6, 1.1 and 0.2 to nothing over a
+second and a half. With the weapon drawn there is no spring at all — pushed 80 degrees aside at
+16.6 m/s, the camera had not moved a hundredth of a degree a second and a half later.
 
 Yaw only, and not because it is easier. A camera given the vehicle's whole attitude would put the
 horizon on its side every time the buggy leaned into a corner and would stare at the sky for the
 length of a jump. Mid-barrel-roll there is no heading to take at all — the nose points straight up —
 and there the camera keeps the one it had, which is the only answer that does not spin.
 
-Because the lock writes the same field the mouse does, letting go of it is free: unlocking leaves
-the view exactly where the vehicle last pointed it, and there is nothing to reconcile. Measured
-live, driving a full circle:
+Not firing is its own system rather than a term inside the input sampling, because it is its own
+rule: what the player asked for is one thing, and what a stowed weapon is capable of is another. It
+clears the view bracket with the shot, since a bracket is the evidence for a shot and one that is
+not taken has nothing to prove. **None of it needs the server.** Whether my weapon is out changes
+nothing for anybody else, the driver is not drawn while driving, and "not firing" is exactly what
+the server already sees when a trigger is not pulled — there is no new state on the wire and nothing
+to arbitrate.
 
-| | camera against the vehicle's nose |
-|---|---|
-| unlocked, through a 141 degree turn | drifts to 102.6 degrees off — the mouse owns it |
-| locked, through a full 360 | tracks within 1.7 degrees |
-| locked, standing still | **0.000 degrees** |
+**With the weapon out the camera drops onto the shot's own line.** Any height above the muzzle is
+parallax: the camera looks along the same direction the bullet travels, but from `rise x chase`
+above it, so the two are *parallel lines* and the shot lands that far below the crosshair — at every
+distance, which is what makes it read as "always a bit low" rather than as a ranging error. Measured
+at the default zoom: **119.0 cm** off the line with the weapon stowed.
 
-The 1.7 is the measurement, not the camera: the heading and the camera angle are two BRP round trips
-apart, about 40 ms, and at 40 degrees a second that is 1.7 degrees of car. Standing still the gap
-closes to nothing, which is what says so. A 400 px mouse sweep moves the view 50.42 degrees
-unlocked — exactly the sensitivity — and 0.00 locked.
+The usual fix is to cast a ray from the camera, find what the crosshair is actually over, and aim
+the muzzle at that point — what every third-person shooter does, and a real piece of machinery,
+since the ray has to be cast against the same targets the shot will meet or it converges on the wall
+behind the person you were aiming at. Setting the rise to zero costs nothing and is exact at *every*
+distance rather than at one: the camera then sits at `eye - direction x chase`, which is a point on
+the shot's own ray, so the crosshair marks where the bullet goes by construction. Measured, with the
+weapon drawn: **0.0 cm** off the line, level, 20 degrees up and 20 degrees down alike.
 
-Switching *into* the locked view snaps, and deliberately: the player pressed a key and asked for a
-different camera. A spring would be the next refinement, and it is the same piece of work as
-teaching the chase camera to get out of the way of walls — which it still cannot do, and which the
-wheel has made easier to arrange.
+It is affordable only because the driver's head is above the bodywork — the eye rides 1.19 m over
+the chassis centre and the model's highest point is 0.63 m, so the sight line clears the whole
+vehicle by half a metre. Checked at both ends of the zoom: the crosshair is clear of the vehicle
+level, 20 up and 20 down, at seven metres and at three. Past about 20 degrees up the roll bar comes
+into the line behind the eye, and past about 27 down the bonnet does, and those are the limits.
+
+That also gives the two modes two cameras with two jobs: stowed it rides high and is steered for
+you, drawn it drops to the sight line and is yours.
+
+**Your own vehicle is not a target.** A driver fires from the seat, so their own bodywork is at zero
+distance in every direction: without this, every shot from a vehicle would stop against the inside
+of its own panels, and — since a hit shoves what it lands on — shove the vehicle it was fired from.
+The shooter was already excluded from their own shot for exactly this reason, one body further in.
+
+It is written as a rule rather than as a special case for the geometry. "The vehicle you are sitting
+in cannot be hit by you" is something a player can rely on and a mapmaker can reason about; "the ray
+happens to start inside it" stops being true the moment anyone leans out of a window. `Driven`
+travels with the target rather than being looked up separately, because it is a fact about the
+target and is only ever asked while deciding whether to consider one.
+
+Both sides do it, and they have to. The client resolves its own tracer locally so the line appears
+on the trigger rather than half a round trip later; if the two disagreed about what is not a target,
+the tracer would stop against a bonnet the server shot straight through.
+
+The crosshair goes with the weapon. A crosshair over a trigger that does nothing is a small lie told
+sixty-four times a second, at the moment somebody is deciding whether to shoot; it is also the only
+thing on the screen that says which mode is on. `Visibility` rather than despawning, so the hit
+markers hanging off it survive the switch. On foot none of this applies — the flag means nothing
+there, and the crosshair and the trigger behave as they always did.
+
+Still missing: the chase camera cannot get out of the way of walls, and the wheel has made that
+easier to arrange. Passengers would dissolve the whole trade — a gunner's seat aims wherever it
+likes while the driver's camera steers itself, which is what Halo actually does.
 
 #### Getting back on its wheels
 

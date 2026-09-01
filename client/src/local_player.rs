@@ -10,7 +10,7 @@
 //! second of mouse movement is far worse than the position error it would be fixing.
 
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
-use avian3d::prelude::{Position, Rotation};
+use avian3d::prelude::{LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use lightyear::frame_interpolation::prelude::FrameInterpolationSystems;
@@ -45,8 +45,17 @@ const CHASE_FURTHEST: f32 = 20.0;
 /// notches would wind the camera to its far end in a single flick.
 const PIXELS_PER_NOTCH: f32 = 20.0;
 
-/// Switches the driving view between following the mouse and following the vehicle.
-const VIEW_KEY: KeyCode = KeyCode::KeyV;
+/// Takes the driver's weapon out, and puts it away again.
+const WEAPON_KEY: KeyCode = KeyCode::KeyV;
+
+/// How hard the camera is pulled back behind a vehicle, and the speed at which it pulls that hard.
+///
+/// A rate per second rather than a fraction per frame, applied as `1 - exp(-rate * dt)`, so the
+/// camera behaves the same at 30 fps and at 300. Scaled by speed up to [`CENTRING_SPEED`] and no
+/// further, which is what leaves a parked vehicle alone: standing still there is nothing behind to
+/// be pulled towards, and a driver looking around their own car should be able to.
+const CENTRING_RATE: f32 = 5.0;
+const CENTRING_SPEED: f32 = 6.0;
 
 pub struct LocalPlayerPlugin;
 
@@ -74,9 +83,10 @@ impl Plugin for LocalPlayerPlugin {
                     note_pointer_over_ui,
                     note_drawn_view,
                     grab_cursor,
-                    switch_the_view,
+                    draw_or_stow_the_weapon,
                     look,
                     sample_input,
+                    hold_your_fire,
                 )
                     .chain()
                     // Before interpolation runs again, on purpose. A player reacts to what is on
@@ -85,7 +95,10 @@ impl Plugin for LocalPlayerPlugin {
                     // player has not seen yet — half a frame into their own future.
                     .before(InterpolationSystems::Prepare),
             )
-            .add_systems(Update, report_drawn_view.after(sample_input))
+            // After `hold_your_fire` rather than merely after `sample_input`: it reports on a shot,
+            // and until the stowed-weapon rule has run there is no settled answer to whether one
+            // was taken. The two are chained, so this is the stronger of the two orderings.
+            .add_systems(Update, report_drawn_view.after(hold_your_fire))
             // The same step the server runs, over the one entity we predict. Lightyear re-runs
             // this schedule when it rolls back, so this is the replay too.
             .add_systems(
@@ -141,17 +154,22 @@ pub struct LocalPlayer {
     /// changed there — see [`look`], which is also why scrolling on foot leaves it alone rather
     /// than quietly rearranging a view nobody is looking through.
     pub chase: f32,
-    /// Whether the driving view turns with the vehicle rather than with the mouse.
+    /// Whether the driver has their weapon out.
     ///
-    /// Kept here beside the angles it competes with, because that is what it is: a switch over
-    /// which of two things owns [`yaw`](Self::yaw) while driving. Remembered across getting in and
-    /// out, so a driver who prefers one view does not have to ask for it every time.
-    pub locked: bool,
+    /// The switch is over the weapon, and the camera follows from it, because the two cannot both
+    /// be had: a camera that pulls itself back behind the vehicle is pulling the crosshair with it,
+    /// [`yaw`](Self::yaw) being the same number for both. So with the weapon stowed the camera is
+    /// steered for you and there is nothing to aim; with it out you aim, and the camera is yours to
+    /// hold. Halo could have it both ways because its Warthog driver has no weapon at all — the gun
+    /// is a second seat, and a second player's view.
+    ///
+    /// Only means anything while driving. On foot the weapon is always to hand.
+    pub armed: bool,
 }
 
 impl Default for LocalPlayer {
     fn default() -> Self {
-        Self { yaw: 0.0, pitch: 0.0, chase: CHASE_DISTANCE, locked: false }
+        Self { yaw: 0.0, pitch: 0.0, chase: CHASE_DISTANCE, armed: false }
     }
 }
 
@@ -308,13 +326,10 @@ fn look(
         return;
     }
     let driving = driving.is_some();
-    // Yaw belongs to the mouse, except while the driving view is locked to the vehicle — there the
-    // vehicle owns it and [`place_camera`] writes it. Refusing the movement here rather than
-    // overwriting it later is what keeps the angle this frame *reports* as its aim the same one it
-    // is drawing; the two are read a schedule apart.
-    if !(driving && player.locked) {
-        player.yaw -= motion.delta.x * MOUSE_SENSITIVITY;
-    }
+    // The mouse always moves the view, including against the centring in [`place_camera`]. That is
+    // what makes it a spring rather than a lock: a driver being steered back behind their own car
+    // can still push the view somewhere and hold it there, and it slides back when they let go.
+    player.yaw -= motion.delta.x * MOUSE_SENSITIVITY;
     player.pitch = (player.pitch - motion.delta.y * MOUSE_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     if driving {
         // Wheel up pulls the camera in, which is the direction every map and every other game
@@ -328,14 +343,23 @@ fn look(
     }
 }
 
-/// Update: switches the driving view between following the mouse and following the vehicle.
+/// Update: takes the driver's weapon out, or puts it away.
+///
+/// One key over two things, because they are two halves of one choice — see
+/// [`armed`](LocalPlayer::armed). Stowed, the camera is steered back behind the vehicle and the
+/// trigger does nothing; drawn, the camera is the driver's own and so is the shot.
+///
+/// It is a client's own business either way. Nothing here needs the server's agreement: whether my
+/// weapon is out changes nothing for anybody else, the driver is not drawn while driving, and "not
+/// firing" is what the server already sees when a trigger is not pulled. There is no new state on
+/// the wire and nothing to arbitrate.
 ///
 /// Deliberately not gated on the cursor being grabbed, unlike [`look`]. The grab is there because
-/// relative mouse movement stops arriving without it; a key press arrives either way, and a view
-/// that could not be switched back after pressing Escape would be a trap.
-fn switch_the_view(keys: Res<ButtonInput<KeyCode>>, mut player: Single<&mut LocalPlayer>) {
-    if keys.just_pressed(VIEW_KEY) {
-        player.locked = !player.locked;
+/// relative mouse movement stops arriving without it; a key press arrives either way, and a mode
+/// that could not be left after pressing Escape would be a trap.
+fn draw_or_stow_the_weapon(keys: Res<ButtonInput<KeyCode>>, mut player: Single<&mut LocalPlayer>) {
+    if keys.just_pressed(WEAPON_KEY) {
+        player.armed = !player.armed;
     }
 }
 
@@ -393,6 +417,29 @@ fn sample_input(
         yaw: player.yaw,
         pitch: player.pitch,
     };
+}
+
+/// Update: a driver whose weapon is put away is not firing, whatever the trigger says.
+///
+/// Its own system rather than a term inside [`sample_input`], because it is its own rule: what the
+/// player asked for is one thing, and what a stowed weapon is capable of is another. Chained
+/// immediately after, so there is no frame in which the trigger is believed.
+///
+/// The view bracket goes with it. It is the evidence for a shot — what the screen was showing when
+/// the trigger went down — and a shot that is not taken has nothing to prove.
+///
+/// It applies to the scripted input too. Whether the weapon is out is a fact about the game rather
+/// than about who is pressing the button, and a harness that wants to shoot from a vehicle can say
+/// so by arming the driver, which is the same thing a person does.
+fn hold_your_fire(
+    driving: Option<Single<&Driving, With<Predicted>>>,
+    player: Single<&LocalPlayer>,
+    mut input: ResMut<CurrentInput>,
+) {
+    if driving.is_some() && !player.armed {
+        input.0.fire = false;
+        input.0.view = None;
+    }
 }
 
 /// What the screen is currently showing of everyone else, as two received snapshots and a fraction.
@@ -546,6 +593,25 @@ type OwnPose = (&'static PlayerState, Has<Driving>);
 const CHASE_DISTANCE: f32 = 7.0;
 const CHASE_RISE: f32 = 0.17;
 
+/// How high the camera rides once the weapon is out: not at all.
+///
+/// Any rise is parallax. The camera looks along the same direction the shot travels, but from
+/// `rise x chase` above the muzzle, so the two are *parallel lines* and the shot lands that far
+/// below the crosshair at every distance — 1.19 m at the default zoom, which is a whole vehicle.
+/// Converging them properly means casting a ray from the camera, finding what the crosshair is
+/// actually over, and aiming the muzzle at that point, which is what a third-person shooter does
+/// and is a real piece of machinery.
+///
+/// Putting the camera *on* the line costs nothing and is exact at every distance instead of at one:
+/// with no rise the camera sits at `eye - direction x chase`, which is a point on the shot's own
+/// ray, so the crosshair marks where the bullet goes by construction rather than by tuning.
+///
+/// It is affordable because the driver's head is above the bodywork. The eye rides 1.19 m over the
+/// chassis centre and the model's highest point is 0.63 m, so the sight line clears the whole
+/// vehicle by half a metre. What it does not clear is a steep shot: past about 20 degrees up the
+/// roll bar comes into the line behind the eye, and past about 27 down the bonnet does.
+const AIMING_RISE: f32 = 0.0;
+
 /// How far the drawn view may fall behind the simulation, in metres.
 ///
 /// This is not a tuning preference, it is the whole trade in one number. Smoothing a correction
@@ -642,18 +708,24 @@ fn smooth_the_view(
 /// `EulerRot::YXZ` applies yaw first and pitch second, in the camera's own frame. Any other order
 /// makes the horizon tilt as you look up while turning.
 fn place_camera(
+    time: Res<Time>,
     predicted: Option<Single<OwnPose, With<Predicted>>>,
     driver: Option<Single<&Player, crate::vehicle::OwnDriver>>,
-    vehicles: Query<(&Rotation, &Driven)>,
+    vehicles: Query<(&Rotation, &LinearVelocity, &Driven)>,
     mut camera: Single<(&mut LocalPlayer, &mut Transform)>,
 ) {
     let (player, transform) = &mut *camera;
-    // With the view locked, the vehicle owns the yaw. Written here rather than anywhere earlier
-    // because this is where the vehicle's drawn pose is finally settled — an interpolated one is
-    // blended in this same schedule, and reading it a system too early would hang the camera off
-    // last frame's heading.
-    if player.locked && let Some(heading) = driver.and_then(|me| heading_of(&vehicles, me.peer)) {
-        player.yaw = heading;
+    // With the weapon stowed, the vehicle pulls the camera back behind itself, harder the faster it
+    // is going. Written here rather than anywhere earlier because this is where the vehicle's drawn
+    // pose is finally settled — an interpolated one is blended in this same schedule, and reading it
+    // a system too early would hang the camera off last frame's heading.
+    if !player.armed
+        && let Some(driver) = driver
+        && let Some((heading, speed)) = behind(&vehicles, driver.peer)
+    {
+        // Frame-rate independent: an exponential approach, not a fraction of the gap per frame.
+        let rate = CENTRING_RATE * (speed / CENTRING_SPEED).clamp(0.0, 1.0);
+        player.yaw += shortest_turn(player.yaw, heading) * (1.0 - (-rate * time.delta_secs()).exp());
     }
     let look = Quat::from_euler(EulerRot::YXZ, player.yaw, player.pitch, 0.0);
     transform.rotation = look;
@@ -671,23 +743,38 @@ fn place_camera(
         // It does not yet get out of the way of walls: driving backwards into one puts the camera
         // inside it, and the wheel now makes that easier to arrange. A chase camera earns its keep
         // by casting a ray and pulling in, and that is its own piece of work.
-        state.eye_position() + (Vec3::Y * CHASE_RISE - look * Vec3::NEG_Z) * player.chase
+        let rise = if player.armed { AIMING_RISE } else { CHASE_RISE };
+        state.eye_position() + (Vec3::Y * rise - look * Vec3::NEG_Z) * player.chase
     } else {
         state.eye_position()
     };
 }
 
-/// Which way a peer's vehicle points, as a yaw.
+/// Where the camera wants to be behind a peer's vehicle: the yaw to aim for, and how fast it is
+/// going along the ground.
 ///
 /// Yaw alone, and not because it is easier. A camera given the vehicle's whole attitude would put
 /// the horizon on its side every time the buggy leaned into a corner, and would stare at the sky
 /// for the length of a jump. What a driver wants is to be behind the car and level with the world.
 ///
+/// The speed is flat too, so that dropping off a ramp is not read as going fast enough to be worth
+/// centring for.
+///
 /// `None` when the nose points straight up or down — mid-barrel-roll — where there is no heading to
 /// take. The camera keeps the one it had, which is the only answer that does not spin.
-fn heading_of(vehicles: &Query<(&Rotation, &Driven)>, peer: u64) -> Option<f32> {
-    let (rotation, _) = vehicles.iter().find(|(_, driven)| driven.0 == peer)?;
+fn behind(vehicles: &Query<(&Rotation, &LinearVelocity, &Driven)>, peer: u64) -> Option<(f32, f32)> {
+    let (rotation, velocity, _) = vehicles.iter().find(|(.., driven)| driven.0 == peer)?;
     let nose = rotation.0 * Vec3::NEG_Z;
     let flat = Vec2::new(nose.x, nose.z);
-    (flat.length_squared() > 1e-6).then(|| f32::atan2(-flat.x, -flat.y))
+    let along = Vec2::new(velocity.0.x, velocity.0.z).length();
+    (flat.length_squared() > 1e-6).then(|| (f32::atan2(-flat.x, -flat.y), along))
+}
+
+/// The way round from one angle to another that does not go the long way.
+///
+/// Yaw is unbounded here — it simply grows as a player spins — so the naive difference between two
+/// of them can be several turns, and a camera easing along it would wind up like a clock spring.
+fn shortest_turn(from: f32, to: f32) -> f32 {
+    let turn = (to - from).rem_euclid(core::f32::consts::TAU);
+    if turn > core::f32::consts::PI { turn - core::f32::consts::TAU } else { turn }
 }

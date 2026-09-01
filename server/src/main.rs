@@ -169,6 +169,20 @@ type Shooter = (
 );
 
 /// What damage is applied to.
+/// Everything a shot can meet that is not a player: its shape, where it is, what layer it answers
+/// to, and who is sitting in it.
+///
+/// The last is what keeps a driver from shooting the vehicle they are sitting in — see
+/// [`resolve_shots`].
+type Hittable = (
+    Entity,
+    &'static Collider,
+    &'static Position,
+    &'static Rotation,
+    &'static CollisionLayers,
+    Option<&'static Driven>,
+);
+
 type Wounded = (
     &'static mut Health,
     &'static mut PlayerState,
@@ -204,7 +218,11 @@ fn resolve_shots(
     // shot at a wall came back as a hit, which suppressed its bullet hole and put a hit marker on
     // the shooter's crosshair. The map is already accounted for by `Level::raycast`, which is what
     // stops the bullet; a second reckoning of it can only disagree with the first.
-    props: Query<(Entity, &Collider, &Position, &Rotation, &CollisionLayers)>,
+    //
+    // `Driven` comes along so a shooter can be kept from hitting the vehicle they are sitting in —
+    // it travels with the target rather than being looked up separately, because it is a fact about
+    // the target and only ever asked while deciding whether to consider one.
+    props: Query<Hittable>,
     // How far behind the present each client's view of everyone else is. Lightyear puts this on the
     // connection entity when an input message reports it, which is what `ControlledBy::owner`
     // points at. It is absent until the first message arrives, and absent forever if the client
@@ -227,16 +245,23 @@ fn resolve_shots(
     let tick = timeline.tick();
     // Everyone who could be hit, gathered once rather than once per shooter. This is the present;
     // each shooter rewinds it to its own moment below.
-    let present: Vec<(Entity, Hitbox)> = players
+    //
+    // The third element is who is sitting in it, for the things that can be sat in. Nobody is
+    // sitting in a player.
+    let present: Vec<(Entity, Hitbox, Option<u64>)> = players
         .p0()
         .iter()
-        .map(|(entity, state, ..)| (entity, Hitbox::of(state)))
+        .map(|(entity, state, ..)| (entity, Hitbox::of(state), None))
         .chain(
             props
                 .iter()
-                .filter(|(.., layers)| layers.memberships.has_all(Layer::Body))
-                .map(|(entity, collider, position, rotation, _)| {
-                    (entity, Hitbox::new(collider.clone(), position.0, rotation.0))
+                .filter(|(.., layers, _)| layers.memberships.has_all(Layer::Body))
+                .map(|(entity, collider, position, rotation, _, driven)| {
+                    (
+                        entity,
+                        Hitbox::new(collider.clone(), position.0, rotation.0),
+                        driven.map(|driven| driven.0),
+                    )
                 }),
         )
         .collect();
@@ -301,11 +326,16 @@ fn resolve_shots(
             }
         }
 
-        // Everyone but the shooter. Left in, they would hit themselves at zero distance.
+        // Everyone but the shooter, and not the vehicle the shooter is sitting in. Left in, they
+        // would hit themselves at zero distance — and since a driver fires from the seat, their own
+        // bodywork is at zero distance too, so every shot from a vehicle would stop against it and
+        // shove the vehicle it came from. Excluded rather than skipped over: the rule is that your
+        // own vehicle is not a target, which is a thing a player can rely on, where "the ray happens
+        // to start inside it" is a thing that stops being true the moment anyone leans out.
         let targets: Vec<(Entity, Hitbox)> = present
             .iter()
-            .filter(|(entity, _)| *entity != shooter)
-            .map(|(entity, now)| {
+            .filter(|(entity, _, seat)| *entity != shooter && *seat != Some(player.peer))
+            .map(|(entity, now, _)| {
                 let (entity, now) = (*entity, now.clone());
                 let Some(rewind) = rewind else {
                     return (entity, now);

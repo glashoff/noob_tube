@@ -12,6 +12,10 @@
 //! draw over earlier ones, so spawn order is the stacking order — every outline goes down first.
 
 use bevy::prelude::*;
+use lightyear::prelude::Predicted;
+use noob_tube_shared::vehicle::Driving;
+
+use crate::local_player::LocalPlayer;
 
 /// Half the empty space at the centre, in logical pixels.
 const GAP: f32 = 4.0;
@@ -32,7 +36,7 @@ impl Plugin for CrosshairPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(on_hit_landed)
             .add_systems(Startup, spawn_crosshair)
-            .add_systems(Update, fade_hit_marker);
+            .add_systems(Update, (fade_hit_marker, show_it_only_when_armed));
     }
 }
 
@@ -42,6 +46,34 @@ impl Plugin for CrosshairPlugin {
 /// this, and gets the centring for free.
 #[derive(Component)]
 pub struct Crosshair;
+
+/// Update: takes the crosshair away when there is nothing to aim.
+///
+/// A driver with their weapon stowed cannot fire, and a crosshair over a trigger that does nothing
+/// is a lie — a small one, told sixty-four times a second, at the exact moment somebody is deciding
+/// whether to shoot. It is also the only thing on the screen that says which of the two driving
+/// modes is on: no crosshair, the camera is steering itself; crosshair, it is yours and so is the
+/// shot. See [`draw_or_stow_the_weapon`](crate::local_player).
+///
+/// `Visibility` rather than despawning it, so that the hit markers hanging off it survive the
+/// switch, and so that coming back is a bool rather than a rebuild.
+fn show_it_only_when_armed(
+    driving: Option<Single<&Driving, With<Predicted>>>,
+    player: Option<Single<&LocalPlayer>>,
+    crosshair: Option<Single<&mut Visibility, With<Crosshair>>>,
+) {
+    let Some(crosshair) = crosshair else {
+        return;
+    };
+    let armed = player.is_none_or(|player| player.armed);
+    let mut visibility = crosshair.into_inner();
+    let wanted = if driving.is_some() && !armed {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    visibility.set_if_neq(wanted);
+}
 
 /// Where each arm sits relative to the centre, and which way round it is.
 const ARMS: [(f32, f32, bool); 4] = [

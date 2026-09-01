@@ -25,6 +25,7 @@ use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::player::{Player, PlayerInput, PlayerState};
 use noob_tube_shared::shooting::{self, ShotFired};
 use noob_tube_shared::simulation;
+use noob_tube_shared::vehicle::Driven;
 
 use crate::crosshair;
 
@@ -129,6 +130,14 @@ type Shooter = (&'static ActionState<PlayerInput>, &'static PlayerState);
 type Target = (Entity, &'static PlayerState);
 /// Everyone the server is replicating to us except ourselves.
 type Drawn = (With<client::Remote>, Without<Predicted>);
+/// A target that carries its own shape rather than deriving one, and whose seat may be taken.
+type Solid = (
+    Entity,
+    &'static Collider,
+    &'static Position,
+    Option<&'static Rotation>,
+    Option<&'static Driven>,
+);
 
 /// FixedUpdate: draws our own tracer the moment we fire, without waiting to be told.
 ///
@@ -147,12 +156,15 @@ type Drawn = (With<client::Remote>, Without<Predicted>);
 /// exactly the thing a client must never guess at — the server rewinds the world to decide it, and
 /// a predicted kill it then denied could not be taken back.
 fn predict_own_tracer(
-    mine: Option<Single<Shooter, With<Predicted>>>,
+    mine: Option<Single<(Shooter, &Player), With<Predicted>>>,
     // Everyone else, at the position they are being *drawn* at. That is the honest local answer to
     // where the shot goes, and it is the same view the server reconstructs to resolve the hit.
     others: Query<Target, Drawn>,
-    // Props are targets too, and they carry their hitbox rather than deriving one.
-    props: Query<(Entity, &Collider, &Position, Option<&Rotation>), Drawn>,
+    // Props are targets too, and they carry their hitbox rather than deriving one. `Driven` comes
+    // with them so this client can leave out the vehicle it is sitting in, exactly as the server
+    // does — the two must agree about what is not a target, or the tracer stops against a bonnet
+    // the server shot straight through.
+    props: Query<Solid, Drawn>,
     level: Level,
     assets: Option<Res<ShotAssets>>,
     mut commands: Commands,
@@ -160,18 +172,24 @@ fn predict_own_tracer(
     let (Some(mine), Some(assets)) = (mine, assets) else {
         return;
     };
-    let (action, state) = *mine;
+    let ((action, state), me) = *mine;
     let targets = others
         .iter()
         .map(|(entity, other)| (entity, Hitbox::of(other)))
-                .chain(props.iter().map(|(entity, collider, position, rotation)| {
-            // `Rotation` arrives separately from `Position` and may not have landed yet — lightyear
-            // inserts an interpolated component only after two updates. Facing forward until it
-            // does is right for a crate and harmless for anything else: the pose is corrected on
-            // the next update, and the server's answer is the one that counts either way.
-            let facing = rotation.map_or(Quat::IDENTITY, |rotation| rotation.0);
-            (entity, Hitbox::new(collider.clone(), position.0, facing))
-        }));
+        .chain(
+            props
+                .iter()
+                .filter(|(.., driven)| driven.is_none_or(|driven| driven.0 != me.peer))
+                .map(|(entity, collider, position, rotation, _)| {
+                    // `Rotation` arrives separately from `Position` and may not have landed yet —
+                    // lightyear inserts an interpolated component only after two updates. Facing
+                    // forward until it does is right for a crate and harmless for anything else:
+                    // the pose is corrected on the next update, and the server's answer is the one
+                    // that counts either way.
+                    let facing = rotation.map_or(Quat::IDENTITY, |rotation| rotation.0);
+                    (entity, Hitbox::new(collider.clone(), position.0, facing))
+                }),
+        );
     // The same call the server makes, over the same input, before either side steps the player.
     let Some(fired) = shooting::fire(&level, state, &action.0, targets) else {
         return;
