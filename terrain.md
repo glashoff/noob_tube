@@ -6,7 +6,9 @@ Design notes for replacing the flat ground plane with sculptable outdoor terrain
 Today the world is [`level.rs`](shared/src/level.rs): a 500 m square plane, three crates and a
 ramp, written as constants that both binaries build the same geometry from. Terrain replaces the
 plane. It is a height field — one height per sample on a regular grid — that the server owns, that
-clients receive and collide against, and that players sculpt from inside the running game.
+clients receive and collide against, and that players sculpt from inside the running game. With it
+comes the map management that implies: any client can create a map on the server, load an existing
+one, and save what it has changed, through a menu (§2).
 
 Two properties decide nearly everything downstream, and they are worth stating before any of the
 detail:
@@ -83,10 +85,11 @@ code. Rejected for three reasons, in increasing order of weight:
 ### Height field
 
 ```
-nx, nz        sample counts per axis  — chosen when the map is created
-spacing       metres between samples  — chosen when the map is created (default 1.0)
+nx, nz        sample counts per axis  — derived from extent and spacing (§2)
+spacing       metres between samples  — chosen when the map is created
 origin        world x/z of sample (0,0)
 min_y, max_y  the range the quantised heights map onto
+water_y       world y of the sea surface, or none for a dry map
 heights       nx*nz samples, u16, row-major (x fastest)
 ```
 
@@ -94,7 +97,7 @@ heights       nx*nz samples, u16, row-major (x fastest)
 size of `f32`. Terrain never needs more than that.
 
 **The quantisation is not a storage trick, it is the determinism mechanism.** Brushes round to the
-`u16` lattice *inside* the brush, not on save (§5), so every machine lands on the same lattice
+`u16` lattice *inside* the brush, not on save (§6), so every machine lands on the same lattice
 after every stroke and repeated small strokes cannot accumulate apart. Storing `f32` and rounding
 on the way to disk would give up the property that makes it safe to replicate a sculpt as a gesture
 rather than as a list of samples.
@@ -107,7 +110,7 @@ fix the extent: `(nx-1) * spacing` by `(nz-1) * spacing` metres.
 The usual way to texture terrain is a *splat map*: a second grid, RGBA, one byte per layer weight,
 painted by hand and stored alongside the heights. This design has none. Which texture appears at a
 point is a function of that point's height, its slope, and its distance to any path drawn on the
-map (§8) — evaluated per pixel in the fragment shader (§4).
+map (§10) — evaluated per pixel in the fragment shader (§5).
 
 The case for storing a painted splat instead is real, and it is worth stating at its strongest
 before dismissing it. From the predecessor's design notes, which chose that way:
@@ -132,7 +135,7 @@ receives is the heights and nothing else.
 **What it costs**, on the record: a map can never have a patch of moss or a worn bare spot that the
 ground's own shape does not explain. Every visual distinction has to be expressible as a rule.
 
-**And the way back is not a splat.** Paths and roads are wanted eventually (§8), and they arrive as
+**And the way back is not a splat.** Paths and roads are wanted eventually (§10), and they arrive as
 *2D vector paths* somebody places — an ordered handful of control points, evaluated per pixel — not
 as a raster somebody paints. That keeps the invariant whole: a road is still derived, from a curve
 instead of from height and slope.
@@ -153,6 +156,27 @@ Up to four texture layers, each `{ texture: String, tile_scale: f32 }` plus the 
 it — a slope range, a height range, or a path kind. A layer names an ordinary material asset, so
 texture loading and packaging are whatever the rest of the game already does.
 
+### Water
+
+There is water, its level is one number, and an author sets it in the editor — so `water_y` lives
+in the terrain file beside the heights and is edited the same way. A map with no water stores
+nothing.
+
+**Water is everywhere at `water_y`; the height field only says where the bottom is close enough to
+matter.** Stating it that way round rather than "water exists where the terrain is low" is what
+makes the model simple: the shore texture rule, the underwater tint and the splash test all become
+one comparison against a plane, with no "is there terrain here" case in front of them, and swimming
+past the edge of the field does not switch the sea off.
+
+The rendered surface is then a flat mesh at `water_y` carrying, per vertex, the **depth** of the
+ground beneath it. Depth is what makes water read as water — it drives the colour from clear
+shallows to dark deeps — and it is a subtraction against the height field the client already holds.
+Quads are worth emitting only where at least one corner is submerged, so a pond in one valley costs
+a pond rather than a map-sized plane.
+
+`water_y` is also a rule input for §5: the shore layer is "below the water line", which is why a
+dry map loses one of its four layers rather than needing a different rule set.
+
 ### File format
 
 One binary file per map, with a leading version byte:
@@ -161,6 +185,7 @@ One binary file per map, with a leading version byte:
 u8   version
 f32  spacing, origin_x, origin_z, min_y, max_y
 u32  nx, nz
+f32  water_y          (NaN, or a presence flag, for a dry map)
 u8   layer_count      then per layer: str texture, f32 tile_scale, rule parameters
      heights          — nx*nz u16
 ```
@@ -168,15 +193,107 @@ u8   layer_count      then per layer: str texture, f32 tile_scale, rule paramete
 Not RON and not JSON: 66k heights as text is some 400 KB of digits and a slow parse, and nobody
 hand-edits a height field in a text editor, so the authoring source has no reason to be readable.
 
-**The same bytes are the file and the wire baseline** (§2). One encoder, one decoder, serving disk
+**The same bytes are the file and the wire baseline** (§3). One encoder, one decoder, serving disk
 and network alike.
 
 ---
 
-## 2. Ownership and wire
+## 2. Maps: creating, loading and saving
+
+Terrain is the first thing in this project that is *content* rather than constants. `level.rs` is
+compiled in; a height field is a file, and the entire point of sculpting is that it changes. So
+terrain arrives together with the map management this game does not have yet, and the two cannot
+sensibly be separated — a sculpt you cannot save is a demo.
+
+**Any connected client may create a map, load one, and save changes.** No ownership and no
+permissions, which is the same stance the rest of the game takes; the protections are against
+accident and abuse of *size*, not against the player.
+
+### A menu, not a HUD
+
+This is modal and opened deliberately: it stops the world rather than annotating it, because every
+action in it is disruptive to everyone. It holds:
+
+- **the map list**, with the current one marked and unsaved changes shown — a sculpt that exists
+  only in memory is one disconnect from gone, and the menu is the only place that can say so;
+- **load**, which switches everybody;
+- **new…**, which opens the creation dialog below;
+- **save** and **save as…**.
+
+### Creating a map: extent and spacing, not sample counts
+
+Two numbers, and they are the two an author actually thinks in:
+
+- **extent** — how many metres across the map is, per axis;
+- **spacing** — how many metres between samples.
+
+`nx` and `nz` are derived, not typed: `nx = round(extent_x / spacing) + 1`. The dialog shows the
+derived sample count and the resulting baseline size as the fields change, because those are the
+numbers the caps are enforced against and the author should watch them move.
+
+**The `+ 1` is not an off-by-one.** Heights are grid *points*, not cells, so an n-metre terrain at
+1 m spacing needs n+1 of them. It is also why heightmap tools export 2ⁿ+1 sizes — 513, 1025, 2049 —
+and why a sample cap written as a round 512² would reject a canonical 513² import by exactly one
+sample per axis, for no reason at all.
+
+`min_y` and `max_y` are the third creation decision: they set how much vertical range there is to
+spend, and they cannot be changed later without requantising every height.
+
+### A new map starts at half height
+
+The height field of a fresh map is **`(min_y + max_y) / 2` everywhere** — not flat at zero, and not
+flat at the bottom of its range.
+
+Sculpting is two-directional, and a field that starts at its floor can only be raised. The first
+attempt to carve a riverbed or a hollow clamps, and the author has to raise the entire map before
+they can dig anything at all. Starting at the midpoint gives the same range in both directions and
+makes the first stroke work whichever way it goes.
+
+The two spawn points sit on that plane, so a freshly created map is immediately playable.
+
+### Clamping is mandatory, not tidy
+
+Extent and spacing arrive from a client over a reliable message, and their quotient drives a
+server-side allocation and the size of every future baseline. Unclamped, that is a memory and
+bandwidth denial of service with a one-line exploit — a client asking for a 10 km map at 5 cm
+spacing.
+
+The caps belong in `shared`, so the menu can grey out over-cap inputs against **the same constants
+the server enforces** rather than a second copy that drifts:
+
+- `spacing` in `[0.25, 8]` m. Finer buys nothing a sculpt brush can express; coarser is unusable.
+- a per-axis sample cap, **and** a separate cap on `nx * nz` — not the product of the axis caps, or
+  an extreme aspect ratio walks straight through both.
+- a per-client rate limit on creation specifically, because that is the action that writes files.
+
+Size the total-sample cap from what a baseline may cost on join, not from what fits in memory. For
+scale: 513×513 is a 512 m map at 1 m spacing and about 526 KB of `u16` heights.
+
+### Names, and the one guard that matters
+
+A map name from a client is sanitised on arrival, and **a load only ever accepts a name that is
+literally one of the directories the server itself discovered.** That is the path-traversal guard;
+it is not a separate check bolted on beside the load, it *is* how the load resolves a name, and
+writing it any other way is how the check gets forgotten on the second code path.
+
+### Load and save
+
+The file I/O is the easy half. The two parts that need deciding:
+
+- **A load is a map switch**, and everybody has to end up on the same map. The simplest correct
+  thing is for the server to apply it between ticks and then re-send the baseline to every client,
+  which is the join path it already has rather than a second one beside it.
+- **Save is explicit, never automatic.** The file on disk is what the next joiner starts from
+  (§3), and an accidental save over a good map with a half-finished experiment is unrecoverable
+  without versioning this project does not have. The menu shows unsaved state; it does not resolve
+  it on its own.
+
+---
+
+## 3. Ownership and wire
 
 The server owns the authoritative height field. A joining client receives it once as a baseline;
-every subsequent change arrives as an edit gesture (§5).
+every subsequent change arrives as an edit gesture (§6).
 
 **The client never loads the terrain file itself, and it must not.** Once terrain is editable, the
 file on disk is the *last saved* state rather than the current one. A client that loaded it
@@ -210,7 +327,7 @@ client has not finished installing.
 
 ---
 
-## 3. Physics
+## 4. Physics
 
 One `Collider::heightfield` per collider tile.
 
@@ -280,7 +397,7 @@ is visible while it is being made instead of discovered during a match.
 
 ---
 
-## 4. Rendering
+## 5. Rendering
 
 `ExtendedMaterial<StandardMaterial, TerrainMaterial>`
 (`bevy_pbr-0.19.1/src/extended_material.rs:145`) rather than a `Material` written from scratch:
@@ -308,6 +425,10 @@ sampling a stored splat rather than merely simpler. The worst case is still arou
 samples for one surface, which needs measuring; a reduced variant — two layers, no triplanar —
 belongs with the other quality settings.
 
+**Water** is a second, much simpler material: a flat mesh at `water_y` whose vertices carry the
+depth of the ground below them (§1). Colour from depth, and the shoreline falls out of the same
+number the sand rule uses, so the wet edge and the sand edge cannot disagree.
+
 Because the weights come from per-pixel values rather than a stored grid, transitions follow the
 geometry exactly and can never be coarser than the surface itself. The cost is the mirror image:
 transitions are *uniform*, and a shoreline has no hand-placed variation anywhere along it. Noise in
@@ -315,7 +436,7 @@ the rule is what buys that back.
 
 ---
 
-## 5. In-game sculpting
+## 6. In-game sculpting
 
 A sculpt mode, with the tools in the order they earn their place:
 
@@ -362,7 +483,94 @@ terrain.
 
 ---
 
-## 6. Terrain edits and rollback
+## 7. Spawn points, and the hotbar that places them
+
+Three things get placed: where players start, where vehicles start, where crates start. All three
+already exist as constants — `CRATES`, `VEHICLE_STARTS` and `spawn_point` in
+[`level.rs`](shared/src/level.rs) — and that file already says what is wrong with them:
+
+> Real spawn points come with real levels. […] Harmless on an empty plane, wrong on a real map, and
+> fixed by picking a free spawn point rather than counting.
+
+So this is less a new feature than moving three constants into the map file and letting somebody
+drag them around.
+
+### A marker is not the thing it spawns
+
+The distinction that keeps this cheap:
+
+- A **marker** is map content — a kind, an x/z, a yaw. No collider, no hitbox, invisible outside
+  edit mode, and it travels with the map rather than per tick.
+- The **entity** it produces — a crate, a vehicle, a player — is ordinary gameplay state, created
+  at round start and replicated exactly as it is today.
+
+Three things follow. Markers never enter prediction, because nothing predicts them. A round reset
+is a re-read of the markers rather than a special case. And **placement is exempt from §8's
+rollback rule**: a marker has no collider, so nothing it does can change where a player may stand,
+and there is no per-tile rebuild to make idempotent. Only spawning the live entity immediately
+would need the tick discipline, and then it would need it for the entity rather than the marker.
+
+### The height comes from the ground, not from the author
+
+A marker stores `x`, `z` and `yaw`. Its `y` is read from the height field when the entity is
+spawned.
+
+That is a correctness rule rather than a saving. Terrain is editable, so a stored `y` is wrong the
+moment somebody sculpts underneath it — a spawn buried in a new hill, or a vehicle dropped from
+four metres onto a valley floor that used to be a ridge. Deriving it means every marker survives
+every sculpt with no fix-up pass and no way to forget one.
+
+The cost is that markers cannot be stacked: a crate spawn cannot sit on top of another crate. That
+falls straight out of "terrain is the ground", and if stacking is ever wanted the honest form is an
+explicit offset *above* the ground rather than a return to absolute heights.
+
+### Where markers live
+
+They are map content but they are not *terrain* — by this document's own rule (see The split), a
+spawn point is a thing placed on the ground rather than part of it. The clean answer is a separate
+map file listing markers, which is also where anything the built layer later contributes belongs.
+
+Since the project has exactly one map file today, putting them in it would work and would be less
+code. It is worth not doing: the moment there is a second kind of placed thing, the terrain codec
+grows a section that has nothing to do with heights, and the file that a heightmap import should be
+able to overwrite wholesale is also the file holding the spawns you want to keep.
+
+A marker is `{ kind, x, z, yaw }`. Fourteen bytes or so, a few dozen per map — the size question
+does not arise, which is why the split can be decided on tidiness alone.
+
+### The hotbar
+
+Ten slots on keys **1–9 and 0**, in that order.
+
+The structure worth copying is that **a slot holds a thing, and the key you press chooses the
+verb** — place, delete, rotate. One slot therefore does all three, and the slot count is not
+multiplied by the number of actions.
+
+Today there are three placeables, so seven slots start empty and assignable. The ten are there
+because the set grows — more vehicle kinds, props, whatever the built layer turns into — and
+retrofitting a hotbar is worse than leaving gaps in one.
+
+### Placement is a gesture, like a sculpt
+
+Same machinery as §6, over the same ordered reliable channel, for the same reason: send what was
+asked for, not what it produced.
+
+- `MarkerEdit { op, kind, x, z, yaw, id }`, server-validated before broadcast.
+- **Rotate is absolute, not a delta.** The sender reads the current yaw, adds its step, and sends
+  the *result*. Two authors turning the same vehicle marker in the same moment then land on one of
+  the two headings instead of on their sum. The same reasoning is why place carries a position
+  rather than an offset.
+- **Delete names an id, not a place.** A position is ambiguous as soon as two markers are close,
+  and a delete that quietly removed the wrong one is worse than a delete that misses.
+
+What the server owes on validation: a known kind, `x`/`z` inside the terrain footprint, a finite
+yaw, a cap on markers per map, and a rate limit. Plus one rule that is not about abuse — **at least
+one player spawn has to survive.** A map with none is unplayable, and the delete handler is the
+cheapest place in the system to know that.
+
+---
+
+## 8. Terrain edits and rollback
 
 This is the one piece of design here with no precedent to copy, because it follows from prediction
 machinery the predecessor does not have in this form.
@@ -388,7 +596,7 @@ triggers it.
 
 ---
 
-## 7. The one derivation that has to exist twice
+## 9. The one derivation that has to exist twice
 
 Surface classification — *what am I standing on* — is needed on the CPU for footstep sounds, impact
 decals and anything else that cares about the material under a player. The shader's copy is WGSL
@@ -407,14 +615,14 @@ Two mitigations, and the second is the one that actually settles it:
   half a metre into the sand. Collision never consults it, so a divergence cannot reach the
   simulation — which is the test that matters, and the same one that makes the visual half safe.
 
-**Paths are exempt from all of this** (§8). "Am I standing on a road?" is a pure function of the
+**Paths are exempt from all of this** (§10). "Am I standing on a road?" is a pure function of the
 path list, which lives in `shared` and is the same data on both sides — one call, no second
 implementation, no approximation. The duplication above is the price of deriving from *height and
 slope* specifically, and it applies only to the ground rules.
 
 ---
 
-## 8. Paths and roads — later, and vector
+## 10. Paths and roads — later, and vector
 
 Wanted, not designed here. This section records the shape and the one constraint specific to this
 engine; the predecessor works the rest out in detail, including LOD-gap measurements for a road
@@ -444,10 +652,10 @@ A road has two halves, and they land on opposite sides of the line this whole do
 organised around:
 
 - **The texture half is client-only.** Distance to the nearest path segment feeds the same fragment
-  shader as §4's rules. The server never evaluates it, nothing can diverge, and it costs nothing.
+  shader as §5's rules. The server never evaluates it, nothing can diverge, and it costs nothing.
 - **The height half is a terrain gesture.** Cutting a level corridor changes the height field,
-  which changes the collider, which changes where players can stand — so it falls under §5's
-  determinism discipline and §6's `commit_tick + max_rollback_ticks` rule like any other sculpt. It
+  which changes the collider, which changes where players can stand — so it falls under §6's
+  determinism discipline and §8's `commit_tick + max_rollback_ticks` rule like any other sculpt. It
   is genuinely a different brush from flatten: flatten levels to one height, this levels to a
   *profile* sampled and smoothed along the path.
 
@@ -460,7 +668,7 @@ a collider of its own, and that is a different feature wearing the same word.
 
 ---
 
-## 9. Vegetation — sketch only
+## 11. Vegetation — sketch only
 
 Not designed here beyond the property that makes it affordable.
 
@@ -484,42 +692,58 @@ on 0.12).
 
 ---
 
-## 10. Work steps
+## 12. Work steps
 
-1. **Data model and codec.** `TerrainHeights` in `shared`, `u16` quantisation, encode and decode,
-   unit tests on round-tripping. No rendering, no physics.
+1. **Data model and codec.** `TerrainHeights` in `shared`: `u16` quantisation, `water_y`, the
+   extent-and-spacing derivation, the midpoint fill, encode and decode. Unit tests on
+   round-tripping and on the caps. No rendering, no physics.
 2. **Collider.** One height field, spawned by server and client from the same shared data,
    replacing the ground plane in `level.rs`. Verify axis order and centring with the asymmetric
    ramp probe. This is where the design proves itself: if `Level` needs changes, something is
    wrong.
 3. **The slope limit.** Add the normal test to `is_grounded`, retune against the existing crates
    and ramp. Before there are hills to be surprised by.
-4. **Rendering.** `ExtendedMaterial` with one layer and no triplanar; then the derived weights,
-   then triplanar, then tile break — in that order, measuring each.
-5. **Wire.** Terrain channel, baseline on join, no edits yet. A joining client sees the server's
-   terrain.
-6. **Sculpting.** Raise/lower first, then flatten, smooth, ramp. Gestures, `commit_tick +
-   max_rollback_ticks`, per-tile rebuild.
-7. **Save.** The server writes the file; unsaved-state tracking.
+4. **Rendering.** `ExtendedMaterial` with one layer and no triplanar — enough to see the shape.
+5. **Wire.** Terrain channel, baseline on join. A joining client sees the server's terrain.
+6. **Maps.** Create, load and save on the server, with the caps and the name guard, and the menu in
+   front of them. At the end of this step a client can make a map, everyone lands on it, and it
+   survives a restart — with no sculpting in it yet.
+7. **Sculpting.** Raise/lower first, then flatten, smooth, ramp. Gestures,
+   `commit_tick + max_rollback_ticks`, per-tile rebuild, unsaved-state tracking in the menu.
+8. **Spawn markers.** The three kinds, the hotbar, place/delete/rotate as gestures, and round start
+   reading markers instead of `CRATES`, `VEHICLE_STARTS` and `spawn_point`.
+9. **Water.** The surface mesh with its depth attribute, and an editor control for `water_y`.
+10. **Derived texturing.** The full rule set, then triplanar, then tile break — in that order,
+   measuring each.
 
 Steps 1–3 are the ones that can invalidate the plan. Everything after them is addition.
 
 ---
 
-## 11. Open questions
+## 13. Open questions
 
-- **Map size.** `HALF_EXTENT` is 250 m, so a 512 m terrain covers the current playable area
-  exactly. At `f32` and 512 m from the origin, positional precision is still far under a
-  millimetre, so the prediction scheme is indifferent — this is a content question, not a technical
-  one.
-- **Where does a height field come from initially?** Sculpting a whole map from flat is tedious. An
-  import path from a heightmap image is a tool rather than a runtime feature — `bevy_heightmap`
-  0.19 is current and does exactly this, or it is ~150 lines against the `image` crate.
-- **Is there water?** Several of the texturing rules want a water level to key off, and a sea that
-  is real geometry rather than a painted band is its own piece of design. If there is no water,
-  one of the four layers loses its rule and the shoreline case disappears.
-- **Does built geometry stay `level.rs` constants?** Terrain does not care, but a sculpt mode will
-  eventually want to sit beside a build mode that does not exist yet.
+- **What the new-map dialog offers by default.** `HALF_EXTENT` is 250 m today, so a 512 m map at
+  1 m spacing covers the current playable area and lands on the canonical 513² grid. At `f32` and
+  512 m from the origin, positional precision is still far under a millimetre, so the prediction
+  scheme is indifferent to the choice — this is a content question, not a technical one. The
+  vertical range needs a default too, and it decides how deep a valley can go.
+- **Importing a height field.** Sculpting a whole map from the midpoint plane is tedious, and an
+  import from a heightmap image is the obvious shortcut. It is a tool rather than a runtime
+  feature — `bevy_heightmap` 0.19 is current and does exactly this, or it is ~150 lines against
+  the `image` crate — but it needs a decision about who may run it, since it overwrites everything.
+- **What water does to the play area.** Water everywhere at `water_y` means the sea does not stop
+  where the height field does, which is what makes the horizon work. It also means a player can
+  swim off the edge of the map into ground that no longer exists. Either the field extends well
+  past anywhere reachable, or deep water is itself a boundary, or something pushes back — doing
+  nothing means swimming into invisible glass.
+- **What does built geometry become?** Terrain is the ground; everything constructed is a separate
+  system this project has not designed. Today it is three crates and a ramp as constants in
+  `level.rs`, and §7 turns two of those into markers — but a marker only says *where a crate
+  starts*, not how a wall or a building gets made. Whether that ends up as a voxel grid, placed
+  meshes, or something else is open. Terrain is deliberately indifferent to the answer, which is
+  the whole point of the rule under The split; what is *not* indifferent is the editor, since a
+  third edit mode would want to share the hotbar, the gesture channel and the menu that §2 and §7
+  build.
 - **LOD.** Tiles of 64×64 give it a unit to operate on, and nothing else here depends on when it
   arrives. It becomes urgent at the same time as a road ribbon, which is what a decimated tile
   visibly disagrees with.
