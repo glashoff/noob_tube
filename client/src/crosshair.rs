@@ -15,7 +15,7 @@ use bevy::prelude::*;
 use lightyear::prelude::Predicted;
 use noob_tube_shared::vehicle::Driving;
 
-use crate::local_player::LocalPlayer;
+use crate::local_player::{AimingTooLow, LocalPlayer};
 
 /// Half the empty space at the centre, in logical pixels.
 const GAP: f32 = 4.0;
@@ -25,6 +25,14 @@ const LENGTH: f32 = 7.0;
 const THICKNESS: f32 = 2.0;
 /// How far the outline extends past its arm on every side.
 const OUTLINE: f32 = 1.0;
+
+/// The colour of an arm when the shot is there to be taken, and when it is not.
+///
+/// Red says the trigger will do nothing, which on a vehicle happens for one reason: the driver is
+/// aiming below the arc of the mount. Without it the weapon simply stops firing and the only clue
+/// is the barrel, which is behind the camera's subject rather than in front of it.
+const ARM_COLOUR: Color = Color::srgba(1.0, 1.0, 1.0, 0.9);
+const ARM_BLOCKED: Color = Color::srgba(1.0, 0.25, 0.2, 0.95);
 
 /// How long the hit marker stays up. Long enough to register, short enough that two hits in quick
 /// succession read as two rather than as one long one.
@@ -36,7 +44,18 @@ impl Plugin for CrosshairPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(on_hit_landed)
             .add_systems(Startup, spawn_crosshair)
-            .add_systems(Update, (fade_hit_marker, show_it_only_when_armed));
+            .add_systems(
+                Update,
+                (
+                    fade_hit_marker,
+                    show_it_only_when_armed,
+                    // After the rule it is drawing, not merely in the same schedule. What the
+                    // crosshair says about the trigger has to be what the trigger did, and this
+                    // frame's answer rather than the last one's.
+                    redden_it_when_the_shot_is_refused
+                        .after(crate::local_player::hold_your_fire),
+                ),
+            );
     }
 }
 
@@ -73,6 +92,24 @@ fn show_it_only_when_armed(
         Visibility::Inherited
     };
     visibility.set_if_neq(wanted);
+}
+
+/// One of the four white arms, as opposed to the black outline behind it or a hit marker's tick.
+///
+/// The outlines stay black — they are there to keep the arm legible against whatever is behind it,
+/// and a red arm needs that more than a white one, not less.
+#[derive(Component)]
+struct Arm;
+
+/// Update: turns the crosshair red while the shot would be refused.
+fn redden_it_when_the_shot_is_refused(
+    too_low: Res<AimingTooLow>,
+    mut arms: Query<&mut BackgroundColor, With<Arm>>,
+) {
+    let wanted = if too_low.0 { ARM_BLOCKED } else { ARM_COLOUR };
+    for mut colour in arms.iter_mut() {
+        colour.set_if_neq(BackgroundColor(wanted));
+    }
 }
 
 /// Where each arm sits relative to the centre, and which way round it is.
@@ -116,7 +153,10 @@ fn spawn_crosshair(window: Option<Single<Entity, With<Window>>>, mut commands: C
                             } else {
                                 (THICKNESS, LENGTH)
                             };
-                            centre.spawn(arm(dx, dy, width, height, outline));
+                            let mut spawned = centre.spawn(arm(dx, dy, width, height, outline));
+                            if !outline {
+                                spawned.insert(Arm);
+                            }
                         }
                     }
                 });
@@ -202,11 +242,7 @@ fn fade_hit_marker(
 /// every side, so it has to start that much further out to stay concentric.
 fn arm(dx: f32, dy: f32, width: f32, height: f32, outline: bool) -> impl Bundle {
     let grow = if outline { OUTLINE } else { 0.0 };
-    let colour = if outline {
-        Color::srgba(0.0, 0.0, 0.0, 0.85)
-    } else {
-        Color::srgba(1.0, 1.0, 1.0, 0.9)
-    };
+    let colour = if outline { Color::srgba(0.0, 0.0, 0.0, 0.85) } else { ARM_COLOUR };
     (
         Node {
             position_type: PositionType::Absolute,

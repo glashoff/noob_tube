@@ -1594,6 +1594,13 @@ that went dead for looking at the sky would be a rule nobody could guess. A test
 until the barrel gives up and checks the trigger gave up at the same angle, in four directions,
 because two numbers for one limit is exactly how a shot comes to leave a gun pointing elsewhere.
 
+**The crosshair goes red there**, because a weapon that quietly stops firing gives the player
+nothing to reason about: the barrel is the only other clue and it is behind the camera's subject
+rather than in front of it. The answer is written once, where the trigger is decided, and read by
+the crosshair — two spellings of one rule is how a red crosshair comes to appear over a shot that
+fires anyway. Only the four white arms change; the black outlines stay, because a red arm needs
+them more than a white one does.
+
 The rule lives with the input, beside the one that empties the trigger when the weapon is stowed,
 and it is a pure function of the chassis pose and the look angles rather than a question about the
 gun *entity*. A client with no vehicle model has no gun to ask, and must not thereby be allowed to

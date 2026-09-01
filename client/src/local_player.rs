@@ -72,6 +72,8 @@ impl Plugin for LocalPlayerPlugin {
             .register_type::<MovementTicks>()
             .register_type::<DrawnView>()
             .init_resource::<DrawnView>()
+            .register_type::<AimingTooLow>()
+            .init_resource::<AimingTooLow>()
             .init_resource::<CurrentInput>()
             .init_resource::<ScriptedInput>()
             .init_resource::<MovementTicks>()
@@ -187,6 +189,18 @@ pub struct CurrentInput(pub PlayerInput);
 #[derive(Resource, Default, Reflect)]
 #[reflect(Resource)]
 pub struct ScriptedInput(pub Option<PlayerInput>);
+
+/// Set while a driver is aiming below what their mount can reach, so the trigger does nothing.
+///
+/// A resource rather than each reader working the answer out again. The crosshair goes red on
+/// exactly the condition that empties the trigger — see [`hold_your_fire`], which is the one place
+/// that condition is decided — and two spellings of one rule is precisely how a red crosshair comes
+/// to appear over a shot that fires anyway.
+///
+/// False on foot, where there is no mount and no arc.
+#[derive(Resource, Default, Reflect)]
+#[reflect(Resource)]
+pub struct AimingTooLow(pub bool);
 
 /// Set while an inspector panel wants the pointer, so click-to-grab can stand aside.
 ///
@@ -442,24 +456,28 @@ fn sample_input(
 /// It applies to the scripted input too. What the gun can do is a fact about the game rather than
 /// about who is pressing the button, and a harness that wants to shoot from a vehicle can say so by
 /// arming the driver, which is the same thing a person does.
-fn hold_your_fire(
+pub(crate) fn hold_your_fire(
     driving: Option<Single<&Player, crate::vehicle::OwnDriver>>,
-    // Whose vehicle is whose. The pose matters as much as the angles: the arc is the mount's, so a
-    // car leaning on its springs or standing on a slope carries it with them.
+    // Whose vehicle is whose. The pose matters as much as the angles: the arc belongs to the mount,
+    // so a car leaning on its springs or standing on a slope carries it with them.
     vehicles: Query<(&Rotation, &Driven)>,
     player: Single<&LocalPlayer>,
+    mut too_low: ResMut<AimingTooLow>,
     mut input: ResMut<CurrentInput>,
 ) {
-    let Some(me) = driving else {
-        return;
-    };
-    let below = vehicles
-        .iter()
-        .find(|(_, driven)| driven.0 == me.peer)
-        .is_some_and(|(rotation, _)| {
-            !crate::vehicle::can_bear(rotation.0, player.yaw, player.pitch)
-        });
-    if !player.armed || below {
+    let driver = driving.map(|driving| driving.peer);
+    let below = driver.is_some_and(|peer| {
+        vehicles
+            .iter()
+            .find(|(_, driven)| driven.0 == peer)
+            .is_some_and(|(rotation, _)| {
+                !crate::vehicle::can_bear(rotation.0, player.yaw, player.pitch)
+            })
+    });
+    // Written even when it has not changed and even on foot, because "nobody is driving" is an
+    // answer to the same question and the crosshair needs it as much as the other one.
+    too_low.0 = below;
+    if below || (driver.is_some() && !player.armed) {
         input.0.fire = false;
         input.0.view = None;
     }
