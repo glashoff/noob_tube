@@ -28,6 +28,7 @@
 
 use bevy::animation::{AnimatedBy, AnimationTargetId};
 use bevy::app::AnimationSystems;
+use bevy::ecs::system::SystemParam;
 use bevy::transform::TransformSystems;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
@@ -151,11 +152,13 @@ enum Gait {
     Airborne,
     /// In a vehicle's seat.
     ///
-    /// The fallback kit has a clip made for this and the soldier's pack does not — 49 clips of
-    /// walking, running, aiming and dying, and nothing that sits down. A crouched idle is the
-    /// nearest thing it has: knees bent, hands forward, which reads as sitting far better than a
-    /// figure standing to attention behind a steering wheel does. Mixamo has "Driving" and
-    /// "Sitting Idle" for the asking, and dropping either into `assets/anims/` is all this needs.
+    /// The Rifle pack has 49 clips of walking, running, aiming and dying and nothing that sits
+    /// down, so this one is fetched separately — `tools/setup-assets --add Driving.fbx`, which is
+    /// what that mode exists for. It is on the same skeleton as everything else, checked the same
+    /// way, and it loops: 22 of its 22 moving channels end where they started.
+    ///
+    /// Without it the kit falls back to a crouched idle, which is the nearest thing the pack has —
+    /// knees bent, hands forward, and better behind a steering wheel than standing to attention.
     Seated,
 }
 
@@ -249,7 +252,8 @@ impl Kit {
         Some(match self.clips {
             Clips::PerFile { .. } => match gait {
                 Gait::Idle => "idle".to_string(),
-                Gait::CrouchIdle | Gait::Seated => "idle_crouching".to_string(),
+                Gait::CrouchIdle => "idle_crouching".to_string(),
+                Gait::Seated => "driving".to_string(),
                 Gait::Airborne => "jump_loop".to_string(),
                 Gait::Walk => format!("walk_{}", facing.suffix()),
                 Gait::Run => format!("run_{}", facing.suffix()),
@@ -400,6 +404,21 @@ type JustArrived = (With<client::Remote>, Added<PlayerState>);
 /// A body whose model has spawned but whose skeleton has not been given its plumbing.
 type NotWiredYet = (With<CharacterBody>, Without<Wired>);
 
+/// A player in a seat, whose body is placed from the vehicle rather than from their own state.
+type Seated = (With<PlayerState>, With<Driving>);
+
+/// Our own player, the one the camera is inside.
+type Ours = (With<PlayerState>, With<Predicted>);
+
+/// The spawned scene, walked to find the bones and read their rest poses.
+#[derive(SystemParam)]
+struct Skeletons<'w, 's> {
+    children: Query<'w, 's, &'static Children>,
+    named: Query<'w, 's, &'static Name>,
+    poses: Query<'w, 's, &'static Transform>,
+    already: Query<'w, 's, (), With<AnimationPlayer>>,
+}
+
 /// On the entity holding the [`AnimationPlayer`], naming the player it belongs to.
 ///
 /// The link has to be stored because the skeleton arrives asynchronously and several levels down:
@@ -434,7 +453,11 @@ fn load_the_character(assets: Res<AssetServer>, mut commands: Commands) {
             let mut nodes = Vec::new();
             let mut probe = None;
             for wanted in every_move() {
-                let Some(name) = kit.clip(wanted) else {
+                let Some(name) = kit.clip(wanted).and_then(|name| on_disk(directory, name))
+                    // The seated clip is the one that is fetched separately, so it is the one that
+                    // may be missing. A crouched idle is what the pack itself can offer.
+                    .or_else(|| kit.clip((Gait::CrouchIdle, Facing::Forward)))
+                else {
                     continue;
                 };
                 let clip: Handle<AnimationClip> =
@@ -453,6 +476,19 @@ fn load_the_character(assets: Res<AssetServer>, mut commands: Commands) {
         Clips::Library { file } => library = Some(assets.load::<Gltf>(file)),
     }
     commands.insert_resource(CharacterAssets { kit, body, library });
+}
+
+/// The clip's name back again if its file is there, so a name nobody fetched can be substituted.
+///
+/// From the filesystem rather than from the asset server, for the same reason the kit itself is
+/// chosen that way: the server answers asynchronously, and by the time it said "no such file" the
+/// graph would already have been built around the answer.
+fn on_disk(directory: &str, name: String) -> Option<String> {
+    std::path::Path::new(crate::ASSETS)
+        .join(directory)
+        .join(format!("{name}.glb"))
+        .exists()
+        .then_some(name)
 }
 
 /// Update, until it succeeds: builds the graph for a kit whose clips share one file.
@@ -588,7 +624,7 @@ fn stay_where_the_simulation_put_them(mut hips: Query<(&Planted, &mut Transform)
 /// earlier would quantise the body to the tick rate.
 fn sit_the_drivers_down(
     vehicles: Query<(&Position, &Rotation, &Driven)>,
-    mut drivers: Query<(&Player, &mut Transform), (With<PlayerState>, With<Driving>)>,
+    mut drivers: Query<(&Player, &mut Transform), Seated>,
 ) {
     for (who, mut pose) in drivers.iter_mut() {
         let Some((position, rotation, _)) =
@@ -611,7 +647,7 @@ fn sit_the_drivers_down(
 /// hidden altogether, on the grounds that they were inside the bodywork. They were not — they were
 /// standing on it, because the position that is right for a camera is not a place to put a body.
 fn only_show_ourselves_in_the_seat(
-    mut ours: Query<(&mut Visibility, Has<Driving>), (With<PlayerState>, With<Predicted>)>,
+    mut ours: Query<(&mut Visibility, Has<Driving>), Ours>,
 ) {
     for (mut visibility, driving) in ours.iter_mut() {
         let wanted = if driving { Visibility::Inherited } else { Visibility::Hidden };
@@ -648,15 +684,13 @@ struct Wired;
 /// both the fix and a check that the two files agree at all.
 fn wire_up_the_skeleton(
     unwired: Query<(Entity, &ChildOf, Option<&Children>), NotWiredYet>,
-    children: Query<&Children>,
-    named: Query<&Name>,
-    already: Query<(), With<AnimationPlayer>>,
-    poses: Query<&Transform>,
+    bones: Skeletons,
     assets: Res<CharacterAssets>,
     clips: Res<Moves>,
     library: Res<Assets<AnimationClip>>,
     mut commands: Commands,
 ) {
+    let Skeletons { children, named, poses, already } = bones;
     for (body, hangs_from, spawned) in unwired.iter() {
         // No children yet: the scene has not spawned. Ordinary for a body's first frames.
         if spawned.is_none_or(Children::is_empty) {

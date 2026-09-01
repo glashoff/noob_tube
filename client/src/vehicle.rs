@@ -357,6 +357,21 @@ fn give_bodies(
             Visibility::default(),
             spec.collider(),
             RigidBody::Static,
+            // **Given here rather than at the handover, and that is the whole of a bug.** Avian
+            // works a body's mass out from its collider and its density, and a body with no
+            // `ColliderDensity` is given the default of 1 — which for this hull is about two and a
+            // half kilograms instead of twelve hundred. A static body does not care; the first
+            // tick as a dynamic one cares enormously, because the suspension pushes with forces
+            // sized for the real mass. Measured, when these two arrived in the same frame as
+            // `RigidBody::Dynamic`: the buggy left the ground at the moment somebody got in and
+            // reached 5.9 m before falling back. Only ever on the *first* handover, because after
+            // it these components stayed behind and the second was correct — which is exactly the
+            // kind of "it only happens sometimes" that costs an afternoon.
+            //
+            // Neither is a fact about who predicts the vehicle. They are facts about what a buggy
+            // is, so they belong where it is built.
+            ColliderDensity(spec.density()),
+            CenterOfMass(Vec3::NEG_Y * spec.centre_of_mass_drop),
             // Inert while the vehicle is interpolated, and the two sides have to agree the moment
             // it is not — see `vehicle_body` on the server, which says the same thing.
             SpeculativeMargin(vehicle::SPECULATIVE_MARGIN),
@@ -469,11 +484,8 @@ fn fit_for_the_solver(
         Layer::Level.into()
     };
     for (entity, kind) in took_over.iter() {
-        let spec = kind.spec();
         commands.entity(entity).insert((
             RigidBody::Dynamic,
-            ColliderDensity(spec.density()),
-            CenterOfMass(Vec3::NEG_Y * spec.centre_of_mass_drop),
             CollisionLayers::new(Layer::Body, against),
             // `Controls` is deliberately not inserted here: it is replicated, so it arrives with
             // the vehicle, and writing a default over it would be this system racing the wire for

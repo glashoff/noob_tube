@@ -1631,6 +1631,37 @@ configurations, does **not** reproduce in the test world at all: the same staged
 same to two decimal places with the bound and without. A test that passes either way is worse than
 no test, so there is none, and changing that number is a thing to measure live.
 
+#### The buggy that fell out of the sky
+
+Getting into a vehicle launched it. Measured on a client that had just started: the chassis left
+the ground at the moment the driver got in, reached **5.9 m**, and fell back over two seconds.
+
+Two things made it hard to see. It happened only on a client's **first** handover of that vehicle —
+enter, get out, enter again, and the second time was clean — and its size looked as though it
+depended on where the player was standing, which sent the first hour of the hunt after the player's
+capsule. It did not: a fresh client, standing 1.9 m away on flat ground, produced the biggest jump
+of all.
+
+`predict_vehicles = "off"` settled where to look. The vehicle never moves; the server's copy stays
+at its ride height throughout. So it was the client's own simulation, and specifically the moment
+the chassis stops being `RigidBody::Static` and starts being `Dynamic`.
+
+**A body with no `ColliderDensity` is given the default of 1.** For this hull that is about two and
+a half kilograms against twelve hundred. The client was inserting the density in the *same frame*
+as `RigidBody::Dynamic`, so for one tick the suspension pushed with forces sized for a 1200 kg
+vehicle against a body that weighed as much as a cat. A static body does not care what it weighs,
+which is why nothing showed until the handover; and after the first one the component stayed
+behind, which is why the second was correct.
+
+The fix is one line moved. Density and centre of mass are facts about what a buggy *is*, not about
+who is predicting it, so they belong where the chassis is built. The server had them there all
+along, which is why it never jumped. After: **1.09 m peak** against 1.066 at rest — 2.7 cm, which is
+the suspension settling.
+
+`a_vehicle_without_its_own_density_weighs_nothing_like_enough` keeps the reason written down: it
+asserts the default density is off by more than a hundredfold, so that a future spec whose density
+happened to be near 1 would say out loud that the ordering had stopped mattering.
+
 #### Should a vehicle be predicted at all?
 
 `predict_vehicles` in the config turns the whole of the above off, and it is a knob rather than a

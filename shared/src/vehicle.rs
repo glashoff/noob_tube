@@ -734,6 +734,31 @@ mod tests {
     /// This is the whole of why `density` divides by the volume the collider reports rather than
     /// by the nominal box: Avian derives the mass from the shape, and a shape that is a third the
     /// volume of the box would quietly make a 1200 kg buggy weigh 700.
+    /// A vehicle that becomes dynamic before its density is set weighs a hundredth of what it
+    /// should, and this says by how much — because that factor is what turns a missing component
+    /// into a catapult.
+    ///
+    /// Avian works a body's mass out from its collider and its density, and the default density is
+    /// 1. The suspension pushes with forces sized for the real mass, so a body carrying the default
+    /// takes those forces at hundreds of times the intended acceleration. Measured on a client that
+    /// inserted `ColliderDensity` in the same frame as `RigidBody::Dynamic`: the buggy left the
+    /// ground the moment somebody got in and reached 5.9 m before falling back.
+    ///
+    /// The fix is to give a vehicle its density where it is built rather than where it starts being
+    /// simulated. This is here so the danger stays written down: if a spec ever had a density near
+    /// 1, the order components arrive in would stop mattering, and this would say so.
+    #[test]
+    fn a_vehicle_without_its_own_density_weighs_nothing_like_enough() {
+        let spec = BUGGY;
+        let unsaid = spec.collider().mass_properties(1.0).mass;
+        assert!(
+            unsaid < spec.mass / 100.0,
+            "at the default density this body weighs {unsaid} kg against the {} kg it should, \
+             which is close enough that the order components arrive in stops mattering",
+            spec.mass,
+        );
+    }
+
     #[test]
     fn the_body_weighs_what_the_spec_says() {
         let spec = BUGGY;
