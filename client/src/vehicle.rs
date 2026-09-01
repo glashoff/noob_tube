@@ -99,11 +99,13 @@ const GUN_ELEVATION: f32 = 0.40;
 /// hoop, clearing it by 27 cm at rest; measured against the model's own silhouette on the barrel's
 /// centreline, the barrel reaches it at **18.4°**.
 ///
-/// This is deliberately past that, and it is the one number here that is a choice rather than a
-/// measurement. Stopping at 18.4° leaves a driver unable to hit anything within about five metres
-/// of their own bumper, which is felt constantly; the price is that the last few degrees put the
-/// barrel through one tube of the cage, which is seen occasionally. See the README.
-const GUN_DEPRESSION: f32 = 0.40;
+/// Thirty degrees is deliberately past that, and it is the one number here that is a choice rather
+/// than a measurement. Stopping at 18.4° puts the nearest ground a driver can hit 5.1 m in front of
+/// their own bumper — `1.70 / tan 18.4°`, from a muzzle that stands 1.70 m up — and that dead ring
+/// is felt on every pass. Thirty brings it to 2.9 m and costs 13 cm of barrel inside one tube of
+/// the cage at full depression: a clip seen occasionally against a hole felt constantly. See the
+/// README, and change it here if the trade ever reads differently.
+const GUN_DEPRESSION: f32 = 0.52;
 /// The top of the cross-beam behind the seats, in the vehicle model's own units.
 ///
 /// Found by looking for what the geometry actually is rather than by eye: the roll cage is the only

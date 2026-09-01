@@ -1566,12 +1566,25 @@ what it is for — and the two ends of the elevation are clamped by two differen
 single centre rail and then over the front hoop, clearing that by 27 cm at rest; swept against the
 model's own silhouette on the barrel's centreline, the barrel reaches it at **18.4°**.
 
-That second number is the one place here where the measurement is not the answer. Stopping at 18.4°
-leaves a driver unable to hit anything within about five metres of their own bumper — from a muzzle
-1.75 m up, `1.75 / tan 18.4°` — and that dead ring is felt on every drive-by. So the limit is set
-past it, and the last few degrees of depression put the barrel through one tube of the cage. A
-cosmetic clip seen occasionally against a hole in the weapon felt constantly; it is written down
-here because it is a choice and should not read as a measurement.
+That second number is the one place here where the measurement is not the answer, and the limit is
+set past it on purpose, at **30°**:
+
+| depression | nearest ground | barrel inside the hoop |
+|---|---|---|
+| 18.4° | 5.1 m | — |
+| 23° | 4.0 m | 7 cm |
+| **30°** | **2.9 m** | **13 cm** |
+| 35° | 2.4 m | 21 cm |
+
+The muzzle stands 1.70 m up, so the reach is `1.70 / tan φ`. Stopping where the geometry says leaves
+a dead ring five metres wide around the vehicle that is felt on every pass; thirty degrees brings it
+inside three, and pays for it with a barrel that visibly enters one tube of the cage when aimed
+steeply forward and down. A clip seen occasionally against a hole in the weapon felt constantly. It
+is written down here because it is a choice, and should not later read as a measurement.
+
+The alternative was to raise the mount — 13 cm of extra post buys the same 30° with nothing
+touching — and it was turned down because the post and the gun are a single mesh, so the foot would
+float that far off the beam it is supposed to be bolted to.
 
 **The trigger stops where the barrel stops.** Aiming below the arc does not fire — held fire pauses
 and picks up again the moment the aim comes back up. Otherwise the shot would leave a gun that is
