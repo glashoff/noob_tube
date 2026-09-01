@@ -1718,6 +1718,40 @@ inside something. Asking about the neighbourhood of the point the server reporte
 that was actually meant; nothing the shot passed through can answer it, and now nothing the shot
 passed through is asked.
 
+#### Bullet holes hanging beside the bodywork
+
+A vehicle was a box to a bullet: 1.8 × 0.8 × 3.8 m, which is 38 cm wider than the Warthog's nose on
+each side, 27 cm wider than its waist, and *shorter* than the body is tall — so shots at the nose
+stopped out in the open air and shots at the roll cage sailed straight over.
+
+It is a hull now: sixteen slices along the length, each as wide and as tall as the body actually is
+there, measured off the model with the wheels and the cage left out. The same forty rounds, from the
+same spot, at the same seed, measured against the vehicle's own visible silhouette:
+
+| | median | 90th | worst | hanging clear |
+|---|---|---|---|---|
+| the box | 7.5 cm | 33.8 cm | 47.6 cm | 61 % |
+| the hull | **1.1 cm** | 8.2 cm | 17.1 cm | **24 %** |
+
+Three decisions are worth writing down.
+
+**Each slice encloses the body it covers** rather than splitting the difference. A hole a few
+centimetres proud of a panel is invisible; a shot passing through a vehicle it visibly hit is not,
+and that is what erring inwards buys.
+
+**The roll cage is left out.** It is a pair of thin tubes, and a shape that enclosed them would stop
+bullets in the open air above the seats — the very thing being fixed.
+
+**Sixteen is where it stops paying.** A convex outline per slice, which is as close as any solid
+shape can get, measured no better: the remaining quarter is the open cabin and the space under the
+bed, which anything solid fills in. Going further needs the actual triangles, and the model is not
+in the repository — the server has never seen it. Every number here is a measurement written down,
+which is also why replacing the model means measuring them again.
+
+The mass comes off the hull's own volume rather than the nominal box's, and the two differ by a
+third: left alone, the same density over a smaller shape would have quietly made the buggy 700 kg.
+A test weighs the shape and holds it to the 1200 kg the spec claims.
+
 #### A vehicle stepped out of stood still with its wheels turning
 
 Getting out of a moving buggy left it beside you, stationary, wheels spinning — and you could not
