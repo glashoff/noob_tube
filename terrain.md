@@ -177,24 +177,47 @@ a pond rather than a map-sized plane.
 `water_y` is also a rule input for §5: the shore layer is "below the water line", which is why a
 dry map loses one of its four layers rather than needing a different rule set.
 
-### File format
+### File format: two files, and only one of them is binary
 
-One binary file per map, with a leading version byte:
+A map is a readable manifest plus one blob of samples.
 
 ```
-u8   version
-f32  spacing, origin_x, origin_z, min_y, max_y
-u32  nx, nz
-f32  water_y          (NaN, or a presence flag, for a dry map)
-u8   layer_count      then per layer: str texture, f32 tile_scale, rule parameters
-     heights          — nx*nz u16
+<name>.json       everything human-scale — serde, and readable
+  version
+  grid      { nx, nz, spacing, origin_x, origin_z, min_y, max_y }
+  water_y   number | null
+  layers    [ { texture, tile_scale, rule parameters } ]
+  markers   [ { kind, x, z, y, rotation } ]        (§7)
+
+<name>.heights    nx*nz u16, row-major, x fastest — and nothing else
 ```
 
-Not RON and not JSON: 66k heights as text is some 400 KB of digits and a slow parse, and nobody
-hand-edits a height field in a text editor, so the authoring source has no reason to be readable.
+**The heights are binary because they have to be.** 66k samples as text is some 400 KB of digits
+and a slow parse, and nobody hand-edits a height field in an editor, so that file gains nothing by
+being readable. Everything else is the opposite case: a few dozen markers and a handful of grid
+numbers, changed constantly while the design is young.
 
-**The same bytes are the file and the wire baseline** (§3). One encoder, one decoder, serving disk
-and network alike.
+**Everything else is JSON to begin with, and binary only if that ever stops working.** The reason
+is not tidiness, it is the rate of change. A binary manifest with a leading version byte means
+every new field is a codec change, a version bump and a migration for maps that already exist —
+paid on every field, including the ones that turn out to be wrong a week later. With `serde` and
+`#[serde(default)]` an added field costs nothing and old maps keep loading. Being able to read a
+map in a diff, and to fix one by hand when a bug writes something impossible, is worth more right
+now than the bytes are.
+
+JSON specifically, over the two obvious alternatives: RON is more Bevy-idiomatic and buys nothing
+here; `toml` is already a workspace dependency but is a poor fit for an array of structs, which is
+what `markers` is. `serde_json` is the least surprising thing for a file an external tool might one
+day write.
+
+**Loading must not trust the pair.** The manifest states `nx` and `nz`; the blob is however many
+bytes it is. Check that `len == nx * nz * 2` on load and reject the map otherwise — the two files
+can be separated, edited, or half-written, and a mismatch that is not caught reads the height field
+off the end of itself.
+
+The heights blob is still both the file and the bulk of the wire baseline (§3); the manifest travels
+beside it as a few kilobytes of text. That is one encoder and one decoder for the part where it
+matters, and no hand-written codec at all for the part that changes.
 
 ---
 
@@ -527,14 +550,14 @@ else rather than by editing a file.
 
 ### Where markers live
 
-They are map content but they are not *terrain* — by this document's own rule (see The split), a
-spawn point is a thing placed on the ground rather than part of it. The clean answer is a separate
-map file listing markers, which is also where anything the built layer later contributes belongs.
+In the map manifest (§1), which is the JSON file, alongside the grid parameters and the layers —
+and explicitly *not* in the heights blob. By this document's own rule (see The split) a spawn point
+is a thing placed on the ground rather than part of it, and the file split follows the same line:
+the blob is samples and nothing else, so a heightmap import can overwrite it wholesale without
+touching the spawns you want to keep.
 
-Since the project has exactly one map file today, putting them in it would work and would be less
-code. It is worth not doing: the moment there is a second kind of placed thing, the terrain codec
-grows a section that has nothing to do with heights, and the file that a heightmap import should be
-able to overwrite wholesale is also the file holding the spawns you want to keep.
+It is also the part of a map most worth reading in a diff. A marker list is exactly the content
+where "why did this move" is a question somebody asks.
 
 A marker is `{ kind, x, z, y, rotation }`, with `y` relative to the ground and `rotation` a
 quaternion. Around thirty bytes, a few dozen per map — the size question does not arise, which is
