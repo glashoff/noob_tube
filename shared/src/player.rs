@@ -218,33 +218,35 @@ impl PlayerState {
         let moved = level.sweep_capsule(self.position, wanted, self.crouching);
         self.position += moved;
 
+        // The ground probe reaches GROUND_SNAP_DIST below the feet, and one tick into a jump the
+        // player has not cleared that yet. Counting that as grounded would let a held jump key
+        // re-trigger every tick, pinning the player just above the floor.
+        let footing = level.footing_below(self.position);
+        self.on_ground = self.velocity.y <= 0.0 && footing.is_some();
+
         // Where the sweep refused to take us, the velocity in that direction is spent — otherwise
         // gravity would accumulate forever while standing on the floor, and the first step off a
         // ledge would launch the player downward.
-        if wanted.y < 0.0 && moved.y > wanted.y + 1e-6 {
+        //
+        // Only ground worth standing on spends it. A cliff face stops the fall too, and letting it
+        // count would make walking into a cliff the way to climb it: the slide turns the horizontal
+        // input into motion along the surface, so with gravity cancelled every tick the player
+        // strolls up a wall. Measured before this line existed: 1.9 m of height gained in two
+        // seconds against a 60° face, and 0.4 m against an 80° one.
+        if wanted.y < 0.0 && moved.y > wanted.y + 1e-6 && self.on_ground {
             self.velocity.y = 0.0;
         } else if wanted.y > 0.0 && moved.y < wanted.y - 1e-6 {
             self.velocity.y = 0.0;
         }
-
-        // The ground probe reaches GROUND_SNAP_DIST below the feet, and one tick into a jump the
-        // player has not cleared that yet. Counting that as grounded would let a held jump key
-        // re-trigger every tick, pinning the player just above the floor.
-        self.on_ground =
-            self.velocity.y <= 0.0 && level.is_grounded(self.position, self.crouching);
 
         // Hold the capsule one skin above the surface while grounded, never on it and never in
         // it. A sweep leaves it a fraction of a millimetre low each tick and never puts that back,
         // which compounds into centimetres over a minute of walking, and `standing_does_not_drift_
         // downward` holds that to account. Snapping to a height the ground probe reports exactly
         // cannot accumulate at all, whatever the sweep did.
-        if self.on_ground
-            && let Some(ground) = level.ground_height_below(self.position)
-            && (self.position.y - ground).abs() < GROUND_SNAP_DIST
-        {
-            self.position.y = ground + SKIN;
+        if let Some(rest) = footing.filter(|_| self.on_ground) {
+            self.position.y = rest + SKIN;
         }
-
     }
 
     /// Crouching starts the moment the key is held; standing back up has to wait for headroom.
@@ -400,5 +402,62 @@ mod tests {
 
     fn default_input() -> PlayerInput {
         PlayerInput::default()
+    }
+
+    /// Walks forward for two seconds up a slope of `degrees` and reports where that left the
+    /// player. The slope passes through the origin, which is where the player starts.
+    fn walk_up(degrees: f32) -> PlayerState {
+        let mut app = crate::physics::test_support::slope_app(degrees.to_radians());
+        let input = PlayerInput { forward: true, ..default_input() };
+        let start = PlayerState { position: Vec3::new(0.0, 0.01, 0.0), ..PlayerState::default() };
+        run(&mut app, start, input, 128)
+    }
+
+    /// A hillside is walked up, and a cliff is not. That is the whole of the slope limit as a
+    /// player meets it.
+    ///
+    /// 45° and 50° bracket [`WALKABLE_NORMAL_Y`]'s 45.6°, so this fails in one direction or the
+    /// other the moment that number moves — which is the point, because it is an authoring
+    /// decision and deserves to be noticed when it changes.
+    ///
+    /// Measured: 2.72 m of height gained in two seconds at 45°, and 22.4 m lost at 50°.
+    #[test]
+    fn a_hillside_is_climbed_and_a_cliff_is_slid_down() {
+        let hill = walk_up(45.0);
+        assert!(hill.on_ground, "standing on a 45° hillside does not count as standing");
+        assert!(hill.position.y > 2.0, "only climbed {:.2} m of hillside", hill.position.y);
+
+        let cliff = walk_up(50.0);
+        assert!(!cliff.on_ground, "a 50° cliff face counts as ground to stand on");
+        assert!(cliff.position.y < -1.0, "walked {:.2} m up a cliff", cliff.position.y);
+    }
+
+    /// The interesting failure is not the cliff — it is the slope just inside the limit, where the
+    /// capsule's roundness lifts the feet clear of the surface. The ground probe is a ray from the
+    /// feet straight down, and without [`slope_lift`](crate::movement::slope_lift) it loses the
+    /// floor at about 41°: the limit would then be a consequence of the capsule's radius rather
+    /// than a number anybody chose.
+    #[test]
+    fn the_limit_is_the_one_that_was_chosen_and_not_the_capsules_own() {
+        for degrees in [41.0f32, 43.0, 45.0] {
+            let state = walk_up(degrees);
+            assert!(state.on_ground, "airborne on a walkable {degrees}° slope");
+            assert!(
+                state.position.y > 2.0,
+                "at {degrees}° the climb managed {:.2} m, which is a player fighting the ground",
+                state.position.y,
+            );
+        }
+    }
+
+    /// Gravity may not accumulate while standing, and a cliff is not standing. Both halves are
+    /// here because they are the same line of code: the fall is spent against ground worth
+    /// standing on and nothing else.
+    #[test]
+    fn a_cliff_does_not_hold_a_player_up() {
+        let cliff = walk_up(60.0);
+        assert!(cliff.velocity.y < -5.0, "a 60° face cancelled gravity: {}", cliff.velocity.y);
+        let flat = run(&mut floor_app(), PlayerState::default(), default_input(), 128);
+        assert!(flat.velocity.y.abs() < 1e-3, "gravity accumulated on the flat: {}", flat.velocity.y);
     }
 }

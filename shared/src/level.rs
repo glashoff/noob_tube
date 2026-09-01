@@ -91,7 +91,8 @@ pub fn spawn_level(mut commands: Commands) {
     // else here had to change: `level_geometry` already gives it the static body and the level
     // layer that `Level`'s sweeps and rays need, and every query downstream goes through Avian.
     //
-    // Flat at half height until maps arrive, which is the same plane the trimesh it replaces was.
+    // Hills and ravines, but held flat over everything below, which is the same plane the trimesh
+    // it replaces was.
     let (ground, at) = crate::terrain::default_terrain().collider();
     commands.spawn(level_geometry(ground, at));
     let (at, facing) = ramp_pose();
@@ -121,6 +122,7 @@ pub fn spawn_level(mut commands: Commands) {
 mod tests {
     use super::*;
 
+    use crate::movement::WALKABLE_NORMAL_Y;
     use crate::physics::test_support::{ask, bare_app};
 
     /// The level a round is actually played on, built by the system that builds it for real.
@@ -189,6 +191,31 @@ mod tests {
             let want = centre.y + CRATE_HALF_EXTENT;
             assert!((top - want).abs() < 0.01, "a crate top is at {top:.2}, not {want:.2}");
         }
+    }
+
+    /// A hillside of the real map is ground a player stands on, and it faces the way it looks.
+    ///
+    /// Worth its own test because the slope limit is only as good as the normal it reads, and that
+    /// normal comes from parry's height field rather than from anything written here. A field that
+    /// handed back a downward normal, or a constant one, would pass every test above and turn every
+    /// hill on the map into a cliff.
+    #[test]
+    fn a_hillside_of_the_real_map_is_stood_on() {
+        let mut app = played_level();
+        // On the flank of the hill at (-140, 60), well outside the flat the level stands on. The
+        // long ray finds it; the short one is the probe the movement code actually uses.
+        let feet = ground_at(&mut app, -85.0, 60.0).expect("no hillside there") + 0.05;
+        let (ground, normal) = ask(&mut app, move |level| {
+            level.ground_below(Vec3::new(-85.0, feet, 60.0))
+        })
+        .expect("the ground probe lost a hillside a long ray found");
+        assert!(ground > 1.0, "the hill flank is at {ground:.2} m, which is the plane");
+        assert!(normal.y > WALKABLE_NORMAL_Y, "the hill faces {normal:?}, which is a cliff");
+        assert!(normal.y < 0.999, "the hill flank is level, so nothing about slope was tested");
+        assert!(
+            ask(&mut app, move |level| level.is_grounded(Vec3::new(-85.0, feet, 60.0), false)),
+            "a player on the hillside is falling",
+        );
     }
 
     /// Two vehicles that start inside each other, or inside a crate, spend the first tick of the

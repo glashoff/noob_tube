@@ -45,6 +45,36 @@ pub const SKIN: f32 = 0.01;
 /// How far below the feet to look for ground.
 pub const GROUND_SNAP_DIST: f32 = 0.12;
 
+/// How steep ground may be and still be stood on: the smallest upward component its normal may
+/// have. 0.7 is a slope of about 45.6°.
+///
+/// This is an authoring decision before it is a physical one — it is the line between a hillside
+/// and a cliff, and so it decides what a map can be walled in with. Taken from `webgame`, which
+/// settled on the same number.
+///
+/// Before terrain there was nothing to test: every walkable surface was horizontal and every wall
+/// vertical, so a downward ray that hit anything had hit a floor by construction. That stopped
+/// being true the moment the ground had hills in it.
+pub const WALKABLE_NORMAL_Y: f32 = 0.7;
+
+/// How far a resting capsule's feet float above the surface, because the capsule is round and the
+/// surface is not level.
+///
+/// A sphere of radius `r` resting on a plane whose normal has upward component `n` has its centre
+/// `r / n` above that plane *vertically*, so the point directly below the centre — what this code
+/// calls the feet — never touches the ground on a slope. On flat ground this is zero, and at the
+/// limit it is 15 cm, which is more than [`GROUND_SNAP_DIST`]: without the correction the ground
+/// probe loses the floor at about 41° and the slope limit is decided by capsule geometry instead
+/// of by the number above.
+///
+/// Only ever evaluated for walkable ground, which is what keeps `1.0 / n` bounded.
+pub fn slope_lift(normal_y: f32) -> f32 {
+    CAPSULE_RADIUS * (1.0 / normal_y - 1.0)
+}
+
+/// The most [`slope_lift`] can return, and so how far below the feet the ground probe has to reach.
+pub const MAX_SLOPE_LIFT: f32 = CAPSULE_RADIUS * (1.0 / WALKABLE_NORMAL_Y - 1.0);
+
 /// Downward speed applied while grounded, instead of gravity.
 ///
 /// Gravity accumulates: each tick it drives the capsule further into the floor for the sweep to

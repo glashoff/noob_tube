@@ -553,6 +553,7 @@ pub struct Marker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::movement::WALKABLE_NORMAL_Y;
     use crate::physics::test_support::{ask, bare_app};
 
     /// A terrain that is flat along z and a ramp along x, so a transpose cannot hide.
@@ -722,6 +723,47 @@ mod tests {
     /// scanned from `fn default_terrain` to the next occurrence of the same string, which happened
     /// to end where the function does — a boundary that held by accident and would have moved
     /// silently the day somebody wrote that name a third time.
+    /// A hill you slide off is scenery, and a ravine you walk out of is a ditch. The limit that
+    /// decides which is which is [`WALKABLE_NORMAL_Y`], and the map has to fall on both sides of it
+    /// deliberately rather than by luck — every hill climbable, every ravine wall not.
+    ///
+    /// Measured on the map as it stands: 35.0° at its steepest away from the ravines, 66.5° inside
+    /// them, against a limit of 45.6°. Both margins are wide, and this test is what says so after
+    /// somebody has moved a hill.
+    ///
+    /// The slope of a height field is read from its own samples rather than from the collider,
+    /// because that is where a wrong number would be introduced.
+    #[test]
+    fn the_hills_are_climbable_and_the_ravines_are_not() {
+        let terrain = default_terrain();
+        let grid = terrain.grid;
+        let limit = WALKABLE_NORMAL_Y.acos().to_degrees();
+        let mut hills: f32 = 0.0;
+        let mut walls: f32 = 0.0;
+        for iz in 0..grid.nz - 1 {
+            for ix in 0..grid.nx - 1 {
+                let here = grid.world_of(ix, iz);
+                let height = terrain.height_at(ix, iz);
+                let dx = (terrain.height_at(ix + 1, iz) - height) / grid.spacing;
+                let dz = (terrain.height_at(ix, iz + 1) - height) / grid.spacing;
+                let steepness = (1.0f32 / (1.0 + dx * dx + dz * dz).sqrt()).acos().to_degrees();
+                // Widened by a few metres, because the wall of a ravine is beside the line that
+                // cut it, not on it.
+                let in_a_ravine = RAVINES.iter().any(|ravine| {
+                    let margin = ravine.width + 4.0;
+                    to_segment_squared(here, ravine.from, ravine.to) < margin * margin
+                });
+                if in_a_ravine {
+                    walls = walls.max(steepness);
+                } else {
+                    hills = hills.max(steepness);
+                }
+            }
+        }
+        assert!(hills < limit, "there is ground at {hills:.1}° to climb, and the limit is {limit:.1}°");
+        assert!(walls > limit + 10.0, "the ravines only reach {walls:.1}°, which is walkable");
+    }
+
     #[test]
     fn nothing_that_both_sides_run_reaches_for_a_transcendental() {
         let source = include_str!("terrain.rs");

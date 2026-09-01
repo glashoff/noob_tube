@@ -48,9 +48,12 @@ const MESH_STRIDE: u32 = 2;
 /// hill where I think it is". Proper terrain drawing — layers chosen by slope and height, triplanar
 /// projection, tile break — is its own step; none of it changes the geometry this builds.
 ///
-/// Built from the same [`Terrain`] the collider is, so the ground you see and the ground you stand
-/// on cannot be different shapes. When the server starts sending the field, both come from the copy
-/// it sent, and this call site is the only thing that changes.
+/// Built from the same [`Terrain`] the collider is, so the two cannot be built from different maps.
+/// They are not quite the same *shape*, and [`MESH_STRIDE`] is why: the picture skips samples the
+/// collider keeps, which on the sharpest lip of a ravine puts the drawn ground 62 cm from the
+/// ground underfoot — see `the_drawn_ground_stays_near_the_ground_underfoot`. When the server
+/// starts sending the field, both come from the copy it sent, and this call site is the only thing
+/// that changes.
 ///
 /// Normals are read from the *whole* field rather than from the tile, which is what stops a seam
 /// showing: two tiles meeting along an edge share those vertices' positions, and they have to agree
@@ -221,4 +224,51 @@ fn spawn_ground(
         Transform::from_xyz(50.0, 100.0, 50.0).looking_at(Vec3::ZERO, Vec3::Y),
         ChildOf(level),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What drawing every second sample costs, in metres.
+    ///
+    /// The collider keeps every sample and the picture does not, so the surface you see and the
+    /// surface you stand on differ wherever the ground bends faster than the drawn triangles can
+    /// follow. That is a fair trade for twice the frame rate as long as the number is known, and
+    /// this is where it is known: **62 cm at its worst**, on the lips of the ravines, and
+    /// centimetres over the hills — the whole map is within 0.7 m.
+    ///
+    /// It matters more than it did, because there is now a slope limit: a player stopped by ground
+    /// they cannot see is worse than one stopped by ground they can. The fix when it comes is level
+    /// of detail by distance — full resolution under the camera, coarse at the horizon — not a
+    /// finer mesh everywhere, which is what cost the frame rate in the first place.
+    #[test]
+    fn the_drawn_ground_stays_near_the_ground_underfoot() {
+        let terrain = terrain::default_terrain();
+        let grid = terrain.grid;
+        let step = MESH_STRIDE.max(1);
+        let mut worst: f32 = 0.0;
+        for iz in 0..grid.nz {
+            for ix in 0..grid.nx {
+                let (x0, z0) = (ix / step * step, iz / step * step);
+                let (x1, z1) = (x0 + step, z0 + step);
+                if x1 >= grid.nx || z1 >= grid.nz {
+                    continue;
+                }
+                let (u, v) =
+                    ((ix - x0) as f32 / step as f32, (iz - z0) as f32 / step as f32);
+                let (h00, h10) = (terrain.height_at(x0, z0), terrain.height_at(x1, z0));
+                let (h01, h11) = (terrain.height_at(x0, z1), terrain.height_at(x1, z1));
+                // Each cell is two triangles split along the anti-diagonal `u + v = 1`, which is
+                // the edge `[here + 1, next_row]` above.
+                let drawn = if u + v <= 1.0 {
+                    h00 + (h10 - h00) * u + (h01 - h00) * v
+                } else {
+                    h11 + (h01 - h11) * (1.0 - u) + (h10 - h11) * (1.0 - v)
+                };
+                worst = worst.max((drawn - terrain.height_at(ix, iz)).abs());
+            }
+        }
+        assert!(worst < 0.7, "the drawn ground is {worst:.2} m from the ground underfoot");
+    }
 }

@@ -31,7 +31,7 @@ use bevy::prelude::*;
 
 use crate::movement::{
     CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS, CAPSULE_Y_OFFSET, CROUCH_CAPSULE_HALF_HEIGHT,
-    CROUCH_CAPSULE_Y_OFFSET, GROUND_SNAP_DIST, SKIN,
+    CROUCH_CAPSULE_Y_OFFSET, GROUND_SNAP_DIST, MAX_SLOPE_LIFT, SKIN, WALKABLE_NORMAL_Y, slope_lift,
 };
 
 /// Downward acceleration on a dynamic body, in metres per second squared.
@@ -171,37 +171,66 @@ impl Level<'_, '_> {
             - start
     }
 
-    /// True when solid ground sits within [`GROUND_SNAP_DIST`] below the feet.
+    /// True when the player is standing on something they can stand on.
     ///
-    /// Uses the same ray as [`ground_height_below`](Self::ground_height_below) rather than a
-    /// downward shape cast. A shape cast reported "airborne" on roughly one tick in seven while
-    /// walking on flat ground, which made the player oscillate between walking and air speed.
+    /// See [`footing_below`](Self::footing_below), which answers the same question and also says
+    /// where the feet belong.
+    pub fn is_grounded(&self, feet: Vec3, _crouching: bool) -> bool {
+        self.footing_below(feet).is_some()
+    }
+
+    /// Where the feet rest, if there is ground under them that is theirs to stand on.
+    ///
+    /// `None` on three counts, and the movement code treats all three the same way — as falling:
+    /// nothing below, ground out of reach, or ground too steep to hold a player
+    /// ([`WALKABLE_NORMAL_Y`]).
+    ///
+    /// The height that comes back is not the surface: it is [`slope_lift`] above it, because a
+    /// round capsule on a slope touches the ground beside the point its feet are over, not under
+    /// it. Putting the feet on the surface itself would drive the capsule into the hill for the
+    /// next sweep to push back out — visible as a jitter, and the reason this returns a resting
+    /// height rather than a ground height.
+    pub fn footing_below(&self, feet: Vec3) -> Option<f32> {
+        let (ground, normal) = self.ground_below(feet)?;
+        if normal.y < WALKABLE_NORMAL_Y {
+            return None;
+        }
+        let rest = ground + slope_lift(normal.y);
+        (feet.y - rest <= GROUND_SNAP_DIST).then_some(rest)
+    }
+
+    /// Height of the ground directly beneath `feet`, searched from a little above and a little
+    /// below, with the direction that surface faces.
+    ///
+    /// This is a ray, not a shape cast, and deliberately so — twice over. Shape casts against a
+    /// triangle mesh are accurate to a few millimetres at best, and using one here produced errors
+    /// of up to 11 cm, worse than the drift it was meant to correct. A shape cast also reported
+    /// "airborne" on roughly one tick in seven while walking on flat ground, which made the player
+    /// oscillate between walking and air speed. A ray reports an exact intersection.
     ///
     /// The trade-off is the ray's blindness to the capsule's width: standing with the centre past a
     /// ledge counts as airborne even though the capsule still rests on the edge. Sampling a few rays
     /// around the capsule would fix that when it matters.
-    pub fn is_grounded(&self, feet: Vec3, _crouching: bool) -> bool {
-        self.ground_height_below(feet)
-            .is_some_and(|ground| feet.y - ground <= GROUND_SNAP_DIST)
-    }
-
-    /// Height of the ground directly beneath `feet`, searched from a little above and a little
-    /// below.
     ///
-    /// This is a ray, not a shape cast, and deliberately so: shape casts against a triangle mesh are
-    /// accurate to a few millimetres at best, and using one here produced errors of up to 11 cm —
-    /// worse than the drift it was meant to correct. A ray reports an exact intersection.
-    pub fn ground_height_below(&self, feet: Vec3) -> Option<f32> {
+    /// It reaches [`MAX_SLOPE_LIFT`] further down than the snap distance, because on a slope the
+    /// feet float that far clear of the surface; how much of that reach counts as footing is
+    /// [`footing_below`](Self::footing_below)'s business, not this one's.
+    pub fn ground_below(&self, feet: Vec3) -> Option<(f32, Vec3)> {
         let origin = feet + Vec3::Y * GROUND_SNAP_DIST;
         let direction = Dir3::NEG_Y;
         let hit = self.slide.spatial_query.cast_ray(
             origin,
             direction,
-            GROUND_SNAP_DIST * 2.0,
+            GROUND_SNAP_DIST * 2.0 + MAX_SLOPE_LIFT,
             true,
             &Self::footing(),
         )?;
-        Some(origin.y - hit.distance)
+        Some((origin.y - hit.distance, hit.normal))
+    }
+
+    /// Height of the ground directly beneath `feet`, whatever it faces.
+    pub fn ground_height_below(&self, feet: Vec3) -> Option<f32> {
+        self.ground_below(feet).map(|(ground, _)| ground)
     }
 
     /// Distance to the first piece of level geometry along a ray, if any within `max_distance`.
@@ -308,6 +337,26 @@ pub(crate) mod test_support {
                 vec![[0, 1, 2], [0, 2, 3]],
             ),
             Vec3::ZERO,
+        ));
+        ready(app)
+    }
+
+    /// An app whose whole world is one slope of `angle` radians, climbing toward −Z, passing
+    /// through the origin.
+    ///
+    /// A tilted slab rather than a height field on purpose: its normal is known exactly, so a test
+    /// that asks what the movement code does at 30° is asking about 30° and not about the
+    /// discretisation of a grid. It is what the ramp already is, only steeper.
+    pub fn slope_app(angle: f32) -> App {
+        let mut app = unfinished();
+        let (sin, cos) = angle.sin_cos();
+        // Turning about +X takes the slab's up to (0, cos, sin), and pushing the slab half its
+        // thickness down that direction puts its top surface through the origin.
+        let up = Vec3::new(0.0, cos, sin);
+        app.world_mut().spawn(level_geometry_facing(
+            Collider::cuboid(400.0, 10.0, 400.0),
+            -up * 5.0,
+            Quat::from_rotation_x(angle),
         ));
         ready(app)
     }
@@ -468,6 +517,43 @@ mod tests {
         assert!(moved.x < 2.0, "went through the wall: {moved:?}");
         // ...but the Z component survives, which is what sliding means.
         assert!(moved.z > 0.9, "slid nothing along the wall: {moved:?}");
+    }
+
+    /// The slope limit as the ground probe sees it: a slope inside it is footing, one past it is
+    /// not, and the two are one degree apart so the test is about the limit and not about slopes in
+    /// general.
+    #[test]
+    fn a_slope_is_footing_only_while_it_is_within_the_limit() {
+        let limit = WALKABLE_NORMAL_Y.acos();
+        let mut walkable = slope_app(limit - 0.01);
+        assert!(ask(&mut walkable, |level| level.is_grounded(Vec3::new(0.0, 0.01, 0.0), false)));
+        let mut cliff = slope_app(limit + 0.01);
+        assert!(!ask(&mut cliff, |level| level.is_grounded(Vec3::new(0.0, 0.01, 0.0), false)));
+    }
+
+    /// A round capsule on a slope touches the ground beside the point its feet are over, so the
+    /// feet rest above the surface — and the probe has to say so, or every tick snaps the capsule
+    /// into the hill for the sweep to push back out.
+    ///
+    /// Checked against the arithmetic rather than a measured constant, because the arithmetic is
+    /// what `slope_lift` claims to be.
+    #[test]
+    fn the_feet_rest_above_a_slope_by_the_capsules_own_roundness() {
+        let angle: f32 = 0.6;
+        let mut app = slope_app(angle);
+        let rest = ask(&mut app, |level| level.footing_below(Vec3::new(0.0, 0.01, 0.0)))
+            .expect("no footing on a 34° slope");
+        let want = slope_lift(angle.cos());
+        assert!((rest - want).abs() < 1e-3, "the feet rest at {rest:.4}, not {want:.4}");
+    }
+
+    /// And on the flat it is zero, which is what keeps this from changing anything that already
+    /// worked.
+    #[test]
+    fn on_the_flat_the_feet_rest_on_the_ground() {
+        let mut app = floor_app();
+        let rest = ask(&mut app, |level| level.footing_below(Vec3::new(0.0, 0.01, 0.0)));
+        assert!(rest.is_some_and(|y| y.abs() < 1e-4), "the feet rest at {rest:?}, not at 0");
     }
 
     #[test]
