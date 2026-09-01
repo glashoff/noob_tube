@@ -2154,7 +2154,7 @@ what it costs, is worth writing down — it was an open question for two milesto
 |---|---|
 | Bodies | `Superhero_Male_FullBody`, `Superhero_Female_FullBody`, `Mannequin_F`, and the male `Mannequin` inside the animation library |
 | Clips | 43 in `universal_animation_library_1.glb`, 43 more in `_2.glb` |
-| Rig | 65 joints, Unreal Engine mannequin naming, **bit-identical across all five files** |
+| Rig | 65 joints, Unreal Engine mannequin *naming*, **bit-identical across all five files** |
 | Scale | metres — head bone at 1.60 m, so no model scale and no `fbx2gltf` step |
 | Root motion | already stripped in the non-`_RM` variants |
 
@@ -2192,8 +2192,30 @@ entirely on this idea and ship editable SVGs, if an example is wanted.
 **Attach a garment on the same rig.** This is exactly what the eight hairstyles in
 `assets/characters/` already are: a separate `.gltf` carrying the same 65-joint skin, drawn on the
 same skeleton and animated by the same clips. A jacket, a vest or boots authored the same way drop
-in identically — and because the rig is the Unreal mannequin's, anything built for that skeleton by
-anybody fits without retargeting, which is a much larger pool than one asset shop.
+in identically.
+
+Where to get one is the harder half, and the honest answer is narrower than it first looks. The
+bone *names* are Unreal Engine's — `root`, `pelvis`, `spine_01`, `clavicle_l`, `upperarm_l`,
+`thigh_l`, `ball_l` — but this is **not** Unreal's skeleton. Three differences, and each is enough
+to stop a straight drop-in:
+
+- `Head` is capitalised; Unreal's is `head`.
+- Every chain ends in a `_leaf_` bone — `index_04_leaf_l`, `ball_leaf_l`. Unreal has none.
+- There are no twist bones (`upperarm_twist_01_l`) and no IK bones (`ik_foot_root`). A garment
+  weighted against those would arrive referencing bones that are not here.
+
+So an asset from the Unreal ecosystem needs a **bone rename**, not a retarget — much cheaper, since
+the hierarchy of the bones that do exist is the same, and Blender does it in one pass. Assets from
+Quaternius' own "Universal" kits need nothing. Whatever the source, check before building on it:
+
+```bash
+tools/glb rigs assets/characters/Superhero_Male_FullBody.gltf <the candidate>
+```
+
+The most reliable garment is one taken from the body itself: duplicate the part of the body mesh
+the garment covers, push it out slightly, and it inherits the body's own vertex weights — a rig
+match by construction rather than by luck. That is the standard Blender route and it needs no
+skinning work at all.
 
 **Model it in Blender** against the same armature and export it as its own `.gltf`. Only necessary
 for something that has to deform differently from the body under it — a long coat, a backpack.
