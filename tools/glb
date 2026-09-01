@@ -11,19 +11,28 @@ Usage:
   tools/glb nodes <file>            the node tree, with each mesh's size in its own units
   tools/glb skeleton <file>         the joint tree, and each joint's place in the bind pose
   tools/glb animations <file>       per clip: length, which joints move, whether it loops
+  tools/glb rigs <file>...          do these skeletons match? — whose clips can drive whose model
+
+Both `.glb` and `.gltf` are read; a `.gltf` finds its `.bin` beside it, and data: URIs work too.
 
 `info` takes several files, which is the way to compare two quality levels of the same download:
 if their geometry lines match, they differ only in texture size and the small one is the one to
 keep. See `assets/CREDITS.md` — the author and licence `info` prints come out of `asset.extras`,
 which is what Sketchfab writes on export, so a credit entry can be copied rather than typed.
 
+`rigs` answers the question a mixed pile of downloads keeps asking. Bevy binds an animation to a
+skeleton by the *path* of bone names, so a clip drives a model only if the model has a bone at the
+same path — and that is a thing to check before building on it, not after.
+
 What this cannot do is show you the model. For that, see the README under "Looking at an asset".
 """
 
+import base64
 import json
-import math
+import os
 import struct
 import sys
+import urllib.parse
 
 # glTF's component types, as (struct format, size in bytes).
 COMPONENTS = {
@@ -40,26 +49,57 @@ GLB_MAGIC = 0x46546C67
 CHUNK_JSON = 0x4E4F534A
 
 
-class Glb:
-    """A parsed .glb: its JSON document, and the binary chunk the accessors point into."""
+class Gltf:
+    """A parsed glTF file: its JSON document, and the buffers the accessors point into.
+
+    Both containers, because downloads arrive as both. A `.glb` staples the JSON and one binary
+    chunk together; a `.gltf` is the same JSON as a plain file, with its buffers named by URI —
+    a `.bin` beside it, or base64 inline.
+    """
 
     def __init__(self, path):
         self.path = path
         with open(path, "rb") as handle:
-            magic, _version, total = struct.unpack("<III", handle.read(12))
-            if magic != GLB_MAGIC:
-                raise SystemExit(f"{path}: not a .glb (a .gltf is plain JSON — read it directly)")
-            self.json = None
-            self.blob = None
-            while handle.tell() < total:
-                length, kind = struct.unpack("<II", handle.read(8))
-                chunk = handle.read(length)
-                if kind == CHUNK_JSON:
-                    self.json = json.loads(chunk)
-                elif self.blob is None:
-                    self.blob = chunk
+            head = handle.read(4)
+            handle.seek(0)
+            if head == struct.pack("<I", GLB_MAGIC):
+                self.json, self.buffers = self._read_glb(handle)
+            else:
+                self.json = json.load(handle)
+                self.buffers = self._read_uris()
         if self.json is None:
             raise SystemExit(f"{path}: no JSON chunk")
+
+    def _read_glb(self, handle):
+        _magic, _version, total = struct.unpack("<III", handle.read(12))
+        document = None
+        blob = None
+        while handle.tell() < total:
+            length, kind = struct.unpack("<II", handle.read(8))
+            chunk = handle.read(length)
+            if kind == CHUNK_JSON:
+                document = json.loads(chunk)
+            elif blob is None:
+                blob = chunk
+        return document, [blob]
+
+    def _read_uris(self):
+        """A `.gltf`'s buffers: a file beside it, or base64 in the URI itself."""
+        here = os.path.dirname(os.path.abspath(self.path))
+        out = []
+        for buffer in self.json.get("buffers", []):
+            uri = buffer.get("uri")
+            if uri is None:
+                out.append(None)
+            elif uri.startswith("data:"):
+                out.append(base64.b64decode(uri.split(",", 1)[1]))
+            else:
+                beside = os.path.join(here, urllib.parse.unquote(uri))
+                if not os.path.exists(beside):
+                    raise SystemExit(f"{self.path}: needs {uri}, which is not beside it")
+                with open(beside, "rb") as data:
+                    out.append(data.read())
+        return out
 
     def get(self, key):
         return self.json.get(key, [])
@@ -75,8 +115,9 @@ class Glb:
         fmt, size = COMPONENTS[spec["componentType"]]
         width = COUNTS[spec["type"]]
         stride = view.get("byteStride") or size * width
+        blob = self.buffers[view.get("buffer", 0)]
         return [
-            struct.unpack_from("<" + fmt * width, self.blob, start + i * stride)
+            struct.unpack_from("<" + fmt * width, blob, start + i * stride)
             for i in range(spec["count"])
         ]
 
@@ -90,7 +131,7 @@ class Glb:
 
 def info(paths):
     for path in paths:
-        glb = Glb(path)
+        glb = Gltf(path)
         extras = glb.json.get("asset", {}).get("extras") or {}
         print("=" * 78)
         print(path)
@@ -142,7 +183,7 @@ def _duration(glb, clip):
 
 
 def nodes(path):
-    glb = Glb(path)
+    glb = Gltf(path)
     scene = glb.get("scenes")[glb.json.get("scene", 0)]
     meshes = glb.get("meshes")
     accessors = glb.get("accessors")
@@ -166,7 +207,7 @@ def nodes(path):
 
 
 def skeleton(path):
-    glb = Glb(path)
+    glb = Gltf(path)
     if not glb.get("skins"):
         raise SystemExit(f"{path}: no skin, so nothing here is a skeleton")
     parents = glb.parents()
@@ -210,7 +251,7 @@ def _walk_joints(glb, index, joints, places, depth):
 
 
 def animations(path):
-    glb = Glb(path)
+    glb = Gltf(path)
     clips = glb.get("animations")
     if not clips:
         raise SystemExit(f"{path}: no animations")
@@ -249,7 +290,78 @@ def animations(path):
         print()
 
 
-COMMANDS = {"info": info, "nodes": nodes, "skeleton": skeleton, "animations": animations}
+def _joint_paths(glb):
+    """Every joint's path of bone names, from the skeleton's root down.
+
+    Paths rather than bare names, because that is what Bevy matches on: an `AnimationTargetId` is
+    a hash of the chain of names from the animation root to the bone. Two rigs that use the same
+    names in a different hierarchy do not interchange, and comparing name sets would say they do.
+    """
+    if not glb.get("skins"):
+        return {}
+    parents = glb.parents()
+    joints = set(glb.get("skins")[0]["joints"])
+    out = {}
+    for joint in glb.get("skins")[0]["joints"]:
+        chain = []
+        walker = joint
+        while walker is not None and walker in joints:
+            chain.append(glb.name(walker))
+            walker = parents.get(walker)
+        out["/".join(reversed(chain))] = joint
+    return out
+
+
+def rigs(paths):
+    """Whether these skeletons are the same one, and so whose clips can drive whose model."""
+    rigged = []
+    for path in paths:
+        glb = Gltf(path)
+        found = _joint_paths(glb)
+        if not found:
+            print(f"{os.path.basename(path):44} no skin — no skeleton to compare")
+            continue
+        clips = len(glb.get("animations"))
+        meshes = sum(
+            1
+            for mesh in glb.get("meshes")
+            for primitive in mesh.get("primitives", [])
+            if "JOINTS_0" in primitive.get("attributes", {})
+        )
+        print(f"{os.path.basename(path):44} {len(found):3} joints, {clips:3} clips, "
+              f"{meshes} skinned mesh{'es' if meshes != 1 else ''}")
+        rigged.append((path, found))
+
+    if len(rigged) < 2:
+        return
+    reference, theirs = rigged[0]
+    print(f"\nagainst {os.path.basename(reference)}:")
+    for path, mine in rigged[1:]:
+        missing = set(theirs) - set(mine)
+        extra = set(mine) - set(theirs)
+        shared = set(theirs) & set(mine)
+        if not missing and not extra:
+            verdict = "identical — clips interchange with nothing to do"
+        elif not missing:
+            verdict = "a superset — the reference's clips drive this, the extra bones stay put"
+        elif not shared:
+            verdict = "nothing in common — retargeting, not a wiring problem"
+        else:
+            verdict = f"{len(shared)} shared, {len(missing)} missing — clips would drive it in part"
+        print(f"  {os.path.basename(path):42} {verdict}")
+        for name in sorted(missing)[:4]:
+            print(f"      missing: {name}")
+        for name in sorted(extra)[:4]:
+            print(f"      extra:   {name}")
+
+
+COMMANDS = {
+    "info": info,
+    "nodes": nodes,
+    "skeleton": skeleton,
+    "animations": animations,
+    "rigs": rigs,
+}
 
 
 def main():
@@ -257,8 +369,8 @@ def main():
     if len(args) < 2 or args[0] not in COMMANDS:
         raise SystemExit(__doc__)
     command, files = args[0], args[1:]
-    if command == "info":
-        info(files)
+    if command in ("info", "rigs"):
+        COMMANDS[command](files)
     else:
         if len(files) != 1:
             raise SystemExit(f"{command} takes one file")

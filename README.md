@@ -324,11 +324,14 @@ run. None of that needs a renderer. `tools/glb` is a dependency-free reader for 
 spirit as `tools/brp`:
 
 ```bash
-tools/glb info ~/Downloads/mira.glb ~/Downloads/'mira(1).glb'   # compare two quality levels
-tools/glb nodes <file>                                          # the node tree and mesh sizes
-tools/glb skeleton <file>                                       # the joint tree, in bind pose
-tools/glb animations <file>                                     # per clip: what moves, and whether it loops
+tools/glb info a.glb b.glb        # licence, geometry, skins, clips — several files to compare
+tools/glb nodes <file>            # the node tree and mesh sizes
+tools/glb skeleton <file>         # the joint tree, in bind pose
+tools/glb animations <file>       # per clip: what moves, and whether it loops
+tools/glb rigs <file>...          # do these skeletons match — whose clips drive whose model
 ```
+
+Both `.glb` and `.gltf` are read; a `.gltf` finds its `.bin` beside it.
 
 `info` takes several files on purpose. A Sketchfab download usually offers two quality levels, and
 the useful question is whether they differ in geometry or only in texture size — if the geometry
@@ -337,6 +340,12 @@ lines match, keep the small one. Both the Warthog and the mounted gun turned out
 The author and licence come out of `asset.extras`, which is what Sketchfab writes on export. That is
 where every entry in `assets/CREDITS.md` came from: it can be read back out of the file at any time
 rather than trusted to a browser tab.
+
+`rigs` answers the question a mixed pile of downloads keeps asking, and the one the [Risks](#risks)
+section calls the significant one. Bevy binds an animation to a skeleton by the *path* of bone
+names, so a clip drives a model only if that model has a bone at the same path — names alone are
+not enough, since two rigs can use the same names in a different hierarchy. `rigs` compares full
+paths and says plainly whether clips interchange, drive a model in part, or need retargeting.
 
 What `tools/glb` cannot do is show you the model. For that:
 
