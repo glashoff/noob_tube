@@ -124,12 +124,25 @@ this deletes, in one list, because the savings are the justification:
 
 The baseline drops from 196 KB to the heights alone.
 
-**What it costs**, stated plainly so the trade is on the record: a map can never have a footpath, a
-patch of moss, or a bare spot that the height and slope do not explain. Every visual distinction
-must be expressible as a rule. If that turns out to be too little, the way back is to add a splat
-as an *optional override layer* over the derivation — absent by default, present only on maps that
-have one. That is a strictly larger design than webgame's and should not be attempted before the
-rules have actually proved insufficient.
+**What it costs**, stated plainly so the trade is on the record: a map can never have a patch of
+moss or a bare spot that the height and slope do not explain. Every visual distinction must be
+expressible as a rule.
+
+**The way back is not a splat.** Paths and roads are wanted eventually (§8), and they arrive as
+*2D vector paths* the author places — kilobytes of control points, evaluated per pixel — not as a
+raster the author paints. That keeps the invariant intact: a road is still derived, from a spline
+instead of from height and slope.
+
+This is not merely compatible with dropping the splat; webgame found that the two are in direct
+conflict, and the finding is what settles it here:
+
+> the splat is a destructive canvas. Painting a road onto it cannot be undone without remembering
+> what was underneath, so a road that keeps repainting as it is dragged needs the splat to be
+> *derived* rather than *edited* […] A map wanting both hand-painted ground and draggable roads is
+> the case that does not work.
+
+That case is excluded here by construction. Wanting draggable paths is a reason to have no splat,
+not a reason to keep one.
 
 ### Layers
 
@@ -382,9 +395,60 @@ Two mitigations, and the second is the real one:
   simulation. This is the same reasoning webgame applies to its `generate splat` exception, and it
   is why that exception was acceptable there too.
 
+**Paths are exempt from all of this** (§8). "Am I standing on a road?" is a pure function of the
+path list, which lives in `shared` and is the same data on both sides — one call, no second
+implementation, no approximation. The duplication above is the price of deriving from *height and
+slope* specifically, and it applies only to the ground rules.
+
 ---
 
-## 8. Vegetation — sketch only
+## 8. Paths and roads — later, and vector
+
+Wanted, not designed here. This section records the shape and the one constraint that is specific
+to this engine; webgame works the rest out in detail under its §9 — the road sections sit inside
+its vegetation chapter, because both grew out of the same 2D region machinery.
+
+**The data is a 2D path**: an ordered list of control points, a width, and a kind. It is authored —
+somebody places it — but it is *vector* authored data, so it is tens of bytes on the wire rather
+than a megabyte of raster, and it is replicated with the terrain rather than baked into it. A path
+is evaluated, never stamped.
+
+Two grades, and they are different features that share a word:
+
+| | Track | Road |
+|---|---|---|
+| Cross-section | follows the ground | **level** — both edges at the station's height |
+| Geometry | the terrain's own triangles, redrawn with a mask | its own ribbon of quads |
+| Terrain changed | no | **yes, and that is the point** |
+| Cost | almost nothing | a new brush, and it touches the collider |
+
+The track is the one to build first, because it is nearly free: redraw the terrain triangles the
+path crosses with a second material and an alpha mask from the path. It cannot disagree with the
+ground because it *is* the ground.
+
+### The split that matters here
+
+A road has two halves, and in this project they land on opposite sides of the line this whole
+document is organised around:
+
+- **The texture half is client-only.** Distance to the nearest path segment feeds the same fragment
+  shader as §4's rules. The server never evaluates it, nothing can diverge, and it costs nothing.
+- **The height half is a terrain gesture.** Cutting a level corridor changes the height field,
+  which changes the collider, which changes where players can stand — so it goes under §5's
+  determinism discipline and §6's `commit_tick + max_rollback_ticks` rule like any other sculpt.
+  It is genuinely a different brush from flatten: flatten levels to one height, this levels to a
+  *profile* sampled and smoothed along the path.
+
+That the flattening is required is not a nuisance, it is what makes the ribbon work — a corridor
+that is level across and near-linear along is exactly what a coarse LOD reproduces without a gap.
+
+The ribbon itself needs **no collider**: it lies on ground that already collides. Bridges and
+tunnels are out of scope for the same reason — the moment a ribbon leaves the surface it needs its
+own collider, and that is a different feature wearing the same word.
+
+---
+
+## 9. Vegetation — sketch only
 
 webgame's terrain.md has a 1400-line design for this (§9). None of it is ported here yet, and this
 section is deliberately three paragraphs rather than an outline of that one.
@@ -408,7 +472,7 @@ versions behind: `warbler_grass` 0.13, `bevy_procedural_grass` 0.12, `frosty_gra
 
 ---
 
-## 9. Work steps
+## 10. Work steps
 
 1. **Data model and codec.** `TerrainHeights` in `shared`, `u16` quantisation, encode/decode, unit
    tests on round-tripping. No rendering, no physics.
@@ -430,7 +494,7 @@ Steps 1–3 are the ones that can invalidate the plan. Everything after them is 
 
 ---
 
-## 10. Open questions
+## 11. Open questions
 
 - **Map size.** 256 m was webgame's working figure. `HALF_EXTENT` here is 250 m, so a 512 m terrain
   would cover the existing playable area. At `f32` and 512 m from the origin the precision is still
