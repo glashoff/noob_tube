@@ -27,6 +27,8 @@
 //! systems rather than a retargeting project — see the README under "Character assets".
 
 use bevy::animation::{AnimatedBy, AnimationTargetId};
+use bevy::app::AnimationSystems;
+use bevy::transform::TransformSystems;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use core::time::Duration;
@@ -60,6 +62,16 @@ struct Kit {
     /// `webgame`'s 4.606 and 1.956 to three figures; the fallback kit's at 0.97, 5.36 and 0.75,
     /// read out of the download's `_RM` variant since the committed one has root motion stripped.
     paces: Paces,
+    /// The bone a locomotion clip carries the figure forward on, if its clips carry root motion.
+    ///
+    /// `None` for a pack that was exported with it stripped. Which is which is a measurement, not
+    /// a guess — `tools/glb animations <clip>` prints how far a clip travels, and prints nothing
+    /// for one that does not.
+    ///
+    /// Only ever one bone. Every one of the soldier's 49 clips translates `mixamorig:Hips` and
+    /// nothing else at all: `walk_forward` moves it 1.84 m along Z, `run_left` 2.30 m along X, and
+    /// no other bone has a translation track in any of them.
+    root_motion: Option<&'static str>,
 }
 
 /// The three locomotion cycles' authored speeds, in metres per second.
@@ -87,6 +99,7 @@ const SWAT: Kit = Kit {
     clips: Clips::PerFile { directory: "anims" },
     height: 1.78,
     paces: Paces { walk: 1.84, run: 4.61, crouch: 1.96 },
+    root_motion: Some("mixamorig:Hips"),
 };
 
 /// The CC0 fallback, so that a checkout with no Mixamo assets still has a person in it.
@@ -95,6 +108,9 @@ const MANNEQUIN: Kit = Kit {
     clips: Clips::Library { file: "animations/universal_animation_library_1.glb" },
     height: 1.810,
     paces: Paces { walk: 0.97, run: 5.36, crouch: 0.75 },
+    // The committed variant of this pack is the one with root motion already stripped, which is
+    // the whole reason it is the one that is in. Measured: its clips travel 0.00 m.
+    root_motion: None,
 };
 
 /// Half a turn, because glTF says a model faces +Z and this game says forward is −Z.
@@ -316,6 +332,15 @@ impl Plugin for CharacterPlugin {
                     // `PlayerState` in Update, and choosing a clip from last frame's sample would
                     // add a frame of lag to a decision that is already a frame behind.
                     .after(InterpolationSystems::All),
+            )
+            .add_systems(
+                PostUpdate,
+                stay_where_the_simulation_put_them
+                    // After the animation has written the pose and before anything reads it. A
+                    // clip's own travel has to be undone every frame it is evaluated, and there is
+                    // no earlier point at which it exists to be undone.
+                    .after(AnimationSystems)
+                    .before(TransformSystems::Propagate),
             );
     }
 }
@@ -490,6 +515,40 @@ fn give_bodies(
     }
 }
 
+/// The bone that carries a clip's own travel, and where it sits when nothing is driving it.
+///
+/// Only the two horizontal components are kept, because only those are wrong. See
+/// [`stay_where_the_simulation_put_them`].
+#[derive(Component)]
+struct Planted(Vec2);
+
+/// PostUpdate: takes the clip's own travel back out of the pose.
+///
+/// A Mixamo locomotion clip carries the figure forward inside the animation — `walk_forward` moves
+/// the hips 1.84 m over its one second. World position here is the server's to decide, so that
+/// displacement has to go, or a walking player slides away from their own position and every shot
+/// at them misses a body that is not where it is drawn.
+///
+/// **X and Z are pinned; Y is left alone.** The vertical is the hip bob, 6 cm of it in the walk,
+/// and a figure without it does not put its weight on its feet — it glides. That is the whole of
+/// the distinction, and getting it backwards is the mistake worth naming: the obvious reading of
+/// "strip the root motion" takes all three.
+///
+/// Done *after* the animation is evaluated rather than by editing the clips. Patching assets would
+/// have to be redone on every re-import and would be silently undone by a fresh
+/// `tools/setup-assets`; this cannot drift, and it is also the only version that survives a blend,
+/// where the pose is a mixture of two travelling curves and neither is the one to correct.
+///
+/// About 5 cm of genuine sideways sway goes with it, since a hip that sways and a hip that travels
+/// are the same track. That is the price, it is below noticing at this size, and separating them
+/// would mean subtracting a straight-line fit per clip — which a blend of two clips defeats again.
+fn stay_where_the_simulation_put_them(mut hips: Query<(&Planted, &mut Transform)>) {
+    for (rest, mut pose) in hips.iter_mut() {
+        pose.translation.x = rest.0.x;
+        pose.translation.z = rest.0.y;
+    }
+}
+
 /// Marks a body whose skeleton has been wired, so it is done once rather than every frame.
 #[derive(Component)]
 struct Wired;
@@ -520,6 +579,8 @@ fn wire_up_the_skeleton(
     children: Query<&Children>,
     named: Query<&Name>,
     already: Query<(), With<AnimationPlayer>>,
+    poses: Query<&Transform>,
+    assets: Res<CharacterAssets>,
     clips: Res<Moves>,
     library: Res<Assets<AnimationClip>>,
     mut commands: Commands,
@@ -555,9 +616,42 @@ fn wire_up_the_skeleton(
             let name = named.get(root).cloned().unwrap_or_default();
             label_the_bones(root, name, &children, &named, &mut commands);
         }
+        plant_the_hips(root, assets.kit, &children, &named, &poses, &mut commands);
         info!("{known} of {labelled} bones under {root} are animated by the library");
         commands.entity(body).insert(Wired);
     }
+}
+
+/// Notes where the root-motion bone rests, so the travel can be taken back out every frame.
+///
+/// Read here rather than in `PostUpdate` because here it is still the bind pose: the scene has
+/// spawned, the `AnimationPlayer` is being added in this same run, and nothing has evaluated a
+/// clip over it yet. One frame later the number would be whatever the animation had just written,
+/// which is the value this exists to undo.
+fn plant_the_hips(
+    root: Entity,
+    kit: &Kit,
+    children: &Query<&Children>,
+    named: &Query<&Name>,
+    poses: &Query<&Transform>,
+    commands: &mut Commands,
+) {
+    let Some(wanted) = kit.root_motion else {
+        return;
+    };
+    let found = children
+        .iter_descendants(root)
+        .find(|bone| named.get(*bone).is_ok_and(|name| name.as_str() == wanted));
+    let Some(bone) = found else {
+        error!("{wanted} is not a bone under {root}, so its clips' own travel cannot be undone");
+        return;
+    };
+    let Ok(pose) = poses.get(bone) else {
+        return;
+    };
+    commands
+        .entity(bone)
+        .insert(Planted(Vec2::new(pose.translation.x, pose.translation.z)));
 }
 
 /// Which bone under `body` the library's paths are spelt from, and how well it fits.
@@ -870,6 +964,16 @@ mod tests {
                 assert!(kit.clip(wanted).is_some(), "{} has no clip for {wanted:?}", kit.body);
             }
         }
+    }
+
+    /// Exactly one kit carries root motion, and which one is a measurement rather than a
+    /// preference — the committed fallback pack is the variant that was exported with it stripped,
+    /// and the soldier's is not. Stated here so that replacing either pack says so out loud
+    /// instead of showing up as a figure sliding away from its own hitbox.
+    #[test]
+    fn only_the_soldiers_clips_carry_their_own_travel() {
+        assert_eq!(SWAT.root_motion, Some("mixamorig:Hips"));
+        assert_eq!(MANNEQUIN.root_motion, None);
     }
 
     /// The soldier's eight directions have to be eight *different* clips, or the pack is not what

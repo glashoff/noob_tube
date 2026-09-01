@@ -315,6 +315,28 @@ tools/brp watch <entity> <type>...          # stream every change until interrup
 tools/brp --port 15712 list                 # the server instead
 ```
 
+### After a crash, a green test run can be a lie
+
+Worse than the link errors below, because it looks like success. A hard power loss can leave the
+machine's clock adrift, and it came back an hour behind after one of these. Every build artifact
+from before the reboot then carries a timestamp **in the future**, cargo compares them against
+freshly edited sources and concludes there is nothing to do — so `cargo test` reruns the previous
+binary and reports it passing. New tests do not appear; changed tests still pass under their old
+bodies. That happened here, and the run said `19 passed` for a file whose twelve new tests had
+never been compiled.
+
+`touch` does not fix it: it sets a source to *now*, which is still older than an artifact from the
+future. Nor does the count of tests give it away unless somebody happens to know what it should be.
+
+```bash
+find target -type f -newermt "@$(date +%s)" | wc -l    # artifacts dated in the future
+cargo clean -p noob_tube_client -p noob_tube_shared -p noob_tube_server -p bake_collider
+```
+
+Cleaning by package is enough. A dependency that has not changed is fine however it is dated; the
+damage is only to crates whose sources are being edited. It costs a few minutes rather than the
+twenty a full rebuild of the Bevy tree takes.
+
 ### After a crash, the build stops linking
 
 Twice now a hard power loss has left the workspace unable to link, with pages of
