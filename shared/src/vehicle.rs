@@ -148,6 +148,18 @@ pub struct VehicleSpec {
     pub wheel_width: f32,
     /// Newtons per metre of compression, per strut.
     pub stiffness: f32,
+    /// Newtons per metre of *difference* in compression across an axle: the anti-roll bar.
+    ///
+    /// A torsion bar between the two sides of an axle, which is the part a real vehicle uses for
+    /// exactly the problem it solves here. It is zero when both sides are equally compressed, so it
+    /// stiffens the vehicle in roll without stiffening it over a bump — which is what separates it
+    /// from simply raising [`stiffness`](Self::stiffness), and from the bump stop that was tried
+    /// first and made a vehicle on its side unable to get back up.
+    ///
+    /// Without one, a hard corner rolls the body until the outer strut is on its stop and then
+    /// keeps rolling, because there is nothing left to push with: measured on a reverse full-lock
+    /// circle, 57 cm of tyre below the ground and 37 cm of chassis with it.
+    pub anti_roll: f32,
     /// Newton-seconds per metre, per strut. Resists the *rate* of compression, which is what stops
     /// a spring that would otherwise bounce for ever.
     pub damping: f32,
@@ -296,6 +308,7 @@ pub const BUGGY: VehicleSpec = VehicleSpec {
     // Chosen so the struts settle the same *fraction* of the vehicle as before rather than the
     // same number of centimetres: mg/4 over 27 kN/m is 23.6 cm, which is 18.3 cm times 1.29.
     stiffness: 27_000.0,
+    anti_roll: 20_000.0,
     // The same damping ratio the smaller one had, 0.45 of critical: 2 sqrt(k m/4) times that.
     damping: 3_800.0,
     grip: 16.0,
@@ -619,11 +632,19 @@ pub fn drive_vehicles<F: QueryFilter + 'static>(
                 continue;
             }
             let velocity = body.velocity_at_point(wheel.contact);
-            // Spring minus damper, and never negative: a strut can push the chassis away from the
-            // ground, but it cannot pull it back down. Letting it go negative is how a car ends up
-            // sucked onto the road and unable to leave a ramp.
-            let load =
-                (spec.stiffness * wheel.compression - spec.damping * velocity.dot(up)).max(0.0);
+            // The anti-roll bar, as the difference between this side of the axle and the other.
+            // `index ^ 1` is the wheel across from this one, which is what the mount order means:
+            // left then right, front axle then rear.
+            let across = found[index ^ 1].compression;
+            let bar = spec.anti_roll * (wheel.compression - across);
+            // Spring plus bar minus damper, and never negative: a strut can push the chassis away
+            // from the ground, but it cannot pull it back down. Letting it go negative is how a car
+            // ends up sucked onto the road and unable to leave a ramp — and it is also the one
+            // thing a real bar can do that this cannot, since half of a bar's work is pulling the
+            // inside wheel down.
+            let load = (spec.stiffness * wheel.compression + bar
+                - spec.damping * velocity.dot(up))
+            .max(0.0);
             body.apply_force_at_point(up * load, wheel.contact);
 
             // Which way this tyre is pointing. Flattened onto the ground first, or on a slope some
@@ -1134,6 +1155,51 @@ mod tests {
             spec.righting_hold - 0.2,
             spec.righting_hold,
         );
+    }
+
+    /// Reversing on full lock is what the anti-roll bar is for, and it is where the vehicle used
+    /// to dig itself into the road.
+    ///
+    /// The chain, measured: the body rolls to 25 degrees, the outer strut runs out of travel and
+    /// pegs at its 58 cm, and the roll carries on because there is nothing left to push with. The
+    /// tyre ends 57 cm below the road, the chassis collider 37 cm below it — 1.0 m lower than where
+    /// it rests — and the buried body drags the vehicle from 9 m/s to 2 and lets it go again, over
+    /// and over, every 2.6 seconds. That cycle is what a driver feels as juddering.
+    ///
+    /// **Not a solver problem, though it looks like one.** The wheels are ray casts, one per wheel
+    /// per tick, with no iteration to raise; only the chassis is a solver contact, and it is buried
+    /// as a *consequence*. Measured: 6, 12, 24 and 48 substeps give 0.481, 0.527, 0.487 and
+    /// 0.536 m of tyre under the road, which is noise, and stiffer contacts are slightly worse.
+    ///
+    /// With the bar: 8.4 degrees of lean, 5 mm of tyre, and the collider stays 29 cm clear.
+    #[test]
+    fn a_reverse_lock_circle_keeps_its_wheels_under_it() {
+        let mut app = driving_app();
+        let spec = VehicleKind::Buggy.spec();
+        let car = park(&mut app, Vec3::Y * spec.ride_height());
+        hands(&mut app, car, -1.0, -1.0);
+
+        let mut deepest: f32 = 0.0;
+        let mut lowest: f32 = f32::MAX;
+        let mut worst_lean: f32 = 0.0;
+        for _ in 0..(12.0 * HZ as f32) as usize {
+            app.update();
+            let wheels = app.world().get::<Wheels>(car).expect("wheels").0;
+            deepest = deepest.max(
+                wheels
+                    .iter()
+                    .map(|wheel| {
+                        if wheel.grounded { spec.wheel_radius - wheel.centre.y } else { 0.0 }
+                    })
+                    .fold(0.0, f32::max),
+            );
+            lowest = lowest.min(app.world().get::<ColliderAabb>(car).expect("aabb").min.y);
+            worst_lean = worst_lean.max(lean(&app, car));
+        }
+
+        assert!(deepest < 0.05, "a tyre went {:.0} cm into the road", deepest * 100.0);
+        assert!(lowest > 0.0, "the chassis itself reached {lowest:.3} m, which is inside the road");
+        assert!(worst_lean < 15.0, "it leant {worst_lean:.1} degrees, which is nearly over");
     }
 
     /// [`VehicleSpec::ride_height`] assumes every strut hangs from the same height, which is what

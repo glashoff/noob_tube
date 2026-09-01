@@ -240,9 +240,9 @@ impl PlayerState {
         // input into motion along the surface, so with gravity cancelled every tick the player
         // strolls up a wall. Measured before this line existed: 1.9 m of height gained in two
         // seconds against a 60° face, and 0.4 m against an 80° one.
-        if wanted.y < 0.0 && moved.y > wanted.y + 1e-6 && self.on_ground {
-            self.velocity.y = 0.0;
-        } else if wanted.y > 0.0 && moved.y < wanted.y - 1e-6 {
+        let caught = wanted.y < 0.0 && moved.y > wanted.y + 1e-6 && self.on_ground;
+        let stopped = wanted.y > 0.0 && moved.y < wanted.y - 1e-6;
+        if caught || stopped {
             self.velocity.y = 0.0;
         }
 

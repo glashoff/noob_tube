@@ -1998,6 +1998,53 @@ loaded and the textures did not, which shows up as one line in the log and an un
 Still missing: standing on a vehicle rather than being inside it, passengers, a camera that gets out
 of the way of walls, and running people over.
 
+#### The wheel that dug itself in
+
+Reversing on full lock buried the front outside wheel in the road after a second or two, and the
+driving went to pieces with it. The suggestion was more solver iterations; the measurement says
+otherwise, and the measurement is worth more than the argument.
+
+The chain is this. The body rolls into the corner and reaches 25 degrees. The outer strut runs out
+of travel and pegs at its 58 cm. The roll carries on, because at that point there is nothing left to
+push with — the model has no more spring. The tyre ends 57 cm below the road and the chassis
+collider 37 cm below it, a full metre lower than where it rests. A buried body drags: the vehicle
+falls from 9 m/s to 2, pops out, accelerates, and digs in again 2.6 seconds later. That cycle is
+what a driver feels as juddering.
+
+**More solver iterations do nothing, and it is worth being clear why.** The wheels are ray casts —
+one per wheel per tick, no iteration to raise. Only the chassis is a solver contact, and it is
+buried as a *consequence* rather than as a cause. Measured at 6, 12, 24 and 48 substeps: 0.481,
+0.527, 0.487 and 0.536 m of tyre under the road, which is noise. Stiffer contacts
+(`contact_damping_ratio` 10 → 100) make it slightly worse.
+
+What was missing is a part a real vehicle has: an **anti-roll bar**. A torsion bar across an axle,
+which pushes up on whichever side is more compressed by the difference between the two. It is
+20 000 N per metre of difference here, against a spring rate of 27 000, and it is one line inside
+the strut's load.
+
+The property that makes it the right part is that it is *zero when both sides are level*. It
+stiffens the vehicle in roll and leaves it exactly as soft over a bump, so a parked vehicle sits at
+the same ride height it always did and a landing is unchanged. That is what separates it from
+simply raising the spring rate, and from the bump stop that was tried first — which worked on paper
+at 8 to 48 times the spring rate, and left a vehicle on its side unable to get back up.
+
+| | before | after |
+|---|---|---|
+| reverse full lock: tyre below the road | 57 cm | **0.5 cm** |
+| chassis collider | 37 cm under | 29 cm clear |
+| lean | 25° | 8.4° |
+| the old hard corner at 19.3 m/s | 7.8 cm, 50 ticks on the stop | **0.3 cm, none** |
+
+What it does not fix, and what is honest to write down: a hard *landing* still bottoms out, because
+that is both sides at once and a bar has nothing to say about it. A 1 m drop is clean, 2 m puts
+11 cm of tyre through the road for a moment, 3 m puts 22 cm, and past 4 m the chassis touches. That
+wants suspension travel, not a bar.
+
+One tempting fix was tried and thrown away: applying the strut's force at the ground the ray found
+rather than under the wheel centre, so that a bottomed strut never pushes up from a point below the
+surface. It is more defensible on paper and it measures as nothing at all — identical to three
+decimal places on both the corner and the drop — so it is not in the code.
+
 #### Three things a shot was getting wrong
 
 Found by looking for why bullet holes were missing, and each worse than the symptom that led to it.
