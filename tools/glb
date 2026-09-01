@@ -162,6 +162,12 @@ def info(paths):
             f"{mesh.get('name') or '<unnamed>'}" for mesh in glb.get("meshes")) or "none")
         print(f"{'materials':10} {len(glb.get('materials'))}, "
               f"{len(glb.get('textures'))} textures, {len(glb.get('images'))} images")
+        sizes = _image_sizes(glb)
+        if sizes:
+            budget = sum(w * h * 4 * 4 // 3 for w, h in sizes) / (1024 * 1024)
+            biggest = max(sizes, key=lambda size: size[0] * size[1])
+            widest = f"{biggest[0]}x{biggest[1]}"
+            print(f"{'texture':10} largest {widest}, ~{budget:.0f} MB of GPU memory")
 
         for index, skin in enumerate(glb.get("skins")):
             print(f"{'skin ' + str(index):10} {len(skin.get('joints', []))} joints")
@@ -172,6 +178,61 @@ def info(paths):
             print(f"           {index:3} {clip.get('name') or '<unnamed>':32} "
                   f"{_duration(glb, clip):6.2f} s, {len(clip.get('channels', []))} channels")
         print()
+
+
+def _image_sizes(glb):
+    """Every image's pixel dimensions, read from the file header rather than decoded.
+
+    Texture memory is what a GPU actually runs out of, and it has nothing to do with how big the
+    file is: a PNG that compresses to 1 MB still costs `w * h * 4` bytes uploaded, plus a third
+    again for its mip chain. A 2048-square map is 21 MB whatever it weighs on disk. This is here
+    because that arithmetic took a laptop down twice before anybody did it.
+    """
+    out = []
+    for image in glb.get("images"):
+        if "bufferView" in image:
+            view = glb.get("bufferViews")[image["bufferView"]]
+            blob = glb.buffers[view.get("buffer", 0)]
+            start = view.get("byteOffset", 0)
+            head = blob[start : start + view["byteLength"]]
+        elif image.get("uri", "").startswith("data:"):
+            head = base64.b64decode(image["uri"].split(",", 1)[1])
+        else:
+            beside = os.path.join(
+                os.path.dirname(os.path.abspath(glb.path)),
+                urllib.parse.unquote(image.get("uri", "")),
+            )
+            if not os.path.exists(beside):
+                continue
+            with open(beside, "rb") as data:
+                head = data.read()
+        size = _png_size(head) or _jpeg_size(head)
+        if size:
+            out.append(size)
+    return out
+
+
+def _png_size(data):
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    return struct.unpack(">II", data[16:24])
+
+
+def _jpeg_size(data):
+    """JPEG keeps its dimensions in a start-of-frame marker, which is not at a fixed offset."""
+    if data[:2] != b"\xff\xd8":
+        return None
+    at = 2
+    while at + 9 < len(data):
+        if data[at] != 0xFF:
+            at += 1
+            continue
+        marker = data[at + 1]
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            height, width = struct.unpack(">HH", data[at + 5 : at + 9])
+            return width, height
+        at += 2 + struct.unpack(">H", data[at + 2 : at + 4])[0] if at + 4 <= len(data) else 2
+    return None
 
 
 def _duration(glb, clip):

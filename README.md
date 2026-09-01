@@ -315,6 +315,39 @@ tools/brp watch <entity> <type>...          # stream every change until interrup
 tools/brp --port 15712 list                 # the server instead
 ```
 
+### After a crash, the build stops linking
+
+Twice now a hard power loss has left the workspace unable to link, with pages of
+
+```text
+rust-lld: error: undefined hidden symbol: anon.52766...llvm.30694...
+```
+
+That is not a code error and no amount of reading the diff will find it. Incremental compilation
+keeps its codegen units in `target/debug/incremental`, a crash truncates some of them to zero
+bytes, and the linker then looks for symbols in a file that no longer contains anything. The fix is
+to throw that cache away — everything else in `target/` survives, so this costs seconds rather than
+the twenty minutes a full rebuild of the Bevy tree takes:
+
+```bash
+rm -rf target/debug/incremental && cargo build
+```
+
+Worth checking the same way whenever something is inexplicable after a crash:
+
+```bash
+find target -type f -size 0 | sed 's|.*/||' | sort | uniq -c | sort -rn | head
+```
+
+Empty `.lock`, `stderr` and `output` files are normal. Empty `.rmeta`, `.rlib` or `.o` files are
+not, and `cargo clean -p <crate>` clears those for one crate without touching its dependencies.
+
+**`.git` is worth checking at the same time**, because it has been damaged by both of these
+crashes in the same way — a zero-length object where the last commit should be, and every git
+command answering `fatal: bad object HEAD`. `git fsck --full` says so, the empty objects are
+findable with the same `find`, and they have been orphans both times: resetting the branch to the
+last intact commit, deleting them, and re-committing the working tree has lost nothing.
+
 ### Which graphics card draws it
 
 On a laptop with two GPUs this now draws on the **integrated** one, and that is a change from
