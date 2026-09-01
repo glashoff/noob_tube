@@ -3,7 +3,9 @@
 # Assets are ignored by default and let through one at a time, because the reason differs per file:
 # the character animations are licensed for use but not redistribution — see README, "Character
 # assets: an open question" — while the vehicle model is CC BY and may travel with the repository.
-# Whatever is let through must have an entry in assets/CREDITS.md.
+# The mounted gun is CC BY-**ND**, which is a third answer again and the reason nothing here is a
+# blanket rule. Whatever is let through must have an entry in assets/CREDITS.md, and adding a line
+# below is a licensing decision, not tidying.
 /assets/*
 !/assets/CREDITS.md
 

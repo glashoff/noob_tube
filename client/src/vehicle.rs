@@ -53,6 +53,38 @@ const MODEL_GROUND: f32 = 0.446;
 /// its nose points along −X where everything in this game points along −Z: a quarter turn.
 const MODEL_YAW: f32 = -core::f32::consts::FRAC_PI_2;
 
+/// The gun bolted to the cross-beam behind the seats, under the asset directory.
+///
+/// Optional exactly as the vehicle model is, and for a second reason on top of the first: it is
+/// licensed **CC BY-ND**, so unlike the Warthog it is not ours to pass on. See `assets/CREDITS.md`.
+const GUN: &str = "models/machine_gun.glb";
+/// How long the gun is along its own X, muzzle to the back of its mount, in its own units.
+///
+/// Read out of the file like the vehicle's three, and its scene is not normalised the way a
+/// Sketchfab export usually is — the number is large because the units are. What matters is only
+/// that everything below is a ratio against it.
+const GUN_LENGTH: f32 = 63.74;
+/// How long we want it to be, in metres. A little under two thirds of the vehicle, which is about
+/// what a pintle-mounted gun is against the truck under it.
+const GUN_WANTED_LENGTH: f32 = 2.4;
+/// The foot of its pintle, in its own units: the one point that has to end up on the beam.
+///
+/// Measured rather than taken as the origin, which is somewhere in the middle of the receiver. The
+/// bottom two units of the model are a single 2.1-wide post, and this is the centre of its underside.
+const GUN_FOOT: Vec3 = Vec3::new(3.50, -11.21, 0.0);
+/// Which way the gun faces, within the vehicle model's own frame.
+///
+/// Its barrel points along its own +X. The vehicle model's nose is at −X, and half a turn is what
+/// puts one on the other — the vehicle's own quarter turn then carries both to −Z together.
+const GUN_YAW: f32 = core::f32::consts::PI;
+/// The top of the cross-beam behind the seats, in the vehicle model's own units.
+///
+/// Found by looking for what the geometry actually is rather than by eye: the roll cage is the only
+/// thing on the body above y = 0.28, it is two full-width hoops joined by a pair of thin rails, and
+/// this is the middle of the top face of the rear one. The seat backs end at x = 0.24, so the hoop
+/// stands right behind them.
+const GUN_MOUNT: Vec3 = Vec3::new(0.178, 0.360, 0.0);
+
 /// What the model calls the three parts of a wheel assembly, as the prefix of a node's name.
 ///
 /// The only thing about the file that is taken on trust rather than measured. Everything else —
@@ -220,6 +252,9 @@ fn give_bodies(
     // the model and the box has been made. This is the same thing the config loader does with the
     // settings file, for the same reason.
     let modelled = std::path::Path::new(crate::ASSETS).join(MODEL).exists();
+    // The gun needs the vehicle model, not merely its own file: what it is bolted to is a beam that
+    // only exists in the model. On the box there is nothing to bolt it to.
+    let armed = modelled && std::path::Path::new(crate::ASSETS).join(GUN).exists();
     for (entity, kind) in arrived.iter() {
         let spec = kind.spec();
         let paint = materials.add(StandardMaterial {
@@ -260,16 +295,41 @@ fn give_bodies(
             // same size along the axis a driver notices most. Lifted so the tyres it is drawn with
             // touch the ground the springs settle it at, rather than the model's own origin doing.
             let scale = spec.half_extents.z * 2.0 / MODEL_LENGTH;
-            commands.entity(entity).with_child((
-                Name::from("Buggy model"),
-                // Its own wheels are still to be found — see `find_the_models_wheels`, which is
-                // what takes this off again once they have been.
-                Unfitted,
-                WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(MODEL))),
-                Transform::from_xyz(0.0, MODEL_GROUND * scale - spec.ride_height(), 0.0)
-                    .with_rotation(Quat::from_rotation_y(MODEL_YAW))
-                    .with_scale(Vec3::splat(scale)),
-            ));
+            commands.entity(entity).with_children(|body| {
+                let mut model = body.spawn((
+                    Name::from("Buggy model"),
+                    // Its own wheels are still to be found — see `find_the_models_wheels`, which is
+                    // what takes this off again once they have been.
+                    Unfitted,
+                    WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(MODEL))),
+                    Transform::from_xyz(0.0, MODEL_GROUND * scale - spec.ride_height(), 0.0)
+                        .with_rotation(Quat::from_rotation_y(MODEL_YAW))
+                        .with_scale(Vec3::splat(scale)),
+                ));
+                if !armed {
+                    return;
+                }
+                // A child of the vehicle model rather than of the chassis, and placed in the
+                // model's own units. Where the beam is depends on the model and on nothing else, so
+                // hanging the gun off the same entity keeps the two glued together — the vehicle
+                // could be respecified tomorrow and the gun would still be on its beam.
+                model.with_children(|model| {
+                    // Divided by the vehicle model's scale because that is already applied above,
+                    // and this is underneath it.
+                    let size = GUN_WANTED_LENGTH / GUN_LENGTH / scale;
+                    let turn = Quat::from_rotation_y(GUN_YAW);
+                    // Turned about the foot of its pintle rather than about its own origin, which
+                    // is somewhere in the middle of the receiver: this is the translation that
+                    // leaves the foot exactly on the beam.
+                    model.spawn((
+                        Name::from("Mounted gun"),
+                        WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(GUN))),
+                        Transform::from_translation(GUN_MOUNT - turn * (GUN_FOOT * size))
+                            .with_rotation(turn)
+                            .with_scale(Vec3::splat(size)),
+                    ));
+                });
+            });
         } else {
             // No model on this machine: a box the right size, so the vehicle is still visible and
             // still the shape the collider says it is.

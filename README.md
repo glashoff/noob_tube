@@ -1518,6 +1518,43 @@ server, which would answer asynchronously, some frames after the vehicle already
 
 The model brings its own wheels, so ours are spawned and placed as before but hidden.
 
+#### A gun on the cross-beam
+
+A mounted machine gun by bonk.iopro77, bolted to the rear hoop of the roll cage — the cross-beam
+that stands behind the seat backs.
+
+Two things had to be found rather than eyeballed, and both came out of the geometry. **Where the
+beam is**: the roll cage is the only part of the body above y = 0.28 in the model's own units, and
+it is two full-width hoops joined by a pair of thin rails, so the rear hoop is the run of full-width
+geometry at x = 0.146 to 0.307 — the seat backs end at 0.24, which puts it right behind them. Its top
+face is at y = 0.360. **Where the gun's foot is**: the bottom two units of the gun are a single
+2.1-wide post, and the centre of its underside is the one point that has to land on that face. The
+gun is then turned about that point rather than about its own origin, which is somewhere in the
+middle of its receiver.
+
+Its own scene is not normalised the way a Sketchfab export usually is — it is 63.7 units long and
+carries a chain of node transforms that compose to a plain scale — so the length is measured and
+everything else is a ratio against it. Scaled to 2.4 m, a little under two thirds of the vehicle.
+
+It hangs off the *vehicle model* rather than off the chassis, and is placed in the model's own
+units. Where the beam is depends on the model and on nothing else, so the two stay glued together:
+the vehicle could be respecified tomorrow and the gun would still be on its beam. It also means the
+gun is absent exactly when the beam is — on a client with no vehicle model there is nothing to bolt
+it to, and the box gets no gun.
+
+It does not turn, and it does not fire. It is a fitting, not a weapon: the driver's shot still comes
+from the seat. Making it a second seat that aims independently is the thing that would dissolve the
+camera trade described below, and it is its own piece of work.
+
+**The licence is a third answer again, and the first one that is uncomfortable.** The Warthog is
+CC BY, so it may travel with the repository. The animation library is licensed for use but not
+redistribution, so it may not. This gun is CC BY-**ND** — NoDerivatives — which permits sharing the
+work verbatim but forbids distributing adapted material, and whether putting an unmodified model
+into a game counts as adapting it is genuinely unsettled. The file itself is untouched, which is the
+strongest argument that it is not. Because the answer is uncertain rather than clearly yes, it is
+not let through `.gitignore`; the reasoning is written down in `assets/CREDITS.md` so the decision
+is not lost.
+
 #### Giving the suspension back its travel
 
 Hiding our cylinders took the suspension off the screen: the springs still worked, and nothing
