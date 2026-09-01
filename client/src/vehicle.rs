@@ -108,6 +108,20 @@ const GUN_ELEVATION: f32 = 0.40;
 /// the cage at full depression: a clip seen occasionally against a hole felt constantly. See the
 /// README, and change it here if the trade ever reads differently.
 const GUN_DEPRESSION: f32 = 0.52;
+/// Where the driver sits, in chassis space: the point their feet go.
+///
+/// Measured off the model rather than eyeballed. The steering wheel's own node sits at
+/// (−0.402, 0.035, −0.332) once the model→chassis map is applied, which puts the driver on the
+/// vehicle's **left** — forward is −Z and up is +Y, so +X is the right-hand side. The seat itself
+/// is a little behind the wheel, at the `Interior` node's z, and the feet go on the floor of the
+/// cab at the same height everything else about a driver uses.
+///
+/// Distinct from the (0, −0.4, 0) that [`carry_driver`] writes into `PlayerState`. That one is
+/// deliberately on the centreline: it is where a shot leaves from and where the camera stands, and
+/// putting *those* off to one side would give the driver a view out of the passenger's ear. This
+/// is only where the body is drawn.
+pub(crate) const DRIVER_SEAT: Vec3 = Vec3::new(-0.40, -0.40, -0.03);
+
 /// The top of the cross-beam behind the seats, in the vehicle model's own units.
 ///
 /// Found by looking for what the geometry actually is rather than by eye: the roll cage is the only

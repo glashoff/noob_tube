@@ -945,9 +945,14 @@ pack says which side of the line it lands on.
 - **The aiming idles are unused.** `idle_aiming` and `idle_crouching_aiming` are in the pack, and
   nothing yet knows whether a player has their weapon up.
 - **Deaths and turns are unused.** Six death clips and four turn-in-place clips are sitting there.
-- **Our own player still has no body**, because the camera is inside it. A third-person view and
-  first-person arms are both waiting on that.
-- **A seated driver is hidden rather than posed.**
+- **A seated driver has no clip for sitting.** The soldier's pack has 49 of them and not one is a
+  person sitting down, so a crouched idle stands in — knees bent, hands forward, which reads far
+  better behind a steering wheel than a figure standing to attention. Mixamo has "Driving" and
+  "Sitting Idle" for the asking; dropping either into `assets/anims/` is all it needs. The
+  fallback kit has `Driving_Loop` and uses it.
+- **On foot our own body is still not drawn**, because the camera is inside it. First-person arms
+  and a third-person view on foot are both waiting on that. In a seat it *is* drawn, because the
+  chase camera has the driver's seat in shot.
 - **Per-bone hitboxes**, as above. The pack's own skeleton is what `webgame` generated
   `skeleton.json` from, so the data exists.
 

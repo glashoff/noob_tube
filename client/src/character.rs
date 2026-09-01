@@ -34,7 +34,9 @@ use bevy::prelude::*;
 use core::time::Duration;
 use lightyear::prelude::*;
 use noob_tube_shared::movement::CAPSULE_HEIGHT;
+use avian3d::prelude::{Position, Rotation};
 use noob_tube_shared::player::{Aim, Player, PlayerState};
+use noob_tube_shared::vehicle::{Driven, Driving};
 
 /// Everything that makes one set of character assets usable, as a table entry.
 ///
@@ -147,6 +149,14 @@ enum Gait {
     CrouchIdle,
     CrouchWalk,
     Airborne,
+    /// In a vehicle's seat.
+    ///
+    /// The fallback kit has a clip made for this and the soldier's pack does not — 49 clips of
+    /// walking, running, aiming and dying, and nothing that sits down. A crouched idle is the
+    /// nearest thing it has: knees bent, hands forward, which reads as sitting far better than a
+    /// figure standing to attention behind a steering wheel does. Mixamo has "Driving" and
+    /// "Sitting Idle" for the asking, and dropping either into `assets/anims/` is all this needs.
+    Seated,
 }
 
 /// Which way a player is travelling relative to the way they are facing.
@@ -222,7 +232,7 @@ type Move = (Gait, Facing);
 /// not here is one nothing in the simulation can reach.
 fn every_move() -> Vec<Move> {
     let mut out = Vec::new();
-    for gait in [Gait::Idle, Gait::CrouchIdle, Gait::Airborne] {
+    for gait in [Gait::Idle, Gait::CrouchIdle, Gait::Airborne, Gait::Seated] {
         out.push((gait, Facing::Forward));
     }
     for gait in [Gait::Walk, Gait::Run, Gait::CrouchWalk] {
@@ -239,7 +249,7 @@ impl Kit {
         Some(match self.clips {
             Clips::PerFile { .. } => match gait {
                 Gait::Idle => "idle".to_string(),
-                Gait::CrouchIdle => "idle_crouching".to_string(),
+                Gait::CrouchIdle | Gait::Seated => "idle_crouching".to_string(),
                 Gait::Airborne => "jump_loop".to_string(),
                 Gait::Walk => format!("walk_{}", facing.suffix()),
                 Gait::Run => format!("run_{}", facing.suffix()),
@@ -251,6 +261,7 @@ impl Kit {
             Clips::Library { .. } => match gait {
                 Gait::Idle => "Idle_Loop",
                 Gait::CrouchIdle => "Crouch_Idle_Loop",
+                Gait::Seated => "Driving_Loop",
                 Gait::Airborne => "Jump_Loop",
                 Gait::Walk => "Walk_Loop",
                 Gait::Run => "Jog_Fwd_Loop",
@@ -266,7 +277,7 @@ impl Kit {
             Gait::Walk => Some(self.paces.walk),
             Gait::Run => Some(self.paces.run),
             Gait::CrouchWalk => Some(self.paces.crouch),
-            Gait::Idle | Gait::CrouchIdle | Gait::Airborne => None,
+            Gait::Idle | Gait::CrouchIdle | Gait::Airborne | Gait::Seated => None,
         }
     }
 
@@ -333,9 +344,10 @@ impl Plugin for CharacterPlugin {
                     // add a frame of lag to a decision that is already a frame behind.
                     .after(InterpolationSystems::All),
             )
+            .add_systems(Update, only_show_ourselves_in_the_seat.after(InterpolationSystems::All))
             .add_systems(
                 PostUpdate,
-                stay_where_the_simulation_put_them
+                (stay_where_the_simulation_put_them, sit_the_drivers_down)
                     // After the animation has written the pose and before anything reads it. A
                     // clip's own travel has to be undone every frame it is evaluated, and there is
                     // no earlier point at which it exists to be undone.
@@ -378,7 +390,12 @@ impl Moves {
 struct CharacterBody;
 
 /// A player that has just been replicated to us and has nothing to be seen as yet.
-type JustArrived = (With<client::Remote>, Without<Predicted>, Added<PlayerState>);
+///
+/// Our own included, which it was not before. The camera sits inside our player, so a body there
+/// used to be left out entirely — but the chase camera looks at the vehicle from behind, and an
+/// empty driver's seat with the steering wheel turning by itself is worse than the cost of drawing
+/// one more figure. It is hidden on foot instead; see [`only_show_ourselves_in_the_seat`].
+type JustArrived = (With<client::Remote>, Added<PlayerState>);
 
 /// A body whose model has spawned but whose skeleton has not been given its plumbing.
 type NotWiredYet = (With<CharacterBody>, Without<Wired>);
@@ -503,7 +520,14 @@ fn give_bodies(
     for (entity, player) in arrived.iter() {
         commands
             .entity(entity)
-            .insert((Name::from(format!("Remote player {}", player.peer)), Transform::default()))
+            .insert((
+                Name::from(format!("Player {}", player.peer)),
+                Transform::default(),
+                // Without this the body under it is drawn whatever the parent says, and nothing
+                // can hide anybody. It is also what Bevy warns about — B0004, a child with
+                // `InheritedVisibility` under a parent without it — which is how this was found.
+                Visibility::default(),
+            ))
             .with_child((
                 Name::from("Body"),
                 CharacterBody,
@@ -546,6 +570,54 @@ fn stay_where_the_simulation_put_them(mut hips: Query<(&Planted, &mut Transform)
     for (rest, mut pose) in hips.iter_mut() {
         pose.translation.x = rest.0.x;
         pose.translation.z = rest.0.y;
+    }
+}
+
+/// PostUpdate: puts a driver's body in the driver's seat.
+///
+/// Overriding what `remote_players::place_bodies` wrote, and reading the vehicle rather than the
+/// player. `PlayerState::position` for a driver is deliberately on the vehicle's centreline —
+/// that is where a shot leaves from and where the camera stands — so a body drawn there stands in
+/// the middle of the bonnet, which is exactly what it did.
+///
+/// The rotation comes from the vehicle too, not from the aim. A driver's body turns with the car;
+/// only their head turns with their eyes, and the head does not turn yet.
+///
+/// PostUpdate for the same reason `vehicle::sit_in_the_seat` is there: interpolation moves a
+/// vehicle at frame rate, so reading it here follows it smoothly, where the same read one schedule
+/// earlier would quantise the body to the tick rate.
+fn sit_the_drivers_down(
+    vehicles: Query<(&Position, &Rotation, &Driven)>,
+    mut drivers: Query<(&Player, &mut Transform), (With<PlayerState>, With<Driving>)>,
+) {
+    for (who, mut pose) in drivers.iter_mut() {
+        let Some((position, rotation, _)) =
+            vehicles.iter().find(|(.., driven)| driven.0 == who.peer)
+        else {
+            continue;
+        };
+        pose.translation = position.0 + rotation.0 * crate::vehicle::DRIVER_SEAT;
+        pose.rotation = rotation.0;
+    }
+}
+
+/// Update: our own body is drawn only when we are in a seat.
+///
+/// On foot the camera is inside it and it would fill the screen. Driving, the camera is seven
+/// metres behind the vehicle and the driver's seat is in shot, so leaving it empty is the thing
+/// that looks wrong.
+///
+/// Only ours. Everybody else's body is always drawn, which is a change: a seated player used to be
+/// hidden altogether, on the grounds that they were inside the bodywork. They were not — they were
+/// standing on it, because the position that is right for a camera is not a place to put a body.
+fn only_show_ourselves_in_the_seat(
+    mut ours: Query<(&mut Visibility, Has<Driving>), (With<PlayerState>, With<Predicted>)>,
+) {
+    for (mut visibility, driving) in ours.iter_mut() {
+        let wanted = if driving { Visibility::Inherited } else { Visibility::Hidden };
+        if *visibility != wanted {
+            *visibility = wanted;
+        }
     }
 }
 
@@ -743,14 +815,14 @@ fn walk_the_bones(
 fn choose_the_motion(
     moves: Res<Moves>,
     assets: Res<CharacterAssets>,
-    bodies: Query<(&PlayerState, &Aim)>,
+    bodies: Query<(&PlayerState, &Aim, Has<Driving>)>,
     mut skeletons: Query<(&Animates, &mut AnimationPlayer, &mut AnimationTransitions)>,
 ) {
     for (owner, mut player, mut transitions) in skeletons.iter_mut() {
-        let Ok((state, aim)) = bodies.get(owner.0) else {
+        let Ok((state, aim, driving)) = bodies.get(owner.0) else {
             continue;
         };
-        let (wanted, rate) = what_they_are_doing(assets.kit, state, aim.yaw);
+        let (wanted, rate) = what_they_are_doing(assets.kit, state, aim.yaw, driving);
         let Some(node) = moves.node(wanted) else {
             continue;
         };
@@ -768,10 +840,12 @@ fn choose_the_motion(
 /// Horizontal speed only: falling is not walking, and a player dropping off a ledge at 12 m/s
 /// should not have their legs sprint. Being off the ground wins over everything else, because a
 /// crouch clip played in mid-air is a person sitting in the sky.
-fn what_they_are_doing(kit: &Kit, state: &PlayerState, yaw: f32) -> (Move, f32) {
+fn what_they_are_doing(kit: &Kit, state: &PlayerState, yaw: f32, driving: bool) -> (Move, f32) {
     let travel = state.velocity.with_y(0.0);
     let speed = travel.length();
-    let gait = if !state.on_ground {
+    let gait = if driving {
+        Gait::Seated
+    } else if !state.on_ground {
         Gait::Airborne
     } else if state.crouching {
         if speed < STILL { Gait::CrouchIdle } else { Gait::CrouchWalk }
@@ -880,7 +954,7 @@ mod tests {
                         crouching,
                         ..PlayerState::default()
                     };
-                    let (wanted, rate) = what_they_are_doing(kit, &state, 0.0);
+                    let (wanted, rate) = what_they_are_doing(kit, &state, 0.0, false);
                     assert!(
                         (RATE.0..=RATE.1).contains(&rate),
                         "{:?} at {speed} m/s wants to play at {rate}x",
@@ -904,7 +978,7 @@ mod tests {
             on_ground: false,
             ..PlayerState::default()
         };
-        assert_eq!(what_they_are_doing(&SWAT, &state, 0.0).0.0, Gait::Airborne);
+        assert_eq!(what_they_are_doing(&SWAT, &state, 0.0, false).0.0, Gait::Airborne);
     }
 
     /// Vertical speed must not reach the choice at all — the clearest way to say it is that a
@@ -912,7 +986,7 @@ mod tests {
     #[test]
     fn falling_speed_is_not_walking_speed() {
         let state = walking(Vec3::new(0.0, -20.0, 0.0));
-        assert_eq!(what_they_are_doing(&SWAT, &state, 0.0).0.0, Gait::Idle);
+        assert_eq!(what_they_are_doing(&SWAT, &state, 0.0, false).0.0, Gait::Idle);
     }
 
     /// The two locomotion cycles have to be stretched by as little as possible, and the crossover
@@ -945,13 +1019,13 @@ mod tests {
             ..walking(Vec3::ZERO)
         };
         for state in [running, crouching] {
-            let (_, soldier) = what_they_are_doing(&SWAT, &state, 0.0);
+            let (_, soldier) = what_they_are_doing(&SWAT, &state, 0.0, false);
             assert!(
                 (0.8..=1.4).contains(&soldier),
                 "the soldier is being stretched {soldier}x, which it never used to be",
             );
         }
-        let (_, fallback) = what_they_are_doing(&MANNEQUIN, &crouching, 0.0);
+        let (_, fallback) = what_they_are_doing(&MANNEQUIN, &crouching, 0.0, false);
         assert_eq!(fallback, RATE.1, "the fallback crouch no longer runs into the clamp");
     }
 
@@ -964,6 +1038,16 @@ mod tests {
                 assert!(kit.clip(wanted).is_some(), "{} has no clip for {wanted:?}", kit.body);
             }
         }
+    }
+
+    /// A driver sits, whatever their velocity says. The vehicle carries them at 20 m/s and their
+    /// `PlayerState` velocity is zeroed while seated, but reading the gait from speed alone would
+    /// still be one `carry_driver` away from a player running on the spot in a car seat.
+    #[test]
+    fn a_driver_sits_however_fast_the_car_is_going() {
+        let state = walking(Vec3::new(MAX_SPEED, 0.0, 0.0));
+        assert_eq!(what_they_are_doing(&SWAT, &state, 0.0, true).0.0, Gait::Seated);
+        assert_eq!(what_they_are_doing(&MANNEQUIN, &state, 0.0, true).0.0, Gait::Seated);
     }
 
     /// Exactly one kit carries root motion, and which one is a measurement rather than a

@@ -13,10 +13,12 @@ use bevy::prelude::*;
 use lightyear::prelude::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
-use noob_tube_shared::vehicle::Driving;
 use noob_tube_shared::tuning::NetConfig;
 
 use crate::local_player::CurrentInput;
+
+/// The one replicated entity the server has just told us is ours.
+type JustControlled = (With<client::Remote>, Added<Controlled>);
 
 pub struct RemotePlayersPlugin;
 
@@ -24,7 +26,7 @@ impl Plugin for RemotePlayersPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (claim_own_player, hide_the_seated, place_bodies)
+            (claim_own_player, place_bodies)
                 .chain()
                 // Interpolation writes the smoothed values into `PlayerState` and `Aim` in Update
                 // as well. Without this the bodies would render whatever last frame's sample
@@ -77,30 +79,17 @@ fn report_input_delay(
 /// not done yet. Standing still and looking up, a player's body no longer leans back — which is
 /// right — but neither does anything of theirs move, which is the part still missing.
 ///
-/// Our own player is excluded for the same reason it gets no body: the camera is inside it.
+/// Our own player is in here too now, because it has a body: hidden on foot, drawn in the driver's
+/// seat. A driver's pose is then overridden in `PostUpdate` by
+/// [`character::sit_the_drivers_down`](crate::character), which reads the vehicle rather than the
+/// player — this puts them on the vehicle's centreline, which is right for a camera and wrong for
+/// a body.
 fn place_bodies(
-    mut bodies: Query<(&PlayerState, &Aim, &mut Transform), (With<client::Remote>, Without<Predicted>)>,
+    mut bodies: Query<(&PlayerState, &Aim, &mut Transform), With<client::Remote>>,
 ) {
     for (state, aim, mut transform) in bodies.iter_mut() {
         transform.translation = state.position;
         transform.rotation = Quat::from_rotation_y(aim.yaw);
-    }
-}
-
-/// Update: a player in a vehicle is inside the bodywork, so stop drawing them.
-///
-/// Hidden rather than despawned. They are still a replicated entity with a pose and a hitbox — they
-/// can still be shot, and they come back the moment they get out — and rebuilding the meshes on
-/// every exit would be work done for nothing.
-///
-/// Cheap enough to run every frame: it writes only when the answer changes, so the change detection
-/// downstream stays quiet.
-fn hide_the_seated(mut bodies: Query<(&mut Visibility, Has<Driving>), With<PlayerState>>) {
-    for (mut visibility, driving) in bodies.iter_mut() {
-        let wanted = if driving { Visibility::Hidden } else { Visibility::Inherited };
-        if *visibility != wanted {
-            *visibility = wanted;
-        }
     }
 }
 
@@ -117,7 +106,7 @@ fn hide_the_seated(mut bodies: Query<(&mut Visibility, Has<Driving>), With<Playe
 /// no separate simulation any more — this entity is the simulation — so it starts wherever the
 /// server put it, and there is nothing to adopt.
 fn claim_own_player(
-    mine: Query<(Entity, &Player), (With<client::Remote>, Added<Controlled>)>,
+    mine: Query<(Entity, &Player), JustControlled>,
     mut commands: Commands,
 ) {
     for (entity, player) in mine.iter() {
