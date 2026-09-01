@@ -107,7 +107,7 @@ pub fn decompose(mesh: &Mesh, settings: Settings) -> Vec<Vec<Vector>> {
 }
 
 /// Half the box a vehicle was reckoned to be, from `BUGGY.half_extents`.
-const NOMINAL: Vector = Vector::new(0.9, 0.4, 1.9);
+const NOMINAL: Vector = Vector::new(1.16, 0.516, 2.45);
 
 fn box_at(centre: Vector, half: Vector) -> Vec<Vector> {
     let mut corners = Vec::with_capacity(8);

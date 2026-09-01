@@ -26,9 +26,9 @@ use model::ToChassis;
 ///
 /// Taken from `MODEL_LENGTH` and `BUGGY.half_extents.z` in the game, and checked against them by a
 /// test there rather than trusted here — see `the_shape_was_baked_with_the_map_the_model_gets`.
-const SCALE: f32 = 1.9;
+const SCALE: f32 = 2.45;
 /// Metres the model rises when it becomes a chassis: `MODEL_GROUND * SCALE - BUGGY.ride_height()`.
-const LIFT: f32 = -0.219;
+const LIFT: f32 = -0.283;
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

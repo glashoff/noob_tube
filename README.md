@@ -2068,6 +2068,9 @@ centimetres off the panel. Nobody sees along the ray.
 | solid 256, 48 hulls | 27 | 1.2 cm | 5.3 cm | 23.1 cm | 11 % | 0 % |
 | solid 256, 96, 0.005 | 40 | 0.9 cm | 4.2 cm | 14.7 cm | 6 % | 0 % |
 | **solid 256, 96, 0.002** | **55** | **0.7 cm** | **3.5 cm** | **14.4 cm** | **4 %** | **0 %** |
+
+Every row is at the 3.80 m vehicle it was measured on. The buggy is 4.90 m now, and the same
+bake on it reads 0.9 cm, 4.4 cm, 18.6 cm and 7 % — the same shape scaled by 1.29, not a worse one.
 | solid 256, 96, 0.001 | 69 | 0.6 cm | 3.1 cm | 14.4 cm | 3 % | 0 % |
 | skin 256, 96, 0.002 | 89 | 0.9 cm | 4.7 cm | 18.0 cm | 9 % | 0 % |
 

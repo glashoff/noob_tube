@@ -18,7 +18,7 @@ use avian3d::prelude::{
 };
 use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::props::{self, Bobbing, Density};
-use noob_tube_shared::vehicle::{self, Controls, Driven, Driving, VehicleKind};
+use noob_tube_shared::vehicle::{self, Controls, Driven, Driving, SEATED_FEET, VehicleKind};
 use noob_tube_shared::lag_compensation::HitboxHistory;
 use noob_tube_shared::shooting::{self, Health, ShotFired};
 use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin};
@@ -820,9 +820,7 @@ fn carry_drivers(
         let Ok(mut state) = players.get_mut(driver.0) else {
             continue;
         };
-        // Feet on the floor of the cab rather than at the centre of the body, so the eye ends up
-        // roughly where a head would be.
-        state.position = position.0 + rotation.0 * Vec3::new(0.0, -0.4, 0.0);
+        state.position = position.0 + rotation.0 * SEATED_FEET;
         state.velocity = Vec3::ZERO;
     }
 }

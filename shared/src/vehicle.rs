@@ -120,10 +120,15 @@ pub struct VehicleSpec {
     /// rather than an afternoon with a ruler.
     ///
     /// Fired at from twenty thousand directions and compared against the model's own triangles,
-    /// this stops a shot a median of 0.7 cm from the bodywork against the sixteen boxes' 5.8, and
-    /// 4 % of hits land more than 5 cm clear of a panel against their 54 %. Nothing passes through
-    /// a vehicle it visibly hit any more; 2.9 % of shots used to, because the boxes had to leave
-    /// the roll cage out and this does not.
+    /// this stops a shot a median of 0.9 cm from the bodywork and 4.4 cm at the ninetieth
+    /// percentile, with 7 % of hits more than 5 cm clear of a panel. Nothing passes through a
+    /// vehicle it visibly hit; 2.9 % of shots used to, because the sixteen hand-measured boxes
+    /// this replaces had to leave the roll cage out and this does not.
+    ///
+    /// Those centimetres are on the 4.90 m vehicle. They were 0.7, 3.5 and 4 % when it was 3.80 m
+    /// long, and grew by the same 1.29 everything else did — the shape is no worse, it is the same
+    /// shape on a bigger car. The comparison against the boxes' 5.8 cm and 54 % in the README is
+    /// at that smaller size, which is the only size both were ever measured at.
     pub body: &'static [&'static [[f32; 3]]],
     /// Kilograms. The collider's density is derived from this so that the two cannot disagree.
     pub mass: f32,
@@ -259,35 +264,48 @@ impl VehicleSpec {
 
 /// The buggy.
 ///
-/// 1200 kg on struts stiff enough to settle about 18 cm down, damped to a little under half of
+/// 4.90 m long and 2.32 m wide, which is the size of the vehicle it is a model of rather than a
+/// number picked for feel. It was 3.80 m until a driver was drawn in the seat and looked like
+/// somebody sitting *on* a go-kart: at that size the cab offered 30 cm of bodywork above the seat
+/// against the 78 cm from a seated man's backside to the top of his head. The whole vehicle is
+/// scaled by 1.29, so nothing about how it drives is meant to change — every number below that
+/// carries a unit is scaled with it, and the ones that do not (grip, friction, steering lock, the
+/// righting accelerations) are left alone on purpose.
+///
+/// 2600 kg on struts stiff enough to settle about 24 cm down, damped to a little under half of
 /// critical — enough that landing from a jump compresses visibly and comes back once rather than
-/// wallowing. The mass sits 35 cm below the middle of the body, which is what keeps it on its
+/// wallowing. The mass sits 45 cm below the middle of the body, which is what keeps it on its
 /// wheels through a fast corner.
 pub const BUGGY: VehicleSpec = VehicleSpec {
-    half_extents: Vec3::new(0.9, 0.4, 1.9),
+    half_extents: Vec3::new(1.16, 0.516, 2.45),
     body: crate::vehicle_shape::BUGGY_BODY,
-    mass: 1200.0,
-    centre_of_mass_drop: 0.35,
+    // Mass goes as volume, so 1.29 cubed: 1200 kg became 2576, rounded to a figure that also
+    // reads right for a four-wheel-drive of this size.
+    mass: 2600.0,
+    centre_of_mass_drop: 0.45,
     // Just inside the body, at its underside. Front is −Z, as everywhere else in this game.
     mounts: [
-        Vec3::new(-0.85, -0.4, -1.35),
-        Vec3::new(0.85, -0.4, -1.35),
-        Vec3::new(-0.85, -0.4, 1.35),
-        Vec3::new(0.85, -0.4, 1.35),
+        Vec3::new(-1.096, -0.516, -1.741),
+        Vec3::new(1.096, -0.516, -1.741),
+        Vec3::new(-1.096, -0.516, 1.741),
+        Vec3::new(1.096, -0.516, 1.741),
     ],
-    rest_length: 0.45,
-    wheel_radius: 0.4,
-    wheel_width: 0.3,
-    stiffness: 16_000.0,
-    damping: 2_000.0,
+    rest_length: 0.58,
+    wheel_radius: 0.516,
+    wheel_width: 0.387,
+    // Chosen so the struts settle the same *fraction* of the vehicle as before rather than the
+    // same number of centimetres: mg/4 over 27 kN/m is 23.6 cm, which is 18.3 cm times 1.29.
+    stiffness: 27_000.0,
+    // The same damping ratio the smaller one had, 0.45 of critical: 2 sqrt(k m/4) times that.
+    damping: 3_800.0,
     grip: 16.0,
     rolling_resistance: 0.15,
     // A shade over 1 g of cornering, which is a good road tyre and a generous off-road one.
     friction: 1.2,
-    // 12 kN through 1200 kg is 10 m/s²: nought to twenty in two seconds, which is brisk rather
+    // 26 kN through 2600 kg is 10 m/s²: nought to twenty in two seconds, which is brisk rather
     // than silly. Brakes stronger than the engine, as on anything that has to stop as well as go.
-    drive_force: 12_000.0,
-    brake_force: 20_000.0,
+    drive_force: 26_000.0,
+    brake_force: 43_000.0,
     // About 31 degrees of lock, reached in a fifth of a second.
     max_steer: 0.55,
     steer_rate: 3.0,
@@ -301,6 +319,17 @@ pub const BUGGY: VehicleSpec = VehicleSpec {
     // Six tenths of a g. Enough to make the roll cheap, not enough to leave the ground.
     righting_lift: 6.0,
 };
+
+/// Where a seated player's own `PlayerState` sits, relative to the chassis.
+///
+/// Feet on the floor of the cab rather than at the centre of the body, so the eye ends up roughly
+/// where a head would be. On the centreline on purpose: this is where a shot leaves from and where
+/// the camera stands, and putting *those* off to one side would give the driver a view out of the
+/// passenger's ear. Where the body is *drawn* is a different point — `DRIVER_SEAT` in the client.
+///
+/// Shared because the client predicts it and the server decides it, and the two carried their own
+/// copy of the number until the vehicle changed size and both had to move by the same 1.29.
+pub const SEATED_FEET: Vec3 = Vec3::new(0.0, -0.516, 0.0);
 
 /// On a player: they are in a vehicle rather than on their feet.
 ///
@@ -712,8 +741,18 @@ mod tests {
             spec.half_extents.z * 2.0,
         );
         // And it has to straddle the chassis origin rather than sit above or in front of it.
+        //
+        // Against the nominal box rather than against metres, all of it. These were absolute
+        // figures until the buggy was scaled up by 1.29 and a shape that had moved exactly as
+        // intended failed the test — which is a test measuring the wrong thing, not a shape that
+        // had gone wrong. What is being asserted is a *proportion*: where the sill sits relative
+        // to the box the vehicle is reckoned to be.
+        let half = spec.half_extents;
         assert!(
-            low.z < -1.5 && high.z > 1.5 && low.x < -0.5 && high.x > 0.5,
+            low.z < -half.z * 0.79
+                && high.z > half.z * 0.79
+                && low.x < -half.x * 0.55
+                && high.x > half.x * 0.55,
             "the body runs x {:.2}..{:.2}, z {:.2}..{:.2}, which is not centred on the chassis",
             low.x,
             high.x,
@@ -723,10 +762,13 @@ mod tests {
         // The lift is what puts the underside just under the nominal box and the cage well above
         // it. A sign error in it would show up here as a body that floats or is buried.
         assert!(
-            (-0.7..-0.3).contains(&low.y),
-            "the underside is at y {low:?}, which is not where a sill is",
+            (-half.y * 1.5..-half.y).contains(&low.y),
+            "the underside is at y {low:?}, which is not where a sill is under a box {half:?}",
         );
-        assert!(high.y > 0.5, "nothing reaches above y {high:?}, so the roll cage is missing");
+        assert!(
+            high.y > half.y,
+            "nothing reaches above y {high:?}, so the roll cage is missing",
+        );
     }
 
     /// The shape has to weigh what the spec says, or the density is a number that means nothing.

@@ -32,7 +32,8 @@ use noob_tube_shared::shooting;
 use noob_tube_shared::tuning::NetConfig;
 use crate::local_player::LocalPlayer;
 use noob_tube_shared::vehicle::{
-    self, Controls, Driven, Driving, FRONT_WHEELS, Righting, VehicleKind, WHEELS, Wheels,
+    self, Controls, Driven, Driving, FRONT_WHEELS, Righting, SEATED_FEET, VehicleKind, WHEELS,
+    Wheels,
     probe_wheels,
 };
 
@@ -111,16 +112,16 @@ const GUN_DEPRESSION: f32 = 0.52;
 /// Where the driver sits, in chassis space: the point their feet go.
 ///
 /// Measured off the model rather than eyeballed. The steering wheel's own node sits at
-/// (−0.402, 0.035, −0.332) once the model→chassis map is applied, which puts the driver on the
+/// (−0.519, 0.045, −0.428) once the model→chassis map is applied, which puts the driver on the
 /// vehicle's **left** — forward is −Z and up is +Y, so +X is the right-hand side. The seat itself
 /// is a little behind the wheel, at the `Interior` node's z, and the feet go on the floor of the
 /// cab at the same height everything else about a driver uses.
 ///
-/// Distinct from the (0, −0.4, 0) that [`carry_driver`] writes into `PlayerState`. That one is
+/// Distinct from [`SEATED_FEET`], which [`carry_driver`] writes into `PlayerState`. That one is
 /// deliberately on the centreline: it is where a shot leaves from and where the camera stands, and
 /// putting *those* off to one side would give the driver a view out of the passenger's ear. This
 /// is only where the body is drawn.
-pub(crate) const DRIVER_SEAT: Vec3 = Vec3::new(-0.40, -0.40, -0.03);
+pub(crate) const DRIVER_SEAT: Vec3 = Vec3::new(-0.516, -0.516, -0.039);
 
 /// The top of the cross-beam behind the seats, in the vehicle model's own units.
 ///
@@ -598,7 +599,7 @@ fn carry_driver(
     else {
         return;
     };
-    state.position = position.0 + rotation.0 * Vec3::new(0.0, -0.4, 0.0);
+    state.position = position.0 + rotation.0 * SEATED_FEET;
     state.velocity = Vec3::ZERO;
 }
 
@@ -967,7 +968,7 @@ pub(crate) fn sit_in_the_seat(
     else {
         return;
     };
-    state.position = position.0 + rotation.0 * Vec3::new(0.0, -0.4, 0.0);
+    state.position = position.0 + rotation.0 * SEATED_FEET;
     state.velocity = Vec3::ZERO;
 }
 
