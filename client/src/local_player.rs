@@ -21,6 +21,7 @@ use lightyear::prelude::{
 };
 use noob_tube_shared::player::{Player, PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::vehicle::{Driven, Driving};
+use noob_tube_shared::terrain::Ground;
 use noob_tube_shared::simulation;
 use noob_tube_shared::types::Authored;
 
@@ -111,7 +112,13 @@ impl Plugin for LocalPlayerPlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    simulation::step_players::<With<Predicted>>,
+                    // Not until there is ground to walk on. The map arrives from the server on its
+                    // own reliable channel and is half a megabyte, so it can easily land *after*
+                    // the player entity does; walking before it has would be a second of falling
+                    // through an empty world, corrected by replication the moment it stopped. The
+                    // other two need no ground: a head turns and a tick counts either way.
+                    simulation::step_players::<With<Predicted>>
+                        .run_if(resource_exists::<Ground>),
                     simulation::look_around::<With<Predicted>>,
                     count_ticks,
                 ),

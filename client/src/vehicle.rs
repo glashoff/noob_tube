@@ -29,6 +29,7 @@ use lightyear::prelude::{Predicted, client};
 use noob_tube_shared::physics::Layer;
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
 use noob_tube_shared::shooting;
+use noob_tube_shared::terrain::Ground;
 use noob_tube_shared::tuning::NetConfig;
 use crate::local_player::LocalPlayer;
 use noob_tube_shared::vehicle::{
@@ -212,7 +213,10 @@ impl Plugin for VehiclePlugin {
                     vehicle::drive_vehicles::<With<Predicted>>,
                     vehicle::right_flipped_vehicles::<With<Predicted>>,
                 )
-                    .chain(),
+                    .chain()
+                    // For the same reason the walking step waits: a predicted vehicle with no
+                    // ground under it finds no wheels and falls. See `local_player`.
+                    .run_if(resource_exists::<Ground>),
             )
             // Explicitly after the solver, because Avian runs in this schedule too. Without the
             // ordering the two are ambiguous and the driver is placed at the vehicle's pose from

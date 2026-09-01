@@ -489,6 +489,52 @@ impl Terrain {
     }
 }
 
+/// The map this world is played on.
+///
+/// A resource rather than a component: there is one authoritative height field and no timeline on
+/// which a second version of it means anything, which is also why it does not travel through
+/// component replication — see [`TerrainBaseline`] and terrain.md §3.
+///
+/// The server has one from the moment it starts. **A client does not**, and its absence is the
+/// whole of "the map has not arrived yet": every system that needs ground is gated on this
+/// existing, which is cheaper and harder to get wrong than a flag saying the same thing. A client
+/// must never load the map itself — once terrain is editable the file on disk is the *last saved*
+/// state, so a client that read it would walk on different ground from everyone else for as long
+/// as anybody held an unsaved edit.
+#[derive(Resource, Clone, Debug)]
+pub struct Ground(pub Terrain);
+
+/// The whole map, on its way to a client that has just joined.
+///
+/// Half a megabyte on the default map, which is why it has a reliable channel of its own rather
+/// than a place in the replication stream: a baseline must never delay a position update, and a
+/// position update must never delay a baseline into next round.
+///
+/// The heights travel as [`Terrain::encode`] writes them rather than as `Vec<u16>`, so the wire
+/// format and the file format are one definition and cannot drift apart.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct TerrainBaseline {
+    pub grid: Grid,
+    pub water_y: Option<f32>,
+    pub heights: Vec<u8>,
+}
+
+impl TerrainBaseline {
+    /// What the server sends.
+    pub fn of(terrain: &Terrain) -> Self {
+        Self { grid: terrain.grid, water_y: terrain.water_y, heights: terrain.encode() }
+    }
+
+    /// What the client makes of it, and the place a hostile or broken baseline is refused.
+    ///
+    /// Goes through [`Terrain::decode`], so the caps and the blob-length check that guard a map
+    /// read off disk guard one read off the wire as well. That matters more here, not less: this
+    /// arrives from another machine.
+    pub fn adopt(&self) -> Result<Terrain, MapFault> {
+        Terrain::decode(self.grid, self.water_y, &self.heights)
+    }
+}
+
 /// The readable half of a map: everything that is not a height.
 ///
 /// JSON through `serde`, and every added field defaulted, because this is the part that changes
@@ -723,6 +769,37 @@ mod tests {
     /// scanned from `fn default_terrain` to the next occurrence of the same string, which happened
     /// to end where the function does — a boundary that held by accident and would have moved
     /// silently the day somebody wrote that name a third time.
+    /// What the server sends is what the client gets, heights and lattice alike.
+    ///
+    /// The whole of step five rests on this: a client is forbidden to read the map for itself, so
+    /// the only copy it will ever have is the one that came out of here.
+    #[test]
+    fn a_baseline_is_the_map_it_came_from() {
+        let sent = default_terrain();
+        let arrived = TerrainBaseline::of(&sent).adopt().expect("a map this build reads");
+        assert_eq!(arrived, sent, "the map changed on the way over");
+    }
+
+    /// And a baseline that does not add up is refused rather than trusted.
+    ///
+    /// It arrives from another machine, which is the reason this matters more here than it does
+    /// for a file: a grid claiming four million samples is an allocation a client should not make
+    /// because somebody asked it to.
+    #[test]
+    fn a_baseline_that_does_not_add_up_is_refused() {
+        let mut short = TerrainBaseline::of(&default_terrain());
+        short.heights.truncate(short.heights.len() - 2);
+        assert!(matches!(short.adopt(), Err(MapFault::BlobSize { .. })), "a short map was adopted");
+
+        let mut vast = TerrainBaseline::of(&default_terrain());
+        vast.grid.nx = MAX_SAMPLES_PER_AXIS + 1;
+        assert!(matches!(vast.adopt(), Err(MapFault::TooLongAnAxis)), "an oversized map was adopted");
+
+        let mut fine = TerrainBaseline::of(&default_terrain());
+        fine.grid.spacing = MIN_SPACING / 2.0;
+        assert!(matches!(fine.adopt(), Err(MapFault::Spacing)), "a map below the spacing cap was adopted");
+    }
+
     /// A hill you slide off is scenery, and a ravine you walk out of is a ditch. The limit that
     /// decides which is which is [`WALKABLE_NORMAL_Y`], and the map has to fall on both sides of it
     /// deliberately rather than by luck — every hill climbable, every ravine wall not.

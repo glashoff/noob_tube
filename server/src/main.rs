@@ -21,7 +21,8 @@ use noob_tube_shared::props::{self, Bobbing, Density};
 use noob_tube_shared::vehicle::{self, Controls, Driven, Driving, SEATED_FEET, VehicleKind};
 use noob_tube_shared::lag_compensation::HitboxHistory;
 use noob_tube_shared::shooting::{self, Health, ShotFired};
-use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin};
+use noob_tube_shared::terrain::{self, Ground, TerrainBaseline};
+use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin, TerrainChannel};
 use noob_tube_shared::types::Authored;
 use noob_tube_shared::PLACEHOLDER_PRIVATE_KEY;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -46,6 +47,10 @@ fn main() {
         // interpolation then has nothing to interpolate across — see `SEND_RATE`.
         .insert_resource(ReplicationMetadata::new(net.send_interval()))
         .insert_resource(net)
+        // The map. The server owns it — it is the authority, and until step six of terrain.md
+        // there is one map and it is the built-in one. Every client is sent a copy of exactly
+        // this on join; none of them may read one for itself.
+        .insert_resource(Ground(terrain::default_terrain()))
         .add_plugins(PhysicsPlugin)
         // The same geometry the client collides against, built from the same numbers. If the two
         // disagreed, every step near the difference would produce a correction the player sees.
@@ -58,6 +63,13 @@ fn main() {
                 spawn_props,
                 spawn_vehicles,
             ),
+        )
+        // The ground, whenever the map appears or changes. PreUpdate rather than Startup so that
+        // the server and a client build it through the same path — see `level::build_the_ground`,
+        // which is where the reason it cannot be Startup on a client is written down.
+        .add_systems(
+            PreUpdate,
+            level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
         )
         .add_systems(
             FixedUpdate,
@@ -110,6 +122,7 @@ fn main() {
         .init_resource::<PendingShots>()
         .add_observer(on_client_connected)
         .add_observer(on_peer_connected)
+        .add_observer(send_the_map)
         .add_observer(on_player_gone)
         .add_plugins(remote_inspection())
         .run();
@@ -1016,6 +1029,37 @@ fn on_peer_connected(
         },
     ));
     info!("player spawned for peer {peer}");
+}
+
+/// Fires with [`on_peer_connected`], and sends the new peer the map.
+///
+/// Its own observer rather than four more arguments on that one, because it is its own act: one
+/// puts a player in the world, the other hands over the world. They will part company entirely in
+/// step six, when the map can change without anybody joining.
+///
+/// Sent on `Connected` rather than on `LinkOf`, for the same reason the player is spawned there:
+/// only now is there a peer to send to. Reliable and ordered, so it arrives whole and arrives
+/// before any edit of it; on its own channel, so half a megabyte of map can delay nothing — see
+/// [`TerrainChannel`].
+fn send_the_map(
+    trigger: On<Add, Connected>,
+    peers: Query<&RemoteId>,
+    ground: Res<Ground>,
+    mut sender: ServerMultiMessageSender,
+    server: Single<&Server>,
+) {
+    let Ok(remote) = peers.get(trigger.entity) else {
+        return;
+    };
+    let baseline = TerrainBaseline::of(&ground.0);
+    let bytes = baseline.heights.len();
+    if let Err(error) =
+        sender.send::<_, TerrainChannel>(&baseline, *server, &NetworkTarget::Single(remote.0))
+    {
+        error!("could not send the map to {:?}: {error}", remote.0);
+        return;
+    }
+    info!("map sent to {:?}: {bytes} bytes of heights", remote.0);
 }
 
 

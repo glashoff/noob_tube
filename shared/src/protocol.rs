@@ -19,6 +19,7 @@ use crate::player::{Aim, Player, PlayerInput, PlayerState};
 use crate::props::{Density, Prop};
 use crate::vehicle::{Controls, Driven, Driving, VehicleKind};
 use crate::shooting::{Health, ShotFired};
+use crate::terrain::TerrainBaseline;
 use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
 
@@ -110,6 +111,22 @@ impl Plugin for ProtocolPlugin {
         app.register_message::<ShotFired>()
             .add_direction(NetworkDirection::ServerToClient);
 
+        // The map, on its own reliable channel, and this is the one piece of the world that does
+        // not travel as components. Terrain is resource-shaped: there is one authoritative height
+        // field, no timeline on which a second version of it means anything, and half a megabyte of
+        // it — which has no business going through a path that diffs components tick by tick.
+        //
+        // Ordered because edits will not commute: raise-then-smooth and smooth-then-raise are
+        // different terrains, and the baseline has to be the first thing on the channel. Reliable
+        // because a client that missed it has no ground at all.
+        app.add_channel::<TerrainChannel>(ChannelSettings {
+            mode: ChannelMode::OrderedReliable(ReliableSettings::default()),
+            ..default()
+        })
+        .add_direction(NetworkDirection::ServerToClient);
+        app.register_message::<TerrainBaseline>()
+            .add_direction(NetworkDirection::ServerToClient);
+
         // Physics bodies, last: this registers `Position`, `Rotation`, `LinearVelocity` and
         // `AngularVelocity` for replication, prediction and interpolation, and it needs the
         // component registry the calls above create. `Position` is the authority and the visual
@@ -121,6 +138,15 @@ impl Plugin for ProtocolPlugin {
         app.add_plugins(LightyearAvianPlugin::default());
     }
 }
+
+/// The channel the map travels on.
+///
+/// Its own, and not merely for tidiness: a baseline is half a megabyte and several hundred packets,
+/// so sharing a channel with anything time-critical would mean one of them waiting for the other.
+/// Here neither can delay the other, and under bandwidth pressure the map is the thing that may
+/// take longer rather than the thing that gets dropped — it is reliable, and the round cannot start
+/// without it.
+pub struct TerrainChannel;
 
 /// The channel everything cosmetic travels on.
 ///

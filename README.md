@@ -2431,6 +2431,86 @@ code runs in `Update`, after that restore and before either of them.
 
 ---
 
+### M5 — Terrain
+
+The 500 m ground plane is gone. The ground is a **height field** — one height per sample on a
+regular grid — that the server owns, that clients are sent, and that will later be sculpted from
+inside the running game. The design it implements is `terrain.md`; what follows is what got built
+and what it cost, in the order it was found.
+
+#### The two traps, and why they had to be measured
+
+Both are silent, and both were settled against the installed crate rather than against anybody's
+documentation.
+
+**Which index is which axis.** Avian's own doc comment says the number of rows is the subdivisions
+along X. Underneath, parry's `Array2` is *column-major* — `flat_index(i, j) = i + j * nrows` — while
+Avian flattens the nested `Vec<Vec<f32>>` row-major, and parry's accessors read `j` as x and `i` as
+z. Get it wrong and the terrain is transposed about its diagonal with no error of any kind: a ramp
+authored along +X comes out running along +Z. Avian's wrapper is only correct for square grids,
+which is why the test grid is 5×3 and asymmetric — a square probe cannot catch a transpose.
+
+**Centring.** A parry height field is centred on its own origin, so the body belongs at the field's
+*centre*, not at the min corner.
+
+What did *not* have to change is everything downstream: `Level`'s rays and sweeps already went
+through Avian, so ground probing, sliding, crouch clearance and hit detection work against a height
+field without a line of change. That was the plan's own test of itself, and it passed.
+
+#### Drawing it cost two thirds of the frame rate, and the first two suspects were wrong
+
+Drawing the ground at all took 62 frames a second to 22. Tiling it into 64 pieces changed nothing —
+from ground level you can see most of a 512 m map, so there is nothing to cull — and turning off
+the sun's shadows changed nothing either. It is triangle *density*: half a million triangles on
+screen are about two pixels each, and a GPU shades in 2×2 quads, so sub-pixel triangles cost four
+times what they cover.
+
+| samples drawn | triangles | fps |
+|---|---|---|
+| every one | 524 288 | 22.0 |
+| **every second** | 131 072 | **45.1** |
+| every fourth | 32 768 | 46.8 |
+
+So the picture skips every other sample and the collider keeps them all. That is ordinary level of
+detail rather than the mismatch it replaced — a plane the size of the terrain was a *different
+shape*; this is the same shape at fewer points. It is not free, and the number is written down
+where it can be seen: on the sharpest lip of a ravine the drawn ground is 62 cm from the ground
+underfoot, and centimetres everywhere gentler. The fix when it comes is level of detail by distance,
+not a finer mesh everywhere — that is exactly what cost the frame rate.
+
+#### The wire: the server owns the map, and a client is never allowed to read one
+
+A joining client is sent the whole height field on a reliable ordered channel of its own, and the
+**absence** of that map is what "not ready" means — there is no flag, the resource simply is not
+there, and every system that needs ground is gated on it.
+
+A client must never load the map itself, and the reason arrives with sculpting rather than now:
+once terrain is editable the file on disk is the *last saved* state, so a client that read it would
+collide against different ground from everyone else for as long as anybody held an unsaved edit.
+
+It does not travel as a component, which is the one place the obvious Bevy answer is the wrong one.
+Terrain is resource-shaped: there is one authoritative field, no timeline on which a second version
+of it means anything, and half a megabyte of it — 526 338 bytes for 513² samples — which has no
+business going through a path that diffs components tick by tick.
+
+Measured against the configured link, which is a deliberately unkind one at 40 ms of ping and 2 %
+loss: the map lands **1.0 to 1.2 seconds** after the connection does. That is long enough to matter,
+and it is why the walking step and the vehicle step both wait for it — the player entity can easily
+arrive first, and walking before the ground has would be a second of falling through an empty world.
+
+One thing worth knowing before it is mistaken for a bug. Lightyear hands the whole fragmented
+message to the transport at once, and netcode's replay protection is a 256-packet window; a burst of
+some four hundred fragments plus jitter therefore pushes packets out the back of that window, which
+is logged, once per packet, as `sequence ... already received`. Between 0 and 80 packets per join in
+the runs above. It is not lost data — the channel is reliable and resends — but it is wasted
+bandwidth and alarming log noise, and a bigger map makes it worse rather than better.
+
+#### Still to come
+
+Steps 6 to 11 of the plan: maps that can be made, loaded and saved; sculpting; placement;
+undo; water; and texturing derived from slope and height rather than painted. The rendering step is
+half done — the shape is visible, and `ExtendedMaterial` with layers chosen by slope is not.
+
 ## Risks
 
 **Bone path matching — settled.** Bevy binds animations by bone *path*, and a clip library that

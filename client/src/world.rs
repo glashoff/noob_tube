@@ -1,11 +1,15 @@
-//! What the level looks like.
+//! The level, as this client has it: the map it was sent, and what all of it looks like.
 //!
-//! Where it *is* lives in `noob_tube_shared::level`, so the server collides against the same
-//! numbers. This module only turns them into meshes.
+//! Where the built geometry *is* lives in `noob_tube_shared::level`, so the server collides against
+//! the same numbers, and this module only turns those into meshes. The ground is the exception and
+//! the reason this module is not simply "what the level looks like": it is not a constant either
+//! side can build, it is a map the server owns and sends, and until it arrives this client has no
+//! ground at all — see [`adopt_the_map`].
 
 use bevy::prelude::*;
+use lightyear::prelude::{MessageReceiver, MessageSystems};
 use noob_tube_shared::level::{self, CRATES, CRATE_HALF_EXTENT, RAMP_HALF_EXTENTS};
-use noob_tube_shared::terrain::{self, Terrain};
+use noob_tube_shared::terrain::{Ground, Terrain, TerrainBaseline};
 use noob_tube_shared::types::Authored;
 
 pub struct WorldPlugin;
@@ -13,7 +17,23 @@ pub struct WorldPlugin;
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<LevelRoot>()
-            .add_systems(Startup, (spawn_ground, level::spawn_level));
+            .add_systems(Startup, (spawn_ground, level::spawn_level))
+            // After lightyear has put what arrived into the receivers, and before `FixedMain`
+            // runs — both halves matter. Ordering it before `MessageSystems::Receive` reads an
+            // inbox that is always empty, which lightyear then says out loud once a second:
+            // "Unhandled messages ... Clearing to avoid accumulating messages". And building the
+            // collider in `Update` instead would be a tick of physics late, because `FixedMain`
+            // runs first inside a frame.
+            .add_systems(
+                PreUpdate,
+                (adopt_the_map, level::build_the_ground.run_if(resource_exists_and_changed::<Ground>))
+                    .chain()
+                    .after(MessageSystems::Receive),
+            )
+            .add_systems(
+                Update,
+                dress_the_ground.run_if(resource_exists_and_changed::<Ground>),
+            );
     }
 }
 
@@ -120,6 +140,85 @@ fn ground_mesh(terrain: &Terrain, ix0: u32, iz0: u32, cells_x: u32, cells_z: u32
 #[reflect(Component)]
 pub struct LevelRoot;
 
+/// PreUpdate: takes the map the server sent and makes it this client's ground.
+///
+/// The absence of [`Ground`] is what "no map yet" means, so this inserting it is the whole of the
+/// handover: the collider system and the mesh system both watch that resource and neither knows
+/// where it came from. That is what will let step six swap maps mid-round without either of them
+/// changing.
+///
+/// A baseline that does not decode is refused and logged rather than trusted. It arrived from
+/// another machine, and [`TerrainBaseline::adopt`] puts it through the same caps a map read off
+/// disk faces — a grid claiming four million samples is an allocation this client should not make
+/// because somebody asked it to.
+fn adopt_the_map(mut inbox: Query<&mut MessageReceiver<TerrainBaseline>>, mut commands: Commands) {
+    for mut receiver in inbox.iter_mut() {
+        for baseline in receiver.receive() {
+            match baseline.adopt() {
+                Ok(terrain) => {
+                    info!(
+                        "map received: {}x{} samples at {} m",
+                        terrain.grid.nx, terrain.grid.nz, terrain.grid.spacing,
+                    );
+                    commands.insert_resource(Ground(terrain));
+                }
+                Err(fault) => error!("the map the server sent is not one this build reads: {fault}"),
+            }
+        }
+    }
+}
+
+/// Update: the ground, as something to look at, in tiles.
+///
+/// Tiling is not tidiness. As one mesh the ground is half a million triangles with no way to leave
+/// any of them out, and it costs the whole map whichever way you are facing: measured, 51 frames a
+/// second became 20. A tile has an AABB, so the ones behind you are culled before they reach the
+/// GPU. It is also the unit §6 of the plan wants for editing — a stroke dirties a tile and that
+/// tile alone rebuilds.
+///
+/// Everything it built last time comes down first, because this runs again whenever the map
+/// changes and a second map on top of the first is two grounds.
+fn dress_the_ground(
+    ground: Res<Ground>,
+    root: Single<Entity, With<LevelRoot>>,
+    old: Query<Entity, With<GroundTile>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for tile in old.iter() {
+        commands.entity(tile).despawn();
+    }
+
+    let terrain = &ground.0;
+    let material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.30, 0.33, 0.30),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let cells_x = terrain.grid.nx - 1;
+    let cells_z = terrain.grid.nz - 1;
+    for iz in (0..cells_z).step_by(MESH_TILE as usize) {
+        for ix in (0..cells_x).step_by(MESH_TILE as usize) {
+            let wide = MESH_TILE.min(cells_x - ix);
+            let deep = MESH_TILE.min(cells_z - iz);
+            commands.spawn((
+                Name::from(format!("Ground {ix},{iz}")),
+                Authored,
+                GroundTile,
+                Mesh3d(meshes.add(ground_mesh(terrain, ix, iz, wide, deep))),
+                MeshMaterial3d(material.clone()),
+                Transform::IDENTITY,
+                ChildOf(*root),
+            ));
+        }
+    }
+}
+
+/// One drawn piece of ground, so the next map can take the last one's tiles down.
+#[derive(Component)]
+struct GroundTile;
+
 /// Builds what the level looks like. What it collides as is
 /// [`level::spawn_level`](noob_tube_shared::level::spawn_level), spawned alongside this.
 ///
@@ -151,36 +250,8 @@ fn spawn_ground(
         ))
         .id();
 
-    // The height field itself, not a plane the size of it. A hill you can walk into and not see is
-    // worse than no hill, and the collider is that shape either way.
-    //
-    // In tiles, and that is not tidiness. As one mesh the ground is half a million triangles with
-    // no way to leave any of them out, and it costs the whole map whichever way you are facing:
-    // measured, 51 frames a second became 20. A tile has an AABB, so the ones behind you are culled
-    // before they reach the GPU. It is also the unit §6 wants for editing — a stroke dirties a tile
-    // and that tile alone rebuilds.
-    let terrain = terrain::default_terrain();
-    let ground = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.30, 0.33, 0.30),
-        perceptual_roughness: 0.95,
-        ..default()
-    });
-    let cells_x = terrain.grid.nx - 1;
-    let cells_z = terrain.grid.nz - 1;
-    for iz in (0..cells_z).step_by(MESH_TILE as usize) {
-        for ix in (0..cells_x).step_by(MESH_TILE as usize) {
-            let wide = MESH_TILE.min(cells_x - ix);
-            let deep = MESH_TILE.min(cells_z - iz);
-            commands.spawn((
-                Name::from(format!("Ground {ix},{iz}")),
-                Authored,
-                Mesh3d(meshes.add(ground_mesh(&terrain, ix, iz, wide, deep))),
-                MeshMaterial3d(ground.clone()),
-                Transform::IDENTITY,
-                ChildOf(level),
-            ));
-        }
-    }
+    // The ground is not here. It is the map, and the map comes from the server — see
+    // `adopt_the_map`, which hangs the tiles under this same root the moment it arrives.
 
     // The ramp. Its pose is derived rather than written down, so that the visible slope and the
     // one a vehicle drives up are the same slope — see `level::ramp_pose`.
@@ -244,7 +315,7 @@ mod tests {
     /// finer mesh everywhere, which is what cost the frame rate in the first place.
     #[test]
     fn the_drawn_ground_stays_near_the_ground_underfoot() {
-        let terrain = terrain::default_terrain();
+        let terrain = noob_tube_shared::terrain::default_terrain();
         let grid = terrain.grid;
         let step = MESH_STRIDE.max(1);
         let mut worst: f32 = 0.0;

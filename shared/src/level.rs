@@ -13,6 +13,7 @@ use avian3d::prelude::Collider;
 use bevy::prelude::*;
 
 use crate::physics::{level_geometry, level_geometry_facing};
+use crate::terrain::Ground;
 
 /// Half-extents of one crate. They are cubes, 2 m on a side.
 pub const CRATE_HALF_EXTENT: f32 = 1.0;
@@ -80,21 +81,46 @@ pub fn spawn_point(index: usize) -> Vec3 {
     Vec3::new(index as f32 * 2.0, 0.0, 0.0)
 }
 
-/// Startup: builds the collision geometry. Identical on both sides, by construction.
+/// The ground's collider, so that a map arriving can take the place of the map before it.
 ///
-/// One entity per shape, each a static rigid body on the level layer. The ground is a triangle mesh
-/// rather than a box because that is what a real level's collision geometry is, and using the shape
-/// we will actually ship keeps the awkward cases — a shape cast against a triangle mesh is accurate
-/// only to a few millimetres — in front of us rather than behind a placeholder.
+/// One entity today. When the field is tiled for editing it becomes one per tile, and the marker is
+/// what lets a stroke rebuild the tiles it touched and leave the rest alone.
+#[derive(Component)]
+pub struct GroundCollider;
+
+/// PreUpdate: builds the ground the current map describes, and takes down whatever was there.
+///
+/// Run whenever [`Ground`] appears or changes, rather than at startup, because on a client it does
+/// not exist at startup — the map arrives from the server over its own channel (terrain.md §3), and
+/// until it has, this client has no ground and knows it.
+///
+/// PreUpdate rather than Update: `FixedMain` runs before `Update` inside a frame, so a collider
+/// built in `Update` would be one tick of physics late, and the first tick of that frame would find
+/// no ground at all.
+///
+/// The point of it being this short is that nothing downstream had to change. `level_geometry`
+/// gives it the static body and the level layer that `Level`'s sweeps and rays need, and every
+/// query beyond that goes through Avian.
+pub fn build_the_ground(
+    ground: Res<Ground>,
+    old: Query<Entity, With<GroundCollider>>,
+    mut commands: Commands,
+) {
+    for previous in old.iter() {
+        commands.entity(previous).despawn();
+    }
+    let (collider, at) = ground.0.collider();
+    commands.spawn((GroundCollider, level_geometry(collider, at)));
+}
+
+/// Startup: builds everything that is built rather than grown — the ramp and the crates.
+///
+/// One entity per shape, each a static rigid body on the level layer. Identical on both sides, by
+/// construction: these are constants, and both binaries read the same ones.
+///
+/// The ground is deliberately not here. It is the map, which the server owns and sends — see
+/// [`build_the_ground`].
 pub fn spawn_level(mut commands: Commands) {
-    // The ground is a height field now, and the point of this line being one line is that nothing
-    // else here had to change: `level_geometry` already gives it the static body and the level
-    // layer that `Level`'s sweeps and rays need, and every query downstream goes through Avian.
-    //
-    // Hills and ravines, but held flat over everything below, which is the same plane the trimesh
-    // it replaces was.
-    let (ground, at) = crate::terrain::default_terrain().collider();
-    commands.spawn(level_geometry(ground, at));
     let (at, facing) = ramp_pose();
     commands.spawn(level_geometry_facing(
         Collider::cuboid(
@@ -125,16 +151,22 @@ mod tests {
     use crate::movement::WALKABLE_NORMAL_Y;
     use crate::physics::test_support::{ask, bare_app};
 
-    /// The level a round is actually played on, built by the system that builds it for real.
+    /// The level a round is actually played on, built by the systems that build it for real.
     ///
-    /// `spawn_level` is run directly rather than added to `Startup`: the harness hands back an app
-    /// that has already started, so a system added afterwards never runs and every probe would
-    /// come back empty — which is a test that passes for the wrong reason on the day the ground
-    /// disappears.
+    /// Both of them, and that is the point: the built geometry is a constant either side can spawn,
+    /// and the ground is a map that has to be *given* to the world first. A test that only ran
+    /// `spawn_level` would be testing a world with no ground in it, which is exactly what a client
+    /// has before the server's map arrives.
+    ///
+    /// They are run directly rather than added to `Startup`: the harness hands back an app that has
+    /// already started, so a system added afterwards never runs and every probe would come back
+    /// empty — a test that passes for the wrong reason on the day the ground disappears.
     fn played_level() -> App {
         use bevy::ecs::system::RunSystemOnce;
         let mut app = bare_app();
+        app.insert_resource(crate::terrain::Ground(crate::terrain::default_terrain()));
         app.world_mut().run_system_once(spawn_level).expect("the level spawns");
+        app.world_mut().run_system_once(build_the_ground).expect("the ground is built");
         app.update();
         app
     }
@@ -191,6 +223,26 @@ mod tests {
             let want = centre.y + CRATE_HALF_EXTENT;
             assert!((top - want).abs() < 0.01, "a crate top is at {top:.2}, not {want:.2}");
         }
+    }
+
+    /// A map arriving takes the place of the map before it, rather than joining it.
+    ///
+    /// Two grounds is worse than none: the rays would find whichever was higher and players would
+    /// stand on a surface nobody can see. This is the property step six needs — load a map
+    /// mid-round and the old one goes — and it is one line of the system, so it is worth a test
+    /// before there is a second map to find it with.
+    #[test]
+    fn a_second_map_replaces_the_first() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = played_level();
+        app.world_mut().run_system_once(build_the_ground).expect("the ground is rebuilt");
+        app.update();
+        let grounds = app
+            .world_mut()
+            .query_filtered::<Entity, With<GroundCollider>>()
+            .iter(app.world())
+            .count();
+        assert_eq!(grounds, 1, "{grounds} grounds after building it twice");
     }
 
     /// A hillside of the real map is ground a player stands on, and it faces the way it looks.
