@@ -182,12 +182,12 @@ pub struct VehicleSpec {
     /// tapers to nothing, which is what a gearbox and drag do in a real vehicle and what stops a
     /// constant force from accelerating for ever.
     pub top_speed: f32,
-    /// Seconds a vehicle lies past [`FLIPPED_COSINE`] before it is helped back on to its wheels.
+    /// Seconds the driver has to hold the button before the vehicle is helped back on to its
+    /// wheels.
     ///
-    /// Not zero, and not for politeness: a vehicle in the middle of a barrel roll is past the
-    /// threshold for a fraction of a second on its way to landing on its wheels by itself, and
-    /// righting it then would take the roll away from the driver who earned it.
-    pub righting_delay: f32,
+    /// Long enough that it cannot be an accident — the button is the trigger, and a driver on their
+    /// roof is quite likely to be pulling it — and short enough not to feel like a punishment.
+    pub righting_hold: f32,
     /// Radians per second squared, per radian of lean, once the delay has passed.
     ///
     /// An angular *acceleration* rather than a torque, so the number means the same thing for a
@@ -313,7 +313,7 @@ pub const BUGGY: VehicleSpec = VehicleSpec {
     // Long enough to let a roll finish on its own, short enough that a driver on their roof does
     // not reach for the menu. Upside down is pi radians of lean, so the stiffness starts it at
     // about 13 rad/s squared and the damping settles it at around four radians a second.
-    righting_delay: 1.5,
+    righting_hold: 1.0,
     righting_stiffness: 8.0,
     righting_damping: 4.0,
     // Six tenths of a g. Enough to make the roll cheap, not enough to leave the ground.
@@ -391,6 +391,8 @@ pub struct Controls {
     pub steer: f32,
     /// Everything locked, for stopping and for turning without rolling.
     pub handbrake: bool,
+    /// The driver asking to be put back on the wheels. See [`right_flipped_vehicles`].
+    pub righting: bool,
     /// Where the driver is asking the front wheels to point, which is where `steer` is heading.
     ///
     /// The intent rather than the state, and the two are different for up to a fifth of a second at
@@ -405,6 +407,7 @@ impl Controls {
     pub fn apply_input(&mut self, spec: &VehicleSpec, input: &PlayerInput, dt: f32) {
         self.throttle = (input.forward as i32 - input.backward as i32) as f32;
         self.handbrake = input.jump;
+        self.righting = input.righting;
         self.wanted_steer = (input.right as i32 - input.left as i32) as f32 * spec.max_steer;
         self.ease(spec, dt);
     }
@@ -454,8 +457,8 @@ pub struct Wheels(pub [Wheel; WHEELS]);
 /// How long this vehicle has been lying on its side or its roof.
 ///
 /// State, and the only state in the vehicle besides the steering angle. It cannot be derived from
-/// the pose because it is a *duration*, and the whole point of it is that a vehicle mid-roll and a
-/// vehicle stuck on its roof look identical for the first half second.
+/// anything else because it is a *duration*, and the whole point of it is that a button pressed and
+/// a button held look identical on the tick they are pressed.
 ///
 /// Not replicated. A client that predicts a vehicle counts for itself and reaches the same answer
 /// from the same poses, and a client that only interpolates one never asks — it is shown the
@@ -463,8 +466,9 @@ pub struct Wheels(pub [Wheel; WHEELS]);
 #[derive(Component, Clone, Copy, Debug, Default, Reflect)]
 #[reflect(Component)]
 pub struct Righting {
-    /// Seconds past [`FLIPPED_COSINE`], reset to zero the moment it is back within it.
-    pub flipped_for: f32,
+    /// Seconds the driver has been asking for this, while past [`FLIPPED_COSINE`]. Reset to zero
+    /// the moment either stops being true.
+    pub asked_for: f32,
 }
 
 /// Everything a vehicle needs to exist as a physical body.
@@ -690,12 +694,20 @@ pub fn drive_vehicles<F: QueryFilter + 'static>(
     }
 }
 
-/// FixedUpdate: puts a vehicle that has ended up on its roof back on its wheels.
+/// FixedUpdate: puts a vehicle that has ended up on its roof back on its wheels, when the driver
+/// holds the button and asks for it.
 ///
 /// A vehicle on its side is not a hard problem to drive out of, it is an impossible one: the wheels
 /// find no ground, so the whole model — spring, damper, tyre — has nothing to act through, and the
 /// only thing still touching the world is a box that slides. Without this the buggy is lost the
 /// first time somebody takes the ramp badly, and the round has one fewer vehicle in it.
+///
+/// **Asked for, not automatic.** It used to fire on a timer, and once the ground had ravines in it
+/// that was a hand on the wheel nobody wanted: a vehicle on the wall of one is past
+/// [`FLIPPED_COSINE`] for seconds at a time while its driver is doing something deliberate about
+/// it. A driver on their roof knows they are on their roof, and there is nothing else they can be
+/// doing with the button. Nobody in the seat means nobody asking, so an abandoned vehicle stays
+/// where it fell until somebody walks over and gets in.
 ///
 /// The correction is an angular acceleration toward upright with a damper against itself, which is
 /// the same spring-and-damper shape as a strut and behaves the same way: it accelerates hardest
@@ -708,20 +720,21 @@ pub fn drive_vehicles<F: QueryFilter + 'static>(
 /// Which way it points is the driver's business.
 pub fn right_flipped_vehicles<F: QueryFilter + 'static>(
     time: Res<Time<Fixed>>,
-    mut vehicles: Query<(&VehicleKind, &mut Righting, Forces), F>,
+    mut vehicles: Query<(&VehicleKind, &Controls, &mut Righting, Forces), F>,
 ) {
     let dt = time.delta_secs();
 
-    for (kind, mut righting, mut body) in vehicles.iter_mut() {
+    for (kind, controls, mut righting, mut body) in vehicles.iter_mut() {
         let spec = kind.spec();
         let up = body.rotation().0 * Vec3::Y;
 
-        if up.y > FLIPPED_COSINE {
-            righting.flipped_for = 0.0;
+        // Letting go starts the hold again, which is what makes it a hold rather than a tally.
+        if up.y > FLIPPED_COSINE || !controls.righting {
+            righting.asked_for = 0.0;
             continue;
         }
-        righting.flipped_for += dt;
-        if righting.flipped_for < spec.righting_delay {
+        righting.asked_for += dt;
+        if righting.asked_for < spec.righting_hold {
             continue;
         }
 
@@ -951,6 +964,16 @@ mod tests {
         car
     }
 
+    /// Holds the button down on a parked vehicle, which is the driver asking to be stood back up.
+    fn ask_to_be_righted(app: &mut App, car: Entity) {
+        app.world_mut().get_mut::<Controls>(car).expect("controls").righting = true;
+    }
+
+    /// And lets go of it again.
+    fn stop_asking(app: &mut App, car: Entity) {
+        app.world_mut().get_mut::<Controls>(car).expect("controls").righting = false;
+    }
+
     /// How far its own up is from the world's, in degrees.
     fn lean(app: &App, car: Entity) -> f32 {
         let up = app.world().get::<Rotation>(car).expect("a rotation").0 * Vec3::Y;
@@ -1003,6 +1026,7 @@ mod tests {
             Vec3::Y * (spec.ride_height() + 0.5),
             Quat::from_rotation_z(core::f32::consts::PI),
         );
+        ask_to_be_righted(&mut app, car);
         run(&mut app, 6.0);
 
         assert!(lean(&app, car) < 10.0, "still leaning {:.1} degrees over", lean(&app, car));
@@ -1025,9 +1049,52 @@ mod tests {
             Vec3::Y * (spec.ride_height() + 0.5),
             Quat::from_rotation_z(core::f32::consts::FRAC_PI_2),
         );
+        ask_to_be_righted(&mut app, car);
         run(&mut app, 6.0);
 
         assert!(lean(&app, car) < 10.0, "still leaning {:.1} degrees over", lean(&app, car));
+    }
+
+    /// And it happens only when it is asked for. A vehicle that stood itself up on a timer was a
+    /// hand on the wheel nobody wanted — on the wall of a ravine a driver is past the flip
+    /// threshold for seconds at a time while doing something deliberate about it.
+    #[test]
+    fn nothing_stands_itself_up_unasked() {
+        let mut app = driving_app();
+        let spec = VehicleKind::Buggy.spec();
+        let car = park_facing(
+            &mut app,
+            Vec3::Y * (spec.ride_height() + 0.5),
+            Quat::from_rotation_z(core::f32::consts::PI),
+        );
+        run(&mut app, 6.0);
+
+        assert!(
+            lean(&app, car) > 90.0,
+            "it stood itself up with nobody asking, and is now leaning {:.1} degrees",
+            lean(&app, car),
+        );
+    }
+
+    /// Letting go starts the hold again, so a trigger tapped while upside down — which is what a
+    /// driver being shot at does — is not a request.
+    #[test]
+    fn tapping_the_button_is_not_asking() {
+        let mut app = driving_app();
+        let spec = VehicleKind::Buggy.spec();
+        let car = park_facing(
+            &mut app,
+            Vec3::Y * (spec.ride_height() + 0.5),
+            Quat::from_rotation_z(core::f32::consts::PI),
+        );
+        for _ in 0..8 {
+            ask_to_be_righted(&mut app, car);
+            run(&mut app, spec.righting_hold * 0.5);
+            stop_asking(&mut app, car);
+            run(&mut app, 0.1);
+        }
+
+        assert!(lean(&app, car) > 90.0, "a tapped button righted it: {:.1}", lean(&app, car));
     }
 
     /// It must not touch a vehicle that is merely tilted. The ramp leans it twelve degrees and a
@@ -1041,15 +1108,16 @@ mod tests {
         app.update();
 
         let before = lean(&app, car);
+        ask_to_be_righted(&mut app, car);
         run(&mut app, 3.0);
         let righting = app.world().get::<Righting>(car).expect("a righting");
-        assert_eq!(righting.flipped_for, 0.0, "a {before:.0}-degree lean counted as flipped");
+        assert_eq!(righting.asked_for, 0.0, "a {before:.0}-degree lean counted as flipped");
     }
 
-    /// The delay is the difference between helping and interfering: a vehicle that is upside down
-    /// for a moment on its way through a roll has to be left to finish it.
+    /// The hold is the difference between asking and brushing the button: the trigger is the same
+    /// one a driver is likely to be pulling anyway.
     #[test]
-    fn it_waits_before_it_intervenes() {
+    fn it_waits_for_the_button_to_be_held() {
         let mut app = driving_app();
         let spec = VehicleKind::Buggy.spec();
         let car = park_facing(
@@ -1057,13 +1125,14 @@ mod tests {
             Vec3::Y * (spec.ride_height() + 0.5),
             Quat::from_rotation_z(core::f32::consts::PI),
         );
-        run(&mut app, spec.righting_delay - 0.2);
+        ask_to_be_righted(&mut app, car);
+        run(&mut app, spec.righting_hold - 0.2);
 
         assert!(
             lean(&app, car) > 90.0,
-            "it started standing itself up after {:.1} s, before the {:.1} s delay",
-            spec.righting_delay - 0.2,
-            spec.righting_delay,
+            "it started standing itself up after {:.1} s of a {:.1} s hold",
+            spec.righting_hold - 0.2,
+            spec.righting_hold,
         );
     }
 

@@ -445,6 +445,9 @@ fn sample_input(
         jump: keys.pressed(KeyCode::Space),
         crouch: keys.pressed(KeyCode::ControlLeft),
         fire: firing,
+        // The same button as the trigger, and deliberately not the same field: what a driver on
+        // their roof is asking for is not a shot. See `vehicle::right_flipped_vehicles`.
+        righting: firing,
         interact: keys.pressed(KeyCode::KeyE),
         yaw: player.yaw,
         pitch: player.pitch,

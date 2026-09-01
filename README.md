@@ -1547,10 +1547,21 @@ model acts through the wheels, and the wheels find no ground; the only thing sti
 world is a box that slides. Left alone, the round has one fewer vehicle in it from the first badly
 taken ramp onwards.
 
-So a vehicle that has been past 78 degrees of lean for a second and a half stands itself back up.
-The delay is the whole difference between helping and interfering — a barrel roll passes through
-upside down on its way to landing on its wheels, and righting it there takes the roll away from the
-driver who earned it.
+So a driver past 78 degrees of lean who **holds the trigger for a second** is stood back up. It
+used to happen on its own, on a timer, and that was fine while the ground was a plane: past 78
+degrees the vehicle was on its side, and there was no way back from it. Terrain ended that. The
+walls of a ravine are 66 degrees, and a vehicle working its way along one is past the threshold for
+seconds at a time while its driver is doing something quite deliberate about it — at which point a
+hand reaches in and stands the car up. Nobody wanted that hand.
+
+A driver on their roof knows they are on their roof, so they can say so. It is the left button
+because that is the one already under the finger and there is nothing else to do with it there: the
+gun cannot bear at that attitude, so the trigger is not a trigger. It travels as its own input
+field for exactly that reason — what a driver upside down is asking for is not a shot, and the two
+are suppressed by different rules. The hold is a second, and letting go starts it again, so a
+trigger pulled in a panic is not a request. Nobody in the seat means nobody asking, which is the
+one thing this gives up: an abandoned vehicle stays where it fell until somebody walks over and
+gets in.
 
 What does it is a spring and a damper on the attitude, the same shape as a strut: an angular
 acceleration toward upright, proportional to the lean, minus a term against the spin it produces
@@ -1564,7 +1575,7 @@ face, and turning it means lifting 1200 kg over the edge it rests on: 10.6 kN·m
 but a hand underneath — six tenths of a g of lift while it is getting up, which takes most of its
 weight off the ground and drops what the turn has to overcome to a third. Below gravity, so it never
 leaves the ground; it just goes light on its edge. Measured in the test world, it is back on its
-wheels 1.1 seconds after the delay expires and settled at its ride height a second after that.
+wheels 1.1 seconds after the hold completes and settled at its ride height a second after that.
 
 #### Driving into things
 

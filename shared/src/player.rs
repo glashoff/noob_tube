@@ -33,6 +33,13 @@ pub struct PlayerInput {
     /// tick and every other decision on this struct is made at one. A message would arrive between
     /// two ticks and there would be no honest answer to which of them it belonged to.
     pub interact: bool,
+    /// Asking to be put back on the wheels, held rather than tapped: the vehicle counts the ticks
+    /// and acts once they add up to [`righting_hold`](crate::vehicle::VehicleSpec::righting_hold).
+    ///
+    /// The same button as [`fire`](Self::fire), and a field of its own all the same, because the
+    /// two are suppressed by different rules — a driver whose gun is stowed or cannot bear is not
+    /// firing, and is exactly the driver most likely to be upside down.
+    pub righting: bool,
     /// Horizontal look angle in radians. Movement is relative to it.
     pub yaw: f32,
     /// Vertical look angle in radians. Does not affect movement, but travels with the input so the
