@@ -536,9 +536,27 @@ code. It is worth not doing: the moment there is a second kind of placed thing, 
 grows a section that has nothing to do with heights, and the file that a heightmap import should be
 able to overwrite wholesale is also the file holding the spawns you want to keep.
 
-A marker is `{ kind, x, z, y, yaw }`, with `y` relative to the ground. Under twenty bytes, a few
-dozen per map — the size question does not arise, which is why the split can be decided on
-tidiness alone.
+A marker is `{ kind, x, z, y, rotation }`, with `y` relative to the ground and `rotation` a
+quaternion. Around thirty bytes, a few dozen per map — the size question does not arise, which is
+why the split can be decided on tidiness alone.
+
+### Rotation is a quaternion, not a yaw
+
+`VEHICLE_STARTS` stores a yaw today, which is enough for a vehicle standing on a flat plane and
+not enough for anything else. A crate on a hillside wants to lie the way the hillside does; a
+vehicle parked facing down a ramp is pitched; a prop is not always upright. So a marker carries a
+full `Quat`, which is also exactly what `Transform.rotation` wants, so nothing has to convert it on
+the way to spawning an entity.
+
+Not Euler angles, for one reason that has nothing to do with gimbal lock: **a quaternion has no
+convention to disagree about.** Three angles need an axis order and a handedness, both sides of the
+wire have to pick the same ones, and the failure when they do not is a marker that is subtly turned
+rather than an error anybody sees.
+
+An **align-to-ground** helper belongs beside the free rotation rather than replacing it — take the
+surface normal under the marker and rotate the up axis onto it, then let the author turn it from
+there. That is the gesture somebody actually wants when dropping a crate on a slope, and it is one
+call against a height field the client already holds.
 
 ### The hotbar
 
@@ -557,17 +575,24 @@ retrofitting a hotbar is worse than leaving gaps in one.
 Same machinery as §6, over the same ordered reliable channel, for the same reason: send what was
 asked for, not what it produced.
 
-- `MarkerEdit { op, kind, x, z, y, yaw, id }`, server-validated before broadcast.
-- **Rotate is absolute, not a delta.** The sender reads the current yaw, adds its step, and sends
-  the *result*. Two authors turning the same vehicle marker in the same moment then land on one of
-  the two headings instead of on their sum. The same reasoning is why place carries a position
-  rather than an offset.
+- `MarkerEdit { op, kind, x, z, y, rotation, id }`, server-validated before broadcast.
+- **Rotate is absolute, not a delta.** The sender reads the current rotation, applies its step, and
+  sends the *result*. Two authors turning the same vehicle marker in the same moment then land on
+  one of the two orientations instead of on their composition — which for rotations is worse than
+  for a yaw, since composing two deltas in the other order gives a third answer again. The same
+  reasoning is why place carries a position rather than an offset.
 - **Delete names an id, not a place.** A position is ambiguous as soon as two markers are close,
   and a delete that quietly removed the wrong one is worse than a delete that misses.
 
-What the server owes on validation: a known kind, `x`/`z` inside the terrain footprint, a finite
-yaw, a bounded `y` offset — it is a relative height, so it needs a cap in both directions rather
-than only a finiteness check — a cap on markers per map, and a rate limit. Plus one rule that is not about abuse — **at least
+What the server owes on validation: a known kind, `x`/`z` inside the terrain footprint, a bounded
+`y` offset — it is a relative height, so it needs a cap in both directions rather than only a
+finiteness check — a cap on markers per map, and a rate limit.
+
+The rotation needs its own check: **finite and normalised.** An unnormalised quaternion off the
+wire does not error, it scales and skews whatever it is applied to, so the server renormalises or
+rejects rather than trusting the sender. That involves a square root, which is fine here and worth
+saying out loud given §6's rules — marker data never enters prediction, so nothing about it has to
+be bit-identical across machines. Plus one rule that is not about abuse — **at least
 one player spawn has to survive.** A map with none is unplayable, and the delete handler is the
 cheapest place in the system to know that.
 
