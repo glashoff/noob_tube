@@ -86,12 +86,24 @@ const GUN_YAW: f32 = core::f32::consts::PI;
 /// vertices. Low-poly tubes carry rings only at their ends, which is why the middle of the barrel
 /// has no vertices at all and the far end has them all.
 const GUN_MUZZLE: Vec3 = Vec3::new(42.06, 3.33, 0.0);
-/// How far the gun may be elevated or depressed, in radians.
+/// How far the gun may be raised, in radians.
 ///
 /// Not a matter of taste. Everything turns about [`GUN_FOOT`], the bottom of the stock is 25.2
 /// units behind that point and 10.8 above it, and 23.3° is where the one swings down onto the
 /// plane of the other. Past it the gun would put its own tail through the beam it is bolted to.
-const GUN_SWING: f32 = 0.40;
+const GUN_ELEVATION: f32 = 0.40;
+/// How far it may be lowered, which is a different number for a different reason.
+///
+/// What stops the barrel going down is the *front* hoop of the roll cage, not the beam behind it.
+/// The gun stands on the rear hoop and fires forward over a single centre rail and then over that
+/// hoop, clearing it by 27 cm at rest; measured against the model's own silhouette on the barrel's
+/// centreline, the barrel reaches it at **18.4°**.
+///
+/// This is deliberately past that, and it is the one number here that is a choice rather than a
+/// measurement. Stopping at 18.4° leaves a driver unable to hit anything within about five metres
+/// of their own bumper, which is felt constantly; the price is that the last few degrees put the
+/// barrel through one tube of the cage, which is seen occasionally. See the README.
+const GUN_DEPRESSION: f32 = 0.40;
 /// The top of the cross-beam behind the seats, in the vehicle model's own units.
 ///
 /// Found by looking for what the geometry actually is rather than by eye: the roll cage is the only
@@ -815,10 +827,23 @@ fn swing_the_models_wheels(
 /// arcsine of the height.
 fn barrel_angles(chassis: Quat, direction: Vec3) -> (f32, f32) {
     let at = (chassis * Quat::from_rotation_y(MODEL_YAW)).inverse() * direction;
-    (
-        f32::atan2(-at.z, at.x),
-        at.y.clamp(-1.0, 1.0).asin().clamp(-GUN_SWING, GUN_SWING),
-    )
+    (f32::atan2(-at.z, at.x), at.y.clamp(-1.0, 1.0).asin())
+}
+
+/// Whether the gun on a chassis standing like that can be brought to bear on that aim.
+///
+/// The trigger's half of [`GUN_DEPRESSION`], and it has to be the same number the barrel stops at
+/// or the two drift apart: a shot that leaves a gun pointing somewhere else is worse than no shot.
+/// Only the depression is asked about — a gun that cannot be raised far enough is still pointing
+/// more or less where the driver is looking, while one that cannot be lowered far enough is
+/// pointing over the top of what they are aiming at.
+///
+/// `pub(crate)` for `local_player`, which is where an input is decided. Deliberately a pure
+/// function of the pose and the angles rather than a question about the gun *entity*: a client with
+/// no model has no gun to ask, and must not thereby be allowed to shoot where nobody else can.
+pub(crate) fn can_bear(chassis: Quat, yaw: f32, pitch: f32) -> bool {
+    let (_, elevation) = barrel_angles(chassis, shooting::aim_ray(Vec3::ZERO, yaw, pitch).1);
+    elevation >= -GUN_DEPRESSION
 }
 
 /// Update: points the mounted gun where whoever is driving is looking.
@@ -830,8 +855,9 @@ fn barrel_angles(chassis: Quat, direction: Vec3) -> (f32, f32) {
 /// attitude.
 ///
 /// The elevation is clamped and the traverse is not. A pintle behind the seats can be swung all the
-/// way round — that is what it is for — but it cannot be tipped past [`GUN_SWING`] without putting
-/// its own stock through the roll cage.
+/// way round — that is what it is for — but it cannot be tipped past [`GUN_ELEVATION`] without
+/// putting its own stock through the beam, nor past [`GUN_DEPRESSION`] without burying its barrel
+/// in the roll cage ahead of it.
 ///
 /// It does not fire. What comes out of the barrel is the driver's own shot, cast from the seat as
 /// it always was; this only makes the picture agree with it.
@@ -871,7 +897,9 @@ fn aim_the_gun(
         let (traverse, pitch) = match looking {
             // The same ray the shot is cast down.
             Some((yaw, pitch)) => {
-                barrel_angles(rotation.0, shooting::aim_ray(Vec3::ZERO, yaw, pitch).1)
+                let (traverse, elevation) =
+                    barrel_angles(rotation.0, shooting::aim_ray(Vec3::ZERO, yaw, pitch).1);
+                (traverse, elevation.clamp(-GUN_DEPRESSION, GUN_ELEVATION))
             }
             // An empty seat: back to pointing over the bonnet, which is where it started.
             None => (GUN_YAW, 0.0),
@@ -968,7 +996,7 @@ mod tests {
     /// The rearmost point of the gun, in its own units: the bottom of the stock.
     ///
     /// A fixture for the same reason the tyre positions above are one, and it is what
-    /// [`GUN_SWING`] was worked out from — the elevation at which this meets the beam.
+    /// [`GUN_ELEVATION`] was worked out from — the angle at which this meets the beam.
     const GUN_TAIL: Vec3 = Vec3::new(-21.68, -0.375, 0.0);
 
     /// The foot of the post has to stay on the beam whatever the driver is looking at. It is the
@@ -978,7 +1006,7 @@ mod tests {
     #[test]
     fn the_gun_stays_bolted_to_the_beam_however_it_is_aimed() {
         for step in -4..=4 {
-            let pitch = GUN_SWING * step as f32 / 4.0;
+            let pitch = GUN_ELEVATION * step as f32 / 4.0;
             for traverse in [0.0, 1.0, GUN_YAW, -2.2] {
                 let foot = gun_pose(traverse, pitch, 0.02).transform_point(GUN_FOOT);
                 assert!(
@@ -989,18 +1017,18 @@ mod tests {
         }
     }
 
-    /// And it may not swing its own stock through what it is bolted to. This is where [`GUN_SWING`]
-    /// comes from, so the test is that the limit is the real one: at it the tail is clear, and past
-    /// it the tail is through the beam.
+    /// And it may not swing its own stock through what it is bolted to. This is where
+    /// [`GUN_ELEVATION`] comes from, so the test is that the limit is the real one: at it the tail
+    /// is clear, and past it the tail is through the beam.
     #[test]
     fn the_gun_cannot_swing_its_stock_through_the_cage() {
         // In the gun's own units, about its own foot: the beam is the plane the foot sits in.
         // In the gun's own units and about its own foot, which is the point on the beam: the
         // beam is then the plane the tail has to stay above.
         let above = |pitch: f32| (Quat::from_rotation_z(pitch) * (GUN_TAIL - GUN_FOOT)).y;
-        assert!(above(GUN_SWING) > 0.0, "the stock is already through the beam at the limit");
-        assert!(above(GUN_SWING + 0.05) < 0.0, "the limit is further out than the geometry needs");
-        assert!(above(-GUN_SWING) > 0.0, "depressing the barrel put the stock through the beam");
+        assert!(above(GUN_ELEVATION) > 0.0, "the stock is already through the beam at the limit");
+        assert!(above(GUN_ELEVATION + 0.05) < 0.0, "the limit is beyond what the geometry allows");
+        assert!(above(-GUN_DEPRESSION) > 0.0, "lowering the barrel put the stock through the beam");
     }
 
     /// The barrel has to end up along the direction the driver is looking, whatever the car is
@@ -1027,16 +1055,9 @@ mod tests {
             for yaw in [0.0, 1.0, 2.5, -2.0, core::f32::consts::PI] {
                 // Inside the elevation the mount actually has; past it the gun cannot follow, and
                 // is not meant to.
-                for pitch in [0.0, 0.3, -0.3, GUN_SWING] {
+                for pitch in [0.0, 0.3, -0.3, 1.2, -1.2] {
                     let (_, wanted) = shooting::aim_ray(Vec3::ZERO, yaw, pitch);
                     let (traverse, elevated) = barrel_angles(chassis, wanted);
-                    // Only where the mount can actually reach. A car standing on a slope tilts the
-                    // whole frame these angles are said in, so an aim well inside the elevation in
-                    // the world can be outside it on the vehicle — and then the barrel is meant to
-                    // stop short, which the test below is about.
-                    if elevated.abs() >= GUN_SWING - 1e-3 {
-                        continue;
-                    }
                     let along = barrel(chassis, traverse, elevated);
                     assert!(
                         along.distance(wanted) < 1e-4,
@@ -1058,19 +1079,39 @@ mod tests {
         assert!(pitch.abs() < 1e-5, "aiming level is not level: {pitch}");
     }
 
-    /// Past the elevation the mount has, the gun stops rather than following. It still turns to
-    /// face the right way — a driver looking almost straight up is still looking *somewhere*, and
-    /// the traverse is what says where.
+    /// The trigger has to stop exactly where the barrel does. Two numbers for one limit is how a
+    /// shot comes to leave a gun that is pointing somewhere else.
     #[test]
-    fn aiming_past_the_elevation_stops_the_barrel_and_not_the_traverse() {
-        let (_, steep) = shooting::aim_ray(Vec3::ZERO, 1.2, 1.4);
-        let (traverse, elevated) = barrel_angles(Quat::IDENTITY, steep);
-        assert!((elevated - GUN_SWING).abs() < 1e-5, "elevated to {elevated}, limit is {GUN_SWING}");
-        let (level_traverse, _) = barrel_angles(Quat::IDENTITY, shooting::aim_ray(Vec3::ZERO, 1.2, 0.0).1);
-        assert!(
-            (traverse - level_traverse).abs() < 1e-4,
-            "the clamp moved the traverse from {level_traverse} to {traverse}"
-        );
+    fn the_trigger_stops_where_the_barrel_stops() {
+        let chassis = Quat::from_euler(EulerRot::YXZ, 0.9, 0.15, -0.1);
+        // Traverse must not matter: the rule is the same in every direction.
+        for yaw in [0.0, 1.4, -2.6, core::f32::consts::PI] {
+            let bearing = |pitch: f32| can_bear(chassis, yaw, pitch);
+            // Walk down until the gun gives up, then check the trigger gave up at the same angle.
+            let mut refused = None;
+            for step in 0..400 {
+                let pitch = -0.005 * step as f32;
+                let (_, elevation) =
+                    barrel_angles(chassis, shooting::aim_ray(Vec3::ZERO, yaw, pitch).1);
+                if elevation < -GUN_DEPRESSION {
+                    refused = Some(pitch);
+                    break;
+                }
+                assert!(bearing(pitch), "the trigger refused at {pitch}, inside the arc");
+            }
+            let refused = refused.expect("the barrel never ran out of depression");
+            assert!(!bearing(refused), "the trigger fired at {refused}, past the arc");
+        }
+    }
+
+    /// Looking *up* past the mount is not the trigger's business. The barrel stops following, but
+    /// it is still pointing more or less where the driver is looking, and a weapon that went dead
+    /// for looking at the sky would be a rule nobody could guess.
+    #[test]
+    fn looking_up_never_stops_the_trigger() {
+        for pitch in [0.5, 1.0, 1.5] {
+            assert!(can_bear(Quat::IDENTITY, 0.7, pitch), "the trigger refused a shot upwards");
+        }
     }
 
     /// Looking up has to raise the muzzle. The sign of an elevation is invisible in a screenshot of
@@ -1079,7 +1120,7 @@ mod tests {
     fn looking_up_raises_the_muzzle() {
         // At the resting traverse, so "forward" is the model's own nose at −X.
         let level = gun_pose(GUN_YAW, 0.0, 0.02).transform_point(GUN_MUZZLE);
-        let raised = gun_pose(GUN_YAW, GUN_SWING, 0.02).transform_point(GUN_MUZZLE);
+        let raised = gun_pose(GUN_YAW, GUN_ELEVATION, 0.02).transform_point(GUN_MUZZLE);
         assert!(raised.y > level.y + 0.1, "the muzzle went from {level:?} to {raised:?}");
         // And the muzzle is out over the bonnet, which is what makes it a muzzle.
         assert!(level.x < GUN_MOUNT.x, "the barrel ends behind its own post: {level:?}");

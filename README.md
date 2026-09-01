@@ -1558,10 +1558,33 @@ that is not available here: the post and the gun are a single mesh in the file, 
 the trunnion lifts the foot 9 cm out of its socket at full elevation. Turning about the socket is
 the other kind of mount, and the only one this geometry can be.
 
-The elevation is clamped and the traverse is not. A pintle behind the seats can be swung all the way
-round — that is what it is for — but 23.3° is where the bottom of the stock swings down onto the
-plane of the beam, so the limit is 0.40 rad rather than a taste. A driver aiming steeper than that
-still gets the traverse; the barrel simply stops following, which is what a real mount does.
+The traverse is not clamped — a pintle behind the seats can be swung all the way round, which is
+what it is for — and the two ends of the elevation are clamped by two different things.
+
+**Up** is the stock: 23.3° is where its bottom corner swings down onto the plane of the beam.
+**Down** is the roll cage in front of the gun. It stands on the rear hoop and fires forward over a
+single centre rail and then over the front hoop, clearing that by 27 cm at rest; swept against the
+model's own silhouette on the barrel's centreline, the barrel reaches it at **18.4°**.
+
+That second number is the one place here where the measurement is not the answer. Stopping at 18.4°
+leaves a driver unable to hit anything within about five metres of their own bumper — from a muzzle
+1.75 m up, `1.75 / tan 18.4°` — and that dead ring is felt on every drive-by. So the limit is set
+past it, and the last few degrees of depression put the barrel through one tube of the cage. A
+cosmetic clip seen occasionally against a hole in the weapon felt constantly; it is written down
+here because it is a choice and should not read as a measurement.
+
+**The trigger stops where the barrel stops.** Aiming below the arc does not fire — held fire pauses
+and picks up again the moment the aim comes back up. Otherwise the shot would leave a gun that is
+visibly pointing somewhere else, which is worse than no shot. Only the *depression* does this: a gun
+that cannot be raised far enough is still pointing roughly where the driver is looking, and a weapon
+that went dead for looking at the sky would be a rule nobody could guess. A test walks the aim down
+until the barrel gives up and checks the trigger gave up at the same angle, in four directions,
+because two numbers for one limit is exactly how a shot comes to leave a gun pointing elsewhere.
+
+The rule lives with the input, beside the one that empties the trigger when the weapon is stowed,
+and it is a pure function of the chassis pose and the look angles rather than a question about the
+gun *entity*. A client with no vehicle model has no gun to ask, and must not thereby be allowed to
+shoot where nobody else can.
 
 The first version of all this looked like it worked and did not, in the way that is hardest to see.
 The gun held one direction in the *world* and corrected for the chassis turning underneath it —

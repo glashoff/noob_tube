@@ -423,24 +423,43 @@ fn sample_input(
     };
 }
 
-/// Update: a driver whose weapon is put away is not firing, whatever the trigger says.
+/// Update: a driver is not firing when the gun cannot be brought to bear, whatever the trigger says.
+///
+/// Two reasons it cannot. The weapon is **put away**, which is the whole of the trade the `V` key
+/// makes — see [`LocalPlayer::armed`]. Or it is out and the driver is aiming **below the arc of the
+/// mount**: past that the barrel stops following, and a shot that left a gun pointing somewhere
+/// else would be worse than no shot. Held fire simply pauses there and picks up again the moment
+/// the aim comes back up, which is what makes it read as a limit of the mount rather than as a
+/// jammed weapon.
 ///
 /// Its own system rather than a term inside [`sample_input`], because it is its own rule: what the
-/// player asked for is one thing, and what a stowed weapon is capable of is another. Chained
-/// immediately after, so there is no frame in which the trigger is believed.
+/// player asked for is one thing, and what the gun is capable of is another. Chained immediately
+/// after, so there is no frame in which the trigger is believed.
 ///
 /// The view bracket goes with it. It is the evidence for a shot — what the screen was showing when
 /// the trigger went down — and a shot that is not taken has nothing to prove.
 ///
-/// It applies to the scripted input too. Whether the weapon is out is a fact about the game rather
-/// than about who is pressing the button, and a harness that wants to shoot from a vehicle can say
-/// so by arming the driver, which is the same thing a person does.
+/// It applies to the scripted input too. What the gun can do is a fact about the game rather than
+/// about who is pressing the button, and a harness that wants to shoot from a vehicle can say so by
+/// arming the driver, which is the same thing a person does.
 fn hold_your_fire(
-    driving: Option<Single<&Driving, With<Predicted>>>,
+    driving: Option<Single<&Player, crate::vehicle::OwnDriver>>,
+    // Whose vehicle is whose. The pose matters as much as the angles: the arc is the mount's, so a
+    // car leaning on its springs or standing on a slope carries it with them.
+    vehicles: Query<(&Rotation, &Driven)>,
     player: Single<&LocalPlayer>,
     mut input: ResMut<CurrentInput>,
 ) {
-    if driving.is_some() && !player.armed {
+    let Some(me) = driving else {
+        return;
+    };
+    let below = vehicles
+        .iter()
+        .find(|(_, driven)| driven.0 == me.peer)
+        .is_some_and(|(rotation, _)| {
+            !crate::vehicle::can_bear(rotation.0, player.yaw, player.pitch)
+        });
+    if !player.armed || below {
         input.0.fire = false;
         input.0.view = None;
     }
