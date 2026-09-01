@@ -510,19 +510,20 @@ rollback rule**: a marker has no collider, so nothing it does can change where a
 and there is no per-tile rebuild to make idempotent. Only spawning the live entity immediately
 would need the tick discipline, and then it would need it for the entity rather than the marker.
 
-### The height comes from the ground, not from the author
+### The height is relative to the ground
 
-A marker stores `x`, `z` and `yaw`. Its `y` is read from the height field when the entity is
-spawned.
+A marker stores `x`, `z`, `yaw` and a `y` that is an **offset above the ground**, not a world
+height. Where the entity appears is `ground_height(x, z) + y`, resolved when it spawns.
 
-That is a correctness rule rather than a saving. Terrain is editable, so a stored `y` is wrong the
-moment somebody sculpts underneath it — a spawn buried in a new hill, or a vehicle dropped from
-four metres onto a valley floor that used to be a ridge. Deriving it means every marker survives
-every sculpt with no fix-up pass and no way to forget one.
+That is a correctness rule rather than a saving. Terrain is editable, so an absolute `y` is wrong
+the moment somebody sculpts underneath it — a spawn buried in a new hill, or a vehicle dropped four
+metres onto a valley floor that used to be a ridge. An offset moves with the ground, so every
+marker survives every sculpt with no fix-up pass and no way to forget one.
 
-The cost is that markers cannot be stacked: a crate spawn cannot sit on top of another crate. That
-falls straight out of "terrain is the ground", and if stacking is ever wanted the honest form is an
-explicit offset *above* the ground rather than a return to absolute heights.
+It also keeps the cases a bare "sit on the ground" rule would lose. `y = 0` is the ordinary one and
+what placement defaults to; a positive offset stacks a crate spawn on top of another crate, or puts
+one on a ledge of built geometry; and the author sets it by the same gesture that sets everything
+else rather than by editing a file.
 
 ### Where markers live
 
@@ -535,8 +536,9 @@ code. It is worth not doing: the moment there is a second kind of placed thing, 
 grows a section that has nothing to do with heights, and the file that a heightmap import should be
 able to overwrite wholesale is also the file holding the spawns you want to keep.
 
-A marker is `{ kind, x, z, yaw }`. Fourteen bytes or so, a few dozen per map — the size question
-does not arise, which is why the split can be decided on tidiness alone.
+A marker is `{ kind, x, z, y, yaw }`, with `y` relative to the ground. Under twenty bytes, a few
+dozen per map — the size question does not arise, which is why the split can be decided on
+tidiness alone.
 
 ### The hotbar
 
@@ -555,7 +557,7 @@ retrofitting a hotbar is worse than leaving gaps in one.
 Same machinery as §6, over the same ordered reliable channel, for the same reason: send what was
 asked for, not what it produced.
 
-- `MarkerEdit { op, kind, x, z, yaw, id }`, server-validated before broadcast.
+- `MarkerEdit { op, kind, x, z, y, yaw, id }`, server-validated before broadcast.
 - **Rotate is absolute, not a delta.** The sender reads the current yaw, adds its step, and sends
   the *result*. Two authors turning the same vehicle marker in the same moment then land on one of
   the two headings instead of on their sum. The same reasoning is why place carries a position
@@ -564,7 +566,8 @@ asked for, not what it produced.
   and a delete that quietly removed the wrong one is worse than a delete that misses.
 
 What the server owes on validation: a known kind, `x`/`z` inside the terrain footprint, a finite
-yaw, a cap on markers per map, and a rate limit. Plus one rule that is not about abuse — **at least
+yaw, a bounded `y` offset — it is a relative height, so it needs a cap in both directions rather
+than only a finiteness check — a cap on markers per map, and a rate limit. Plus one rule that is not about abuse — **at least
 one player spawn has to survive.** A map with none is unplayable, and the delete handler is the
 cheapest place in the system to know that.
 
