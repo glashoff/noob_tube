@@ -18,6 +18,7 @@ pub mod simulation;
 pub mod tuning;
 pub mod types;
 pub mod vehicle;
+pub mod vehicle_shape;
 #[cfg(feature = "remote")]
 pub mod remote;
 

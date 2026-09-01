@@ -1,0 +1,18 @@
+[package]
+name = "bake_collider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Not part of the game. This is the offline step that turns `assets/models/warthog.glb` into the
+# vertex tables in `shared/src/vehicle_shape.rs`, which is what the server and every client then
+# collide and shoot against. It is a workspace member so that it keeps compiling, and so that the
+# one lockfile covers it; nothing in the game depends on it, and it never runs at play time.
+[dependencies]
+# Geometry only. `import` is left off deliberately: it drags in an image decoder to read textures we
+# have no use for, and `Gltf::from_slice` reaches the meshes without it.
+gltf = { version = "1.4", default-features = false, features = ["utils", "names"] }
+# The very library the game collides with, at the same version Avian pulls in — so the hulls this
+# writes out are the hulls Avian will build, rather than something that resembles them.
+parry3d = { version = "0.27", default-features = false, features = ["dim3", "f32", "std", "alloc"] }

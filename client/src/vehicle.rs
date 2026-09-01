@@ -980,6 +980,42 @@ mod tests {
         }
     }
 
+    /// The collision shape was baked with the map the visible model is drawn with.
+    ///
+    /// `tools/bake_collider` turns the model into hulls in chassis space, and to do that it has to
+    /// apply the same quarter turn, the same scale and the same lift that [`give_bodies`] applies
+    /// to the model a player looks at. Nothing but this holds the two together: they are written
+    /// down in different crates, one of which cannot see the other's constants. Drift between them
+    /// puts every bullet hole where the bodywork is not — the bug the bake exists to fix, back
+    /// again with a subtler cause.
+    ///
+    /// If this fails after a model or a spec changed, the fix is to re-bake, not to edit either
+    /// number: `cargo run -p bake_collider -- bake assets/models/warthog.glb shared/src/vehicle_shape.rs`.
+    #[test]
+    fn the_shape_was_baked_with_the_map_the_model_gets() {
+        use noob_tube_shared::vehicle_shape;
+        let spec = BUGGY;
+        let scale = spec.half_extents.z * 2.0 / MODEL_LENGTH;
+        let lift = MODEL_GROUND * scale - spec.ride_height();
+        assert!(
+            (scale - vehicle_shape::BUGGY_BAKE_SCALE).abs() < 1e-4,
+            "the model is drawn at {scale} and the shape was baked at {}",
+            vehicle_shape::BUGGY_BAKE_SCALE,
+        );
+        assert!(
+            (lift - vehicle_shape::BUGGY_BAKE_LIFT).abs() < 1e-3,
+            "the model is lifted {lift} and the shape was baked lifted {}",
+            vehicle_shape::BUGGY_BAKE_LIFT,
+        );
+        // The bake writes the turn out as the axis swap (x, y, z) -> (-z, y, x) rather than as an
+        // angle, so what has to match is that this yaw *is* that swap.
+        let swapped = Quat::from_rotation_y(MODEL_YAW) * Vec3::new(1.0, 2.0, 3.0);
+        assert!(
+            swapped.abs_diff_eq(Vec3::new(-3.0, 2.0, 1.0), 1e-5),
+            "MODEL_YAW sends (1, 2, 3) to {swapped:?}, but the bake sends it to (-3, 2, 1)",
+        );
+    }
+
     /// And the struts have to be written in the order the rule sorts them into: front left, front
     /// right, rear left, rear right. The rule reads the signs; this is what says which mount each
     /// pair of signs means.

@@ -105,24 +105,25 @@ pub struct VehicleSpec {
     /// what everything derives from: where the model is scaled to, how far the camera stands off,
     /// what counts as a teleport rather than a step.
     pub half_extents: Vec3,
-    /// The shape a shot meets and a bumper hits, as a run of slices along the vehicle's length.
+    /// The shape a shot meets and a bumper hits: the model's own geometry, as convex hulls.
     ///
-    /// A box is a bad stand-in for a Warthog, and the bullet holes were what said so: 84 % of them
-    /// hung more than 5 cm off the bodywork, up to 83 cm, because the box is 38 cm wider than the
-    /// nose on each side and 27 cm wider than the waist — and shorter than the body is tall, so
-    /// shots at the roll cage went straight over it.
+    /// A box was a bad stand-in for a Warthog and the bullet holes were what said so; sixteen
+    /// hand-measured boxes were a better one and still not good enough. This is the third answer
+    /// and the only one that is not a guess at a mesh that was sitting right there: the model is
+    /// run through an approximate convex decomposition offline and the hulls are written out as
+    /// numbers, by `tools/bake_collider`. See `shared/src/vehicle_shape.rs`, which is generated.
     ///
-    /// Measured off the model rather than drawn by hand, and each slice **encloses** the body it
-    /// covers: erring outwards leaves a hole a few centimetres proud of the panel, which nobody
-    /// sees, where erring inwards would let a shot through a vehicle it visibly hit, which everyone
-    /// does. Sixteen slices is where the numbers stop improving — a convex outline per slice, which
-    /// is as good as a solid approximation can be, does no better. What is left is the open cabin
-    /// and the space under the bed, which any solid shape fills in.
+    /// Numbers rather than the model itself because the shape has to exist where the model does
+    /// not: `/assets/` is gitignored, the server has no assets directory at all, and one of the
+    /// two models may not be redistributed even if it did. Replacing a model means running the
+    /// bake again, which is a command rather than an afternoon with a ruler.
     ///
-    /// The roll cage is deliberately left out. It is a pair of thin tubes; a shape that enclosed
-    /// them would stop bullets in the open air above the seats, which is the very bug this is here
-    /// to fix.
-    pub hull: &'static [HullSlice],
+    /// Fired at from twenty thousand directions and compared against the model's own triangles,
+    /// this stops a shot a median of 0.7 cm from the bodywork against the sixteen boxes' 5.8, and
+    /// 4 % of hits land more than 5 cm clear of a panel against their 54 %. Nothing passes through
+    /// a vehicle it visibly hit any more; 2.9 % of shots used to, because the boxes had to leave
+    /// the roll cage out and this does not.
+    pub body: &'static [&'static [[f32; 3]]],
     /// Kilograms. The collider's density is derived from this so that the two cannot disagree.
     pub mass: f32,
     /// How far below the chassis centre the mass is placed.
@@ -204,42 +205,31 @@ impl VehicleSpec {
     /// Kilograms per cubic metre, so that [`ColliderDensity`] and [`mass`](Self::mass) agree by
     /// construction. Avian derives both mass and inertia from the collider and its density, so
     /// setting the mass directly would leave the inertia describing a different vehicle.
-    pub fn density(&self) -> f32 {
-        self.mass / self.hull_volume()
-    }
-
-    /// How much space the hull's slices take up between them.
     ///
-    /// A plain sum, which is only correct because the slices do not overlap — Avian adds a
-    /// compound's parts up, so two parts sharing a region would carry that region's mass twice and
-    /// the vehicle would come out heavier than [`mass`](Self::mass) says. A test holds them apart.
-    pub fn hull_volume(&self) -> f32 {
-        self.hull
-            .iter()
-            .map(|slice| {
-                (slice.half_width * 2.0) * (slice.top - slice.bottom) * (slice.to - slice.from)
-            })
-            .sum()
+    /// Divided by the volume the *collider* reports rather than by one worked out here. Avian adds
+    /// a compound's parts up, and a decomposition's parts do touch and overlap a little at their
+    /// seams; asking the shape what it weighs at unit density is the only sum that is guaranteed
+    /// to be the same sum Avian will do. A test weighs the result.
+    pub fn density(&self) -> f32 {
+        self.mass / self.collider().mass_properties(1.0).mass
     }
 
-    /// The shape the chassis is: one box per slice of [`hull`](Self::hull).
+    /// The shape the chassis is: one convex hull per part of the baked decomposition.
+    ///
+    /// Rebuilt on demand rather than cached. It is wanted once per vehicle spawned, and a
+    /// `Collider` is neither `const` nor cheap to keep in a static.
     pub fn collider(&self) -> Collider {
         Collider::compound(
-            self.hull
+            self.body
                 .iter()
-                .map(|slice| {
+                .map(|hull| {
                     (
-                        Vec3::new(
-                            0.0,
-                            (slice.bottom + slice.top) / 2.0,
-                            (slice.from + slice.to) / 2.0,
-                        ),
+                        Vec3::ZERO,
                         Quat::IDENTITY,
-                        Collider::cuboid(
-                            slice.half_width * 2.0,
-                            slice.top - slice.bottom,
-                            slice.to - slice.from,
-                        ),
+                        Collider::convex_hull(
+                            hull.iter().copied().map(Vec3::from_array).collect(),
+                        )
+                        .expect("a baked part is the hull of at least four points"),
                     )
                 })
                 .collect(),
@@ -266,51 +256,6 @@ impl VehicleSpec {
     }
 }
 
-/// One slice of a vehicle's hull: how far along its length it runs, and how big the body is there.
-///
-/// Slices are contiguous and never overlap, which is what lets the mass be shared out over them by
-/// density without any of it being counted twice.
-#[derive(Clone, Copy, Debug)]
-pub struct HullSlice {
-    /// Where the slice starts and ends along the chassis Z. Front is −Z, as everywhere here.
-    pub from: f32,
-    pub to: f32,
-    /// Half the body's width across this slice.
-    pub half_width: f32,
-    /// The body's underside and top across this slice, in chassis Y.
-    pub bottom: f32,
-    pub top: f32,
-}
-
-/// The buggy's body, in chassis metres, read off the model with the wheels and the roll cage left
-/// out. See [`VehicleSpec::hull`] for why it is shaped like this and why it is not a box.
-///
-/// Replacing the model means measuring these again, exactly as [`crate::vehicle`]'s three model
-/// constants do on the client side.
-pub const BUGGY_HULL: [HullSlice; 16] = [
-    slice(-1.900, -1.662, 0.519, -0.447, 0.086),
-    slice(-1.662, -1.425, 0.685, -0.424, 0.166),
-    slice(-1.425, -1.188, 0.751, -0.342, 0.230),
-    slice(-1.188, -0.950, 0.829, -0.368, 0.307),
-    slice(-0.950, -0.712, 0.864, -0.480, 0.202),
-    slice(-0.712, -0.475, 0.906, -0.556, 0.235),
-    slice(-0.475, -0.238, 0.792, -0.366, 0.175),
-    slice(-0.238, 0.000, 0.628, -0.366, 0.045),
-    slice(0.000, 0.237, 0.790, -0.366, -0.006),
-    slice(0.237, 0.475, 0.906, -0.456, 0.154),
-    slice(0.475, 0.712, 0.837, -0.554, 0.155),
-    slice(0.712, 0.950, 0.839, -0.365, 0.111),
-    slice(0.950, 1.188, 0.669, -0.312, 0.192),
-    slice(1.188, 1.425, 0.828, -0.316, 0.112),
-    slice(1.425, 1.663, 0.824, -0.309, 0.260),
-    slice(1.663, 1.900, 0.714, -0.221, 0.278),
-];
-
-/// Spelt out so the table above reads as a table.
-const fn slice(from: f32, to: f32, half_width: f32, bottom: f32, top: f32) -> HullSlice {
-    HullSlice { from, to, half_width, bottom, top }
-}
-
 /// The buggy.
 ///
 /// 1200 kg on struts stiff enough to settle about 18 cm down, damped to a little under half of
@@ -319,7 +264,7 @@ const fn slice(from: f32, to: f32, half_width: f32, bottom: f32, top: f32) -> Hu
 /// wheels through a fast corner.
 pub const BUGGY: VehicleSpec = VehicleSpec {
     half_extents: Vec3::new(0.9, 0.4, 1.9),
-    hull: &BUGGY_HULL,
+    body: crate::vehicle_shape::BUGGY_BODY,
     mass: 1200.0,
     centre_of_mass_drop: 0.35,
     // Just inside the body, at its underside. Front is −Z, as everywhere else in this game.
@@ -725,50 +670,71 @@ pub fn right_flipped_vehicles<F: QueryFilter + 'static>(
 #[cfg(test)]
 mod tests {
 
-    /// The hull's slices must sit end to end, without gaps and without overlap, and cover exactly
-    /// the length the vehicle is reckoned to be.
-    ///
-    /// Overlap is the one that bites silently: Avian adds a compound's parts up, so a region
-    /// covered twice carries its mass twice and the vehicle comes out heavier than its spec says —
-    /// which reads as a handling change nobody asked for rather than as a wrong number.
+    /// The shape has to *be* something before anything else about it is worth asking.
     #[test]
-    fn the_hull_is_a_run_of_slices_with_nothing_between_them() {
+    fn the_body_is_a_run_of_convex_parts() {
         let spec = BUGGY;
-        let hull = spec.hull;
-        assert!(!hull.is_empty(), "a vehicle with no hull has nothing to be shot at");
-        assert!(
-            (hull[0].from + spec.half_extents.z).abs() < 1e-3,
-            "the hull starts at {} but the vehicle is reckoned to start at {}",
-            hull[0].from,
-            -spec.half_extents.z,
-        );
-        assert!(
-            (hull[hull.len() - 1].to - spec.half_extents.z).abs() < 1e-3,
-            "the hull ends at {} but the vehicle is reckoned to end at {}",
-            hull[hull.len() - 1].to,
-            spec.half_extents.z,
-        );
-        for pair in hull.windows(2) {
+        assert!(!spec.body.is_empty(), "a vehicle with no body has nothing to be shot at");
+        for (index, part) in spec.body.iter().enumerate() {
             assert!(
-                (pair[1].from - pair[0].to).abs() < 1e-3,
-                "a slice ends at {} and the next starts at {}",
-                pair[0].to,
-                pair[1].from,
+                part.len() >= 4,
+                "part {index} has {} points, which is not a solid",
+                part.len(),
             );
-        }
-        for slice in hull {
-            assert!(slice.to > slice.from, "a slice runs backwards: {slice:?}");
-            assert!(slice.top > slice.bottom, "a slice has no height: {slice:?}");
-            assert!(slice.half_width > 0.0, "a slice has no width: {slice:?}");
+            assert!(
+                Collider::convex_hull(part.iter().copied().map(Vec3::from_array).collect())
+                    .is_some(),
+                "part {index} does not make a hull, so Avian would drop it silently",
+            );
         }
     }
 
-    /// And the shape has to weigh what the spec says, or the density is a number that means nothing.
+    /// The bake is only the right shape if it was placed the way the model is placed.
     ///
-    /// This is the whole of why `density` divides by the hull's own volume rather than the nominal
-    /// box's: the two differ by a third, so the box's answer would have made the buggy 700 kg.
+    /// The client turns, scales and lifts the *visible* model by numbers of its own; the bake did
+    /// the same by numbers of its own; and nothing but this holds the two together. Get it wrong
+    /// and every shot lands where the bodywork is not — the exact bug, with a subtler cause.
     #[test]
-    fn the_hull_weighs_what_the_spec_says() {
+    fn the_body_sits_where_the_model_is_drawn() {
+        let spec = BUGGY;
+        let (mut low, mut high) = (Vec3::MAX, Vec3::MIN);
+        for point in spec.body.iter().flat_map(|part| part.iter()) {
+            let point = Vec3::from_array(*point);
+            low = low.min(point);
+            high = high.max(point);
+        }
+        // The length is what the model was scaled *to*, so it has to come back out exactly.
+        assert!(
+            (high.z - low.z - spec.half_extents.z * 2.0).abs() < 0.05,
+            "the body is {:.3} m long but the vehicle is reckoned to be {:.3}",
+            high.z - low.z,
+            spec.half_extents.z * 2.0,
+        );
+        // And it has to straddle the chassis origin rather than sit above or in front of it.
+        assert!(
+            low.z < -1.5 && high.z > 1.5 && low.x < -0.5 && high.x > 0.5,
+            "the body runs x {:.2}..{:.2}, z {:.2}..{:.2}, which is not centred on the chassis",
+            low.x,
+            high.x,
+            low.z,
+            high.z,
+        );
+        // The lift is what puts the underside just under the nominal box and the cage well above
+        // it. A sign error in it would show up here as a body that floats or is buried.
+        assert!(
+            (-0.7..-0.3).contains(&low.y),
+            "the underside is at y {low:?}, which is not where a sill is",
+        );
+        assert!(high.y > 0.5, "nothing reaches above y {high:?}, so the roll cage is missing");
+    }
+
+    /// The shape has to weigh what the spec says, or the density is a number that means nothing.
+    ///
+    /// This is the whole of why `density` divides by the volume the collider reports rather than
+    /// by the nominal box: Avian derives the mass from the shape, and a shape that is a third the
+    /// volume of the box would quietly make a 1200 kg buggy weigh 700.
+    #[test]
+    fn the_body_weighs_what_the_spec_says() {
         let spec = BUGGY;
         let mass = spec.collider().mass_properties(spec.density()).mass;
         assert!(
@@ -778,24 +744,33 @@ mod tests {
         );
     }
 
-    /// The hull is meant to be *tighter* than the box it replaced. If a change ever loosens it back
-    /// to a box, the bullet holes start hanging in the air again, and quietly.
+    /// The body is meant to be *tighter* than the box it replaced. If a change ever loosens it
+    /// back to a box, the bullet holes start hanging in the air again, and quietly.
     #[test]
-    fn the_hull_hugs_the_body_more_closely_than_a_box_would() {
+    fn the_body_hugs_the_model_more_closely_than_a_box_would() {
         let spec = BUGGY;
         let box_volume = 8.0 * spec.half_extents.x * spec.half_extents.y * spec.half_extents.z;
+        let volume = spec.collider().mass_properties(1.0).mass;
         assert!(
-            spec.hull_volume() < box_volume * 0.75,
-            "the hull takes up {:.2} m³ against the box's {box_volume:.2} m³, which is no better",
-            spec.hull_volume(),
+            volume < box_volume * 0.75,
+            "the body takes up {volume:.2} m³ against the box's {box_volume:.2} m³, no better",
         );
-        // And it reaches past the nominal box downwards, which is the underbody: a hull trimmed to
-        // the box would put every shot at the sills 16 cm out.
+        // And it reaches past the nominal box downwards, which is the underbody, and upwards,
+        // which is the roll cage. A shape trimmed to the box misses both.
+        let reach = spec
+            .body
+            .iter()
+            .flat_map(|part| part.iter())
+            .fold((0.0f32, 0.0f32), |(low, high), point| (low.min(point[1]), high.max(point[1])));
         assert!(
-            spec.hull.iter().any(|slice| slice.bottom < -spec.half_extents.y),
-            "the hull no longer reaches below the nominal box, so the underbody is not in it",
+            reach.0 < -spec.half_extents.y && reach.1 > spec.half_extents.y,
+            "the body runs y {:.2}..{:.2}, inside the nominal box's ±{:.2}",
+            reach.0,
+            reach.1,
+            spec.half_extents.y,
         );
     }
+
     use super::*;
     use crate::physics::test_support::floor_app;
     use bevy::time::TimeUpdateStrategy;

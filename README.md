@@ -315,6 +315,23 @@ tools/brp watch <entity> <type>...          # stream every change until interrup
 tools/brp --port 15712 list                 # the server instead
 ```
 
+### Baking a collision shape
+
+`tools/bake_collider` turns a vehicle's `.glb` into the convex hulls the game collides and shoots
+with, so that the shape travels as numbers and neither the server nor the repository needs the
+model. It is an offline step; nothing at play time runs it.
+
+```bash
+cargo run -p bake_collider -- list  assets/models/warthog.glb   # what is in the file
+cargo run -p bake_collider -- check assets/models/warthog.glb   # score candidate shapes
+cargo run -p bake_collider -- bake  assets/models/warthog.glb shared/src/vehicle_shape.rs
+```
+
+`shared/src/vehicle_shape.rs` is generated and committed — do not edit it by hand. Run `check` in
+release; a debug build of the decomposition is a coffee rather than a keystroke. See
+[Bullet holes hanging beside the bodywork](#bullet-holes-hanging-beside-the-bodywork) for what the
+scores mean and why the chosen settings are the chosen settings.
+
 ### An inspector window
 
 `--features inspector` adds `bevy-inspector-egui`, an egui panel listing every entity and component
@@ -1724,33 +1741,77 @@ A vehicle was a box to a bullet: 1.8 × 0.8 × 3.8 m, which is 38 cm wider than 
 each side, 27 cm wider than its waist, and *shorter* than the body is tall — so shots at the nose
 stopped out in the open air and shots at the roll cage sailed straight over.
 
-It is a hull now: sixteen slices along the length, each as wide and as tall as the body actually is
-there, measured off the model with the wheels and the cage left out. The same forty rounds, from the
-same spot, at the same seed, measured against the vehicle's own visible silhouette:
+Sixteen hand-measured slices along the length were the second answer, and better, and still not good
+enough. The third answer is the one that should have been first: **use the mesh**. The model is run
+through an approximate convex decomposition offline — parry's own VHACD, the same one Avian would
+run — and the resulting hulls are written out as a table of vertices by `tools/bake_collider`.
 
-| | median | 90th | worst | hanging clear |
-|---|---|---|---|---|
-| the box | 7.5 cm | 33.8 cm | 47.6 cm | 61 % |
-| the hull | **1.1 cm** | 8.2 cm | 17.1 cm | **24 %** |
+The reason it was not the first answer was a real constraint read too broadly. `/assets/` is
+gitignored, the server has no assets directory, and one of the two models may not be redistributed
+at all; from that I concluded the shape had to be numbers, and then hand-measured the numbers. But
+"the shape must be numbers" does not imply "the numbers must come from a ruler". Baking the mesh
+into a table is still numbers. It travels without the model, the server needs nothing, and replacing
+a model becomes one command rather than an afternoon.
 
-Three decisions are worth writing down.
+##### What it measures
 
-**Each slice encloses the body it covers** rather than splitting the difference. A hole a few
-centimetres proud of a panel is invisible; a shot passing through a vehicle it visibly hit is not,
-and that is what erring inwards buys.
+The tool can score any candidate shape against the model's own triangles, which is what makes the
+choice a measurement rather than a preference:
 
-**The roll cage is left out.** It is a pair of thin tubes, and a shape that enclosed them would stop
-bullets in the open air above the seats — the very thing being fixed.
+```text
+cargo run -p bake_collider -- check assets/models/warthog.glb
+```
 
-**Sixteen is where it stops paying.** A convex outline per slice, which is as close as any solid
-shape can get, measured no better: the remaining quarter is the open cabin and the space under the
-bed, which anything solid fills in. Going further needs the actual triangles, and the model is not
-in the repository — the server has never seen it. Every number here is a measurement written down,
-which is also why replacing the model means measuring them again.
+Twenty thousand rays that are known to hit the model are fired at the candidate, and what is
+recorded is the distance from where the candidate stopped the ray to the **nearest point on the real
+triangles**. That is what the eye judges — a decal sitting a hand's width off the paint. It is not
+the distance along the ray, which was the first thing tried and is a much more flattering-or-damning
+number: a shot grazing the wing can stop two metres early along its own line while sitting three
+centimetres off the panel. Nobody sees along the ray.
 
-The mass comes off the hull's own volume rather than the nominal box's, and the two differ by a
-third: left alone, the same density over a smaller shape would have quietly made the buggy 700 kg.
-A test weighs the shape and holds it to the 1200 kg the spec claims.
+| shape | parts | median | 90th | worst | > 5 cm out | through |
+|---|---|---|---|---|---|---|
+| the nominal box | 1 | 12.4 cm | 30.4 cm | 51.9 cm | 82 % | 0.8 % |
+| sixteen slices | 16 | 5.8 cm | 18.1 cm | 38.4 cm | 54 % | 2.9 % |
+| solid 128, 24 hulls | 22 | 1.7 cm | 6.8 cm | 23.0 cm | 17 % | 0 % |
+| solid 256, 48 hulls | 27 | 1.2 cm | 5.3 cm | 23.1 cm | 11 % | 0 % |
+| solid 256, 96, 0.005 | 40 | 0.9 cm | 4.2 cm | 14.7 cm | 6 % | 0 % |
+| **solid 256, 96, 0.002** | **55** | **0.7 cm** | **3.5 cm** | **14.4 cm** | **4 %** | **0 %** |
+| solid 256, 96, 0.001 | 69 | 0.6 cm | 3.1 cm | 14.4 cm | 3 % | 0 % |
+| skin 256, 96, 0.002 | 89 | 0.9 cm | 4.7 cm | 18.0 cm | 9 % | 0 % |
+
+The last column is the one the slices could not fix at all: 2.9 % of shots went through a vehicle
+they visibly hit, because the slices had to leave the roll cage out. The bake does not, and that
+column is now zero.
+
+##### The three things the table settled
+
+**Solid, not a shell.** The guess was that a surface-only decomposition would win, because a Warthog
+is a vehicle you sit *in* and filling the cabin is exactly what the boxes got wrong. It loses at
+every part count — each thin shell part still bridges the concavity behind the panel it follows, and
+a grazing shot finds the gap between two of them. It is also hollow, which would let a player or a
+crate end up inside the cabin: a new kind of stuck, for a fix that was only ever about decals.
+
+**Concavity, not resolution.** At 256 voxels the model is already resolved finer than the error being
+chased. What buys the last few centimetres is the willingness to split a part again — and past
+`0.002` the part count runs away for tenths of a centimetre.
+
+**Fifty-five parts.** Where the curve flattens. Everything past it costs collision work every
+substep, and rollback replays those substeps.
+
+##### The two ends that have to agree
+
+The bake places the model in chassis space by the same quarter turn, scale and lift the client
+applies to the model a player looks at — and the two live in different crates, one of which cannot
+see the other's constants. Drift between them would put every hole where the bodywork is not: the
+same bug, with a subtler cause. So the generated file records the scale and lift it was baked with,
+and a client test checks them against the numbers the visible model is actually drawn with. If it
+ever fails, the fix is to re-bake, not to edit either number.
+
+The mass comes off the volume the *collider* reports rather than one worked out by hand: Avian adds a
+compound's parts up, a decomposition's parts touch and overlap a little at their seams, and asking
+the shape what it weighs at unit density is the only sum guaranteed to be the sum Avian will do. A
+test weighs the shape and holds it to the 1200 kg the spec claims.
 
 #### A vehicle stepped out of stood still with its wheels turning
 
