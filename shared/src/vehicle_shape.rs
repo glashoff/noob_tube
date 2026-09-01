@@ -7,9 +7,10 @@
 //! cargo run -p bake_collider -- bake assets/models/warthog.glb shared/src/vehicle_shape.rs
 //! ```
 //!
-//! The model is not in the repository and the server has never seen one, so the shape has
-//! to travel as numbers rather than as an asset. That is the whole reason this file is
-//! generated instead of loaded.
+//! The server loads no assets at all — it has no renderer and no glTF loader — so the
+//! shape has to travel as numbers rather than as a file, and shared code is where both
+//! sides can see it. A model that may not be redistributed is a second reason and not
+//! the load-bearing one. That is why this file is generated rather than loaded.
 //!
 //! Fired at from 20000 directions and compared against the model's own triangles, this shape
 //! stops a shot a median of 0.7 cm short of the bodywork, 3.5 cm at the ninetieth

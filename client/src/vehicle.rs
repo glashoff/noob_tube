@@ -38,9 +38,11 @@ use noob_tube_shared::vehicle::{
 
 /// The visual model, under the asset directory.
 ///
-/// Not in the repository, and `/assets/` is gitignored for the reason already written down there:
-/// licensed for use, not for redistribution. Each developer brings their own copy. That is also why
-/// nothing here may *require* it — see [`give_bodies`], which falls back to a box.
+/// In the repository: it is CC BY, and the credit that condition asks for is in
+/// `assets/CREDITS.md`. It was not always, which is why nothing here *requires* it — see
+/// [`give_bodies`], which falls back to a box. That fallback is worth keeping anyway: the shape a
+/// vehicle collides and is shot with does not come from this file — see
+/// [`noob_tube_shared::vehicle_shape`] — so a missing model costs the look and nothing else.
 const MODEL: &str = "models/warthog.glb";
 
 /// How long the model is along its own X axis, in its own units.
@@ -950,10 +952,11 @@ mod tests {
 
     /// Where the model's four tyres sit, in its own units, as the glTF measures them.
     ///
-    /// A fixture rather than a lookup, because the file is not in the repository and a test that
-    /// skipped itself when it was missing would pass everywhere and check nothing. These are the
-    /// same four numbers [`MODEL_LENGTH`] and [`MODEL_GROUND`] were read out beside, and replacing
-    /// the model means measuring all of them again.
+    /// A fixture rather than a lookup. The model is in the repository now, but the gun beside it
+    /// is not and never will be — and a test that reached into an asset would skip itself when one
+    /// was missing, which is a test that passes everywhere and checks nothing. These are the same
+    /// four numbers [`MODEL_LENGTH`] and [`MODEL_GROUND`] were read out beside, and replacing the
+    /// model means measuring all of them again. `tools/glb nodes` is what reads them back out.
     const TYRES: [(Vec3, usize); WHEELS] = [
         (Vec3::new(-0.6714, -0.2245, 0.3749), 0),
         (Vec3::new(-0.6714, -0.2245, -0.3755), 1),

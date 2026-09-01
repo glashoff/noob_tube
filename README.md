@@ -1571,7 +1571,8 @@ then scaled by its length, so the model and the shape a shot is tested against a
 a driver notices most.
 
 **Nothing requires it.** `/assets/` is ignored file by file and this one is let through because CC
-BY allows it; the animation library beside it is not. A client with no model on disk gets the box it
+BY allows it; the mounted gun beside it is not, because CC BY-**ND** does not. A client with no
+model on disk gets the box it
 always had, with its four cylinders visible — checked, because that is the state every other
 developer's first checkout is in. The choice is made from the filesystem rather than from the asset
 server, which would answer asynchronously, some frames after the vehicle already needed a body.
@@ -1789,12 +1790,12 @@ enough. The third answer is the one that should have been first: **use the mesh*
 through an approximate convex decomposition offline — parry's own VHACD, the same one Avian would
 run — and the resulting hulls are written out as a table of vertices by `tools/bake_collider`.
 
-The reason it was not the first answer was a real constraint read too broadly. `/assets/` is
-gitignored, the server has no assets directory, and one of the two models may not be redistributed
-at all; from that I concluded the shape had to be numbers, and then hand-measured the numbers. But
-"the shape must be numbers" does not imply "the numbers must come from a ruler". Baking the mesh
-into a table is still numbers. It travels without the model, the server needs nothing, and replacing
-a model becomes one command rather than an afternoon.
+The reason it was not the first answer was a real constraint read too broadly. The server loads no
+assets at all — no renderer, no glTF loader — and at the time the model was gitignored as well; from
+that the conclusion was that the shape had to be numbers, and then the numbers were measured by
+hand. But "the shape must be numbers" does not imply "the numbers must come from a ruler". Baking
+the mesh into a table is still numbers. It needs nothing on the server, it survives a model that may
+not be redistributed, and replacing a model becomes one command rather than an afternoon.
 
 ##### What it measures
 
@@ -2124,61 +2125,83 @@ code runs in `Update`, after that restore and before either of them.
 
 ## Risks
 
-**Bone path matching — the significant one.** Bevy binds animations by bone *path*. The 49 clip
-GLBs and the converted `Swat.glb` must agree on hierarchy and naming. Mixamo rigs are consistent,
-but FBX-to-GLB conversion can name the root node differently. Verify this first thing in M2,
-before building anything on top of it.
+**Bone path matching — settled.** Bevy binds animations by bone *path*, and a clip library that
+disagrees with a model's skeleton is a rewrite discovered late. The five character and animation
+files in `assets/` were checked against each other on full bone paths and are bit-identical:
+
+```bash
+tools/glb rigs assets/animations/*.glb assets/characters/*.glb assets/characters/*.gltf
+```
+
+Re-run it after any re-download. It is a five-second check for the failure this section used to
+call the significant one.
 
 **lightyear's learning curve.** Capable, but the API shifts noticeably between minor versions and
 the documentation has gaps. Budget time for reading the examples.
 
-**Mixamo licensing.** The assets may not be redistributed, which is why `webgame` keeps them out of
-its repository. The same applies here: they stay in `.gitignore` and each developer downloads them.
-Shipping them inside a packaged build is a separate question and less clear-cut than the web case —
-worth settling before cutting releases. It does not affect development.
+**Asset licensing.** Settled for what is here — the character kits are CC0 and the vehicle is
+CC BY, both credited in `assets/CREDITS.md` and both in the repository. The mounted gun is CC BY-ND
+and stays out; a build that ships it is a question to answer before cutting releases, not now.
 
 ---
 
-## Character assets: an open question
+## Character assets: settled
 
-The player model described above comes from Mixamo, which permits use but not redistribution. For
-an open-source project that means the assets stay out of the repository and every contributor
-downloads them, exactly as `webgame` does with `setup-assets.sh`.
+The player body and its animations are **Quaternius**, CC0, in the repository. What that took, and
+what it costs, is worth writing down — it was an open question for two milestones.
 
-**Quaternius** was evaluated as a CC0 alternative in August 2026. What the free Standard packs
-actually contain:
+| | |
+|---|---|
+| Bodies | `Superhero_Male_FullBody`, `Superhero_Female_FullBody`, `Mannequin_F`, and the male `Mannequin` inside the animation library |
+| Clips | 43 in `universal_animation_library_1.glb`, 43 more in `_2.glb` |
+| Rig | 65 joints, Unreal Engine mannequin naming, **bit-identical across all five files** |
+| Scale | metres — head bone at 1.60 m, so no model scale and no `fbx2gltf` step |
+| Root motion | already stripped in the non-`_RM` variants |
 
-| Pack | Clips | Locomotion | Weapon |
-|---|---|---|---|
-| Universal Animation Library | 43 | forward only | pistol |
-| Universal Animation Library 2 | 43 | forward only | sword, shield |
-| Toon Shooter Game Kit | 17 per character | forward only | rifle poses |
+The last two rows delete two whole jobs the [Root motion](#root-motion) section was written to
+describe. Foot lock still applies; the stripping does not.
 
-The 8-directional locomotion the marketing describes exists only in the paid Source tier. Two
-further findings:
+**What is usable for a shooter**, out of library 1: `Idle_Loop`, `Walk_Loop`, `Jog_Fwd_Loop`,
+`Sprint_Loop`, `Crouch_Idle_Loop`, `Crouch_Fwd_Loop`, `Jump_Start`/`Jump_Loop`/`Jump_Land`,
+`Death01`, `Hit_Chest`, `Hit_Head`, `Roll`, and the pistol set. Library 2 is fantasy-flavoured but
+lends five: `Hit_Knockback`, `OverhandThrow`, `Melee_Hook`, `Slide_Start`/`Loop`/`Exit`,
+`ClimbUp_1m`. `Driving_Loop` and `Sitting_Enter`/`Idle_Loop`/`Exit` are in library 1 and are what a
+seated driver needs.
 
-- **Rigs differ between packs.** The Animation Library and the Universal Base Characters share a
-  bit-identical 65-joint rig in Unreal naming (`root`, `pelvis`, `spine_01`). The Toon Shooter Kit
-  uses a separate 43-joint rig with one name in common, so its clothed characters cannot be driven
-  by the Animation Library without retargeting.
-- **The licence changed on 28 August 2026.** Quaternius replaced CC0 with the *Quaternius Asset
-  License v1.0*, which forbids redistributing the assets themselves while explicitly permitting
-  distribution of a finished product that incorporates them. Downloaded archives still carry CC0
-  notices and the site FAQ still says CC0, so the situation is inconsistent; QAL §7 states that the
-  version in force at download time governs.
+**Two gaps, both real.** Locomotion is **forward only** — there is no strafe or backpedal, so
+sidestepping will read as walking forward until something is authored or bought. And the weapon
+poses are a **pistol**, not a rifle.
 
-Net effect: **no source evaluated so far allows the assets into a public repository**, so the
-contributor-downloads-them step is unavoidable either way. Quaternius is the clearer of the two on
-shipping builds, where Mixamo leaves a grey area.
+**What was rejected.** A Sketchfab character called Mira was the first candidate and lost on the
+measurement: its rig shares no bone path with the animation library, it ships one 13-second idle
+loop rather than a clip set, it is 77 178 triangles against the mannequin's 13 744, and it has four
+arms, which humanoid clips have nothing to say about. `tools/glb rigs` reported that in a second,
+which is the argument for having built it.
 
-One upside of the Quaternius packs regardless: each library ships twice, once with root motion
-baked in and once with it disabled, which removes the stripping step described under
-[Root motion](#root-motion) entirely.
+### Dressing a character
 
-This decision is deliberately deferred until M2. M0 and M1 use a capsule placeholder.
+The free tier is bare bodies: the clothed characters are in Quaternius' paid Source tier. There are
+three ways to put clothes on what is here, in increasing order of effort.
+
+**Paint them into the texture.** The Superhero body is a smooth full-body suit, so a uniform, a
+wetsuit or armour plating is a base-colour map and nothing else — no rig work, no new geometry, and
+it costs nothing at run time because the mesh is unchanged. Two skin tones already ship this way
+(`_Dark` and `_Light`), which is the same trick applied to skin. Kenney's character packs are built
+entirely on this idea and ship editable SVGs, if an example is wanted.
+
+**Attach a garment on the same rig.** This is exactly what the eight hairstyles in
+`assets/characters/` already are: a separate `.gltf` carrying the same 65-joint skin, drawn on the
+same skeleton and animated by the same clips. A jacket, a vest or boots authored the same way drop
+in identically — and because the rig is the Unreal mannequin's, anything built for that skeleton by
+anybody fits without retargeting, which is a much larger pool than one asset shop.
+
+**Model it in Blender** against the same armature and export it as its own `.gltf`. Only necessary
+for something that has to deform differently from the body under it — a long coat, a backpack.
+
+The first two need no new machinery in the game beyond drawing more than one skinned mesh on one
+skeleton, which is the same thing the hair already requires.
 
 ## Still to settle
 
-- **Character assets** — see above.
 - **Per-bone hitboxes** — the hitbox is the movement capsule, so a head shot and a shin shot are
   the same shot. Waiting on the real models in M2.

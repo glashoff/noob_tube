@@ -3,7 +3,7 @@
 //! A vehicle used to be a box, and then sixteen boxes, and both were guesses at a mesh that was
 //! sitting right there. This runs the mesh through an approximate convex decomposition — the same
 //! one Avian would run, from the same version of parry — and writes the result out as a table of
-//! vertices, so that the game gets the shape without the model: the server has no assets directory
+//! vertices, so that the game gets the shape without the model: the server has no glTF loader
 //! and one of the two models may not be redistributed at all.
 //!
 //! ```text
@@ -117,9 +117,10 @@ fn bake(path: &str, out: &str, to_chassis: ToChassis) -> Result<(), String> {
          //! cargo run -p bake_collider -- bake {path} {out}\n\
          //! ```\n\
          //!\n\
-         //! The model is not in the repository and the server has never seen one, so the shape has\n\
-         //! to travel as numbers rather than as an asset. That is the whole reason this file is\n\
-         //! generated instead of loaded.\n\
+         //! The server loads no assets at all — it has no renderer and no glTF loader — so the\n\
+         //! shape has to travel as numbers rather than as a file, and shared code is where both\n\
+         //! sides can see it. A model that may not be redistributed is a second reason and not\n\
+         //! the load-bearing one. That is why this file is generated rather than loaded.\n\
          //!\n\
          //! Fired at from {} directions and compared against the model's own triangles, this shape\n\
          //! stops a shot a median of {:.1} cm short of the bodywork, {:.1} cm at the ninetieth\n\

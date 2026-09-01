@@ -113,10 +113,11 @@ pub struct VehicleSpec {
     /// run through an approximate convex decomposition offline and the hulls are written out as
     /// numbers, by `tools/bake_collider`. See `shared/src/vehicle_shape.rs`, which is generated.
     ///
-    /// Numbers rather than the model itself because the shape has to exist where the model does
-    /// not: `/assets/` is gitignored, the server has no assets directory at all, and one of the
-    /// two models may not be redistributed even if it did. Replacing a model means running the
-    /// bake again, which is a command rather than an afternoon with a ruler.
+    /// Numbers rather than the model itself because the shape has to exist where no asset can:
+    /// the server has no renderer and no glTF loader, and shared code is where both sides can see
+    /// the same shape. That a model may not be redistributable is a second reason and not the
+    /// load-bearing one. Replacing a model means running the bake again, which is a command
+    /// rather than an afternoon with a ruler.
     ///
     /// Fired at from twenty thousand directions and compared against the model's own triangles,
     /// this stops a shot a median of 0.7 cm from the bodywork against the sixteen boxes' 5.8, and

@@ -3,6 +3,62 @@
 Everything in this directory came from somewhere else. This file says where, because most of it is
 licensed on the condition that it does.
 
+## Universal Base Characters — the player bodies
+
+| | |
+|---|---|
+| Files | `characters/Superhero_{Male,Female}_FullBody.gltf` and the `.bin` and `T_*.png` beside them, plus `characters/Hair_*.gltf`, `characters/Eyebrows_*.gltf` |
+| Title | Universal Base Characters (Standard) |
+| Author | Quaternius — https://quaternius.com |
+| Licence | CC0 1.0 Universal, per `License_Standard.txt` in the download |
+| Changes | Only the `Godot - UE` glTF variant is here; the FBX and the duplicate "Origin at 0" hairstyles are not. Two image URIs were repointed — see below. The light-skin texture was renamed from `T_Superhero_Male_Ligh.png`. |
+
+**Two references in the archive point at files it does not contain.** Both bodies name
+`T_Eye_Normal_png.png` and `T_Hair_1_Normal_png.png`; what ships is `T_Eye_Normal.png` and
+`T_Hair_1_Normal.png`. The `.gltf` files here were edited to name the files that exist. Without
+that, Bevy fails to load the eye and hair normal maps and says so at run time rather than at build
+time. If the kit is ever re-downloaded, check whether this is still needed:
+
+```bash
+tools/glb info assets/characters/Superhero_Male_FullBody.gltf
+```
+
+Two skin tones ship for each body — `_Dark` and `_Light` — and only the dark one is wired into the
+material. The other is a texture swap away; see the README under "Dressing a character".
+
+## Universal Animation Library 1 and 2 — the clips
+
+| | |
+|---|---|
+| Files | `animations/universal_animation_library_1.glb`, `animations/universal_animation_library_2.glb`, `characters/Mannequin_F.glb` |
+| Title | Universal Animation Library / Universal Animation Library 2 (Standard) |
+| Author | Quaternius — https://quaternius.com |
+| Licence | CC0 1.0 Universal, per `License.txt` in each download |
+| Changes | Renamed from `UAL1_Standard.glb` and `UAL2_Standard.glb`. The `_RM` variants, which have root motion baked in, are deliberately not here — world position is server-driven. The Unity FBX variants are not here either. |
+
+43 clips each, and both carry the male `Mannequin` mesh as well, so the first file is a body and a
+clip library at once. `Mannequin_F.glb` is the female body from the second kit's own folder.
+
+**All five files share a bit-identical 65-joint rig**, matched on full bone paths rather than on
+names — which is what Bevy binds on. That is checkable, and worth re-checking after any
+re-download:
+
+```bash
+tools/glb rigs assets/animations/*.glb assets/characters/*.glb assets/characters/*.gltf
+```
+
+The naming is Unreal Engine's mannequin skeleton (`root`, `pelvis`, `spine_01`, `hand_l`), which is
+a de-facto standard well beyond Quaternius — so a garment or a body built for that rig by anybody
+drops in without retargeting.
+
+**On the licence.** The README records that Quaternius replaced CC0 with the Quaternius Asset
+License v1.0 on 28 August 2026, which forbids redistributing the assets themselves. The archives
+downloaded here were built on 17 June 2026 (both animation libraries) and 18 August 2025 (the base
+characters), and each carries a CC0 notice in writing; QAL §7 says the version in force at download
+time governs. That is the basis on which these files are in the repository, and it is a reading of
+the terms rather than advice — it is written down here so that it can be revisited rather than
+rediscovered.
+
 ## Halo Warthog — the vehicle model
 
 | | |

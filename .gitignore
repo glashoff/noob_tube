@@ -1,13 +1,24 @@
 /target
 
-# Assets are ignored by default and let through one at a time, because the reason differs per file:
-# the character animations are licensed for use but not redistribution — see README, "Character
-# assets: an open question" — while the vehicle model is CC BY and may travel with the repository.
-# The mounted gun is CC BY-**ND**, which is a third answer again and the reason nothing here is a
-# blanket rule. Whatever is let through must have an entry in assets/CREDITS.md, and adding a line
-# below is a licensing decision, not tidying.
+# Assets are ignored by default and let through one at a time, because the reason differs per file.
+# Adding a line here is a licensing decision, not tidying, and every file let through must have an
+# entry in assets/CREDITS.md saying who made it and under what terms.
+#
+# What is in: the Quaternius character and animation kits, which their own License.txt places under
+# CC0, and the Warthog, which is CC BY and may travel with the credit that is in CREDITS.md.
+# What is out: the mounted gun, which is CC BY-**ND** — see CREDITS.md, where the reasoning is.
 /assets/*
 !/assets/CREDITS.md
+
+# Whole directories, because everything in them came from the same CC0 kit.
+!/assets/animations/
+!/assets/characters/
+
+# The models directory holds two files under two different licences, so it is opened and then
+# closed again around the one that may travel.
+!/assets/models/
+/assets/models/*
+!/assets/models/warthog.glb
 
 # Byte-code from running the Python helpers in tools/
 __pycache__/
