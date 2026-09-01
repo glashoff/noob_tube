@@ -747,16 +747,74 @@ foot position, save a screenshot and exit. Without the variable the harness is i
 solves the same problem with its `client/scenarios/` directory.
 
 ### M2 — Character and animation
-Convert `Swat.fbx` to GLB with `fbx2gltf` (`webgame` already uses it), load the model, build an
-`AnimationGraph` over the 19 clips, port the selection logic from `Pawn.ts`, and cross-fade with
-`AnimationTransitions`. A third-person view helps verify this.
 
-Strip root motion and apply foot lock as described under [Player model](#player-model) — without
-it the character drifts away from its own position, which is confusing to debug later.
+A player is a person now rather than a capsule with a box for a head. The plan this replaces was
+built around Mixamo and `fbx2gltf`; what actually happened is written up under
+[Character assets](#character-assets-settled), and none of the conversion step survived — the
+Quaternius kit is glTF, in metres, with root motion already stripped.
 
-Also read in the joint and hit-capsule definitions. `webgame` generates these into
-`shared/assets/skeleton.json`, which can be reused as-is; M3 needs them for the ragdoll and later
-per-bone hit detection builds on the same data.
+**The model and the clips come from different files**, and that works only because they share a
+skeleton exactly. Bevy binds an animation to a bone by the *path* of names from the scene root
+down, so `Armature/root/pelvis/spine_01` has to be spelt the same in both — and it is, including
+the scene root, which is called `Armature` in all five files. `tools/glb rigs` is what says so, and
+`client/src/character.rs` is a handful of systems rather than a retargeting project because of it.
+
+**The model is scaled to the hitbox, not to taste.** The collision capsule is the hitbox — a shot
+is tested against it and nothing else — and the body is 1.81 m in its own file against a 1.70 m
+capsule. Drawn at its own size, 11 cm of head would be visible, aimable and unhittable. That is the
+same mistake the placeholder head box made once already, so the scale is derived rather than typed:
+`CAPSULE_HEIGHT / MODEL_HEIGHT`, with a test on each end.
+
+What no uniform scale fixes is **width**. A character with an arm out reaches past a 35 cm capsule,
+and that is the honest cost of a real model over a capsule — it is the argument for the per-bone
+hitboxes under [Still to settle](#still-to-settle), which just became a real gap rather than a
+theoretical one.
+
+#### Choosing a clip
+
+From `PlayerState`, not from watching the transform move. The simulation already knows whether a
+player is on the ground and whether they are crouching, and differencing positions would turn
+interpolation's smoothing into a flicker in the choice of clip. Horizontal speed only: a player
+dropping off a ledge at 12 m/s should not have their legs sprint.
+
+**Foot lock** is playing the clip at `actual speed / the speed its stride was authored for`. Those
+natural speeds cannot be measured from the file in `assets/` — root motion is stripped there, which
+is exactly why it is the variant that is in. They come from the `_RM` variant of the same download,
+where the root bone still travels, and `tools/glb animations` prints them:
+
+| clip | natural speed |
+|---|---|
+| `Walk_Loop` | 0.97 m/s |
+| `Jog_Fwd_Loop` | 5.36 m/s |
+| `Crouch_Fwd_Loop` | 0.75 m/s |
+| `Sprint_Loop` | 8.25 m/s — unused, there is no sprint input |
+
+**The walk and the jog are far apart and there is nothing between them.** The crossover is at
+`sqrt(0.97 * 5.36)` = 2.28 m/s, the geometric mean, because that is what keeps the *ratio* either
+clip is stretched by as small as it can be — at the crossover both are stretched alike, which a
+test holds. Between roughly 1.5 and 3.5 m/s one or the other is being pushed hard. It matters less
+than it sounds: movement ramps to full speed in 0.3 s, so that band is passed through rather than
+lived in. At full speed, 5.5 m/s against the jog's 5.36, the stretch is 1.03 and the feet are
+planted.
+
+**The crouch is the one that cannot keep up.** It paces 0.75 m/s and this game crouch-walks at 2.6,
+so it runs into the clamp at 2× and the feet skate. Stated in a test rather than left to be
+noticed, so that changing either number says whether the compromise is gone.
+
+#### What is not done
+
+- **The head does not follow the aim.** The placeholder had a head box on a stick and pitching it
+  was a quaternion; the head is a bone inside an animated skeleton now, its local axes are the
+  rig's rather than the world's, and the animation rewrites its rotation every frame. Doing it
+  right means measuring the bone's rest orientation and post-multiplying after the animation
+  systems — worth doing, not worth guessing at.
+- **No strafe or backpedal.** The free library has forward locomotion only, so sidestepping reads
+  as walking forward.
+- **Our own player still has no body**, because the camera is inside it. A third-person view and
+  first-person arms are both waiting on that.
+- **A seated driver is hidden rather than posed.** `Driving_Loop` and `Sitting_Enter`/`Exit` are in
+  the library and unused.
+- **Per-bone hitboxes**, as above.
 
 ### M3 — Multiplayer and shooting
 The server simulates authoritatively at 64 Hz and replicates player entities. Clients send input

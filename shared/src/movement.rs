@@ -32,25 +32,13 @@ pub const CROUCH_CAPSULE_HALF_HEIGHT: f32 = 0.25;
 pub const CAPSULE_Y_OFFSET: f32 = CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS;
 pub const CROUCH_CAPSULE_Y_OFFSET: f32 = CROUCH_CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS;
 
-/// The placeholder silhouette: a body capsule with a head box on top.
+/// How tall a standing player is, and so how tall the drawn figure may be.
 ///
-/// Both must fit **inside** the collision capsule, because that capsule is the hitbox — a shot is
-/// tested against it and against nothing else. A silhouette that reached outside would let a player
-/// aim at a head no raycast can reach, which is exactly what the first version of these heads did:
-/// it sat from 1.70 m to 2.04 m, entirely above the 1.70 m capsule.
-///
-/// The body is drawn shorter than the collision capsule on purpose. Drawn at full height it would
-/// enclose the head and hide it, which is the conflict that produced the broken version — the fix
-/// is to give the head room rather than to move it out of the way.
-///
-/// `silhouette_fits_inside_the_hitbox` in this module holds the containment to account.
-pub const BODY_RADIUS: f32 = 0.30;
-pub const BODY_HALF_HEIGHT: f32 = 0.53;
-/// Body capsule centre above the feet. Its top lands at `BODY_HEIGHT`, where the head starts.
-pub const BODY_Y_OFFSET: f32 = BODY_HALF_HEIGHT + BODY_RADIUS;
-pub const HEAD_SIZE: f32 = 0.28;
-/// Head centre above the feet.
-pub const HEAD_Y: f32 = 1.48;
+/// The collision capsule *is* the hitbox — a shot is tested against it and against nothing else —
+/// so anything drawn above this is a part of a player that can be aimed at and never hit. That
+/// mistake has been made here once, with a head box that sat from 1.70 m to 2.04 m: perfectly
+/// visible and impossible to shoot. `client/src/character.rs` scales the character model by this.
+pub const CAPSULE_HEIGHT: f32 = 2.0 * (CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS);
 
 /// Gap kept between the capsule and surfaces so it does not stick to them.
 pub const SKIN: f32 = 0.01;
@@ -76,37 +64,27 @@ pub const CROUCH_EYE_HEIGHT: f32 = 1.10;
 mod tests {
     use super::*;
 
-    /// The hitbox is the collision capsule and nothing else, so anything a player can see has to be
-    /// inside it. Otherwise there is a part of the silhouette that cannot be shot, which is worse
-    /// than an invisible one — the player aims at it and is told they missed.
+    /// [`CAPSULE_HEIGHT`] has to be the height of the capsule, because the client scales the
+    /// character model by it and a model scaled by a wrong number is a player with an unhittable
+    /// head. Derived rather than typed, so this guards a hand edit rather than arithmetic.
     #[test]
-    fn silhouette_fits_inside_the_hitbox() {
-        // Worst case is a top corner of the head box: furthest out horizontally *and* highest.
-        let half = HEAD_SIZE / 2.0;
-        let corner_distance = (half * half * 2.0f32).sqrt();
+    fn the_stated_height_is_the_capsule_it_describes() {
         assert!(
-            inside_capsule(corner_distance, HEAD_Y + half),
-            "the head's top corners reach outside the hitbox"
+            inside_capsule(0.0, CAPSULE_HEIGHT - 1e-4),
+            "the top of the capsule is below the height claimed for it",
         );
+        assert!(
+            !inside_capsule(0.0, CAPSULE_HEIGHT + 1e-3),
+            "the capsule reaches above the height claimed for it",
+        );
+    }
 
-        // And the body's own widest, highest ring.
-        let body_top = BODY_Y_OFFSET + BODY_HALF_HEIGHT;
-        assert!(
-            inside_capsule(BODY_RADIUS, body_top),
-            "the body capsule's shoulder reaches outside the hitbox"
-        );
-        assert!(
-            inside_capsule(BODY_RADIUS, BODY_Y_OFFSET - BODY_HALF_HEIGHT),
-            "the body capsule's hip reaches outside the hitbox"
-        );
-
-        // The head has to start below where the body ends, or there is a gap to see through. They
-        // overlap by a couple of centimetres, as body and head do on any real model.
-        assert!(
-            HEAD_Y - half < body_top,
-            "a gap between body and head: body ends at {body_top}, head starts at {}",
-            HEAD_Y - half
-        );
+    /// And the camera has to look out from inside it. A viewpoint above a player's own hitbox is a
+    /// player who can see over cover that no shot of theirs — or at them — can cross.
+    #[test]
+    fn the_eye_looks_out_from_inside_the_hitbox() {
+        assert!(inside_capsule(0.0, EYE_HEIGHT), "the standing eye is outside the hitbox");
+        assert!(inside_capsule(0.0, CROUCH_EYE_HEIGHT), "the crouched eye is outside the hitbox");
     }
 
     /// Is a point at horizontal distance `d` and height `y` above the feet inside the standing

@@ -1,9 +1,8 @@
 //! Draws the players the server replicates to us.
 //!
 //! This is the receiving half of replication. Nothing here spawns a player: the entities arrive
-//! from the server carrying [`Player`], [`PlayerState`] and [`Aim`], and this module only gives them
-//! something visible. A capsule, because it is the exact shape the movement code collides with —
-//! character models are M2.
+//! from the server carrying [`Player`], [`PlayerState`] and [`Aim`], and this module places them,
+//! claims our own, and sends our input. What they are *drawn* as lives in [`crate::character`].
 //!
 //! The values are already smoothed by the time anything here reads them. The server marks every
 //! player `Interpolated` for every client but its owner, and lightyear then keeps a history of
@@ -13,9 +12,6 @@
 use bevy::prelude::*;
 use lightyear::prelude::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use noob_tube_shared::movement::{
-    BODY_HALF_HEIGHT, BODY_RADIUS, BODY_Y_OFFSET, HEAD_SIZE, HEAD_Y,
-};
 use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
 use noob_tube_shared::vehicle::Driving;
 use noob_tube_shared::tuning::NetConfig;
@@ -28,10 +24,10 @@ impl Plugin for RemotePlayersPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (give_bodies, claim_own_player, hide_the_seated, place_bodies, place_heads)
+            (claim_own_player, hide_the_seated, place_bodies)
                 .chain()
                 // Interpolation writes the smoothed values into `PlayerState` and `Aim` in Update
-                // as well. Without this the capsules would render whatever last frame's sample
+                // as well. Without this the bodies would render whatever last frame's sample
                 // was — one frame of lag added on top of the delay interpolation already costs.
                 .after(InterpolationSystems::All),
         )
@@ -71,83 +67,22 @@ fn report_input_delay(
     );
 }
 
-/// A player's head, a child of the capsule. Carries the pitch the capsule cannot.
-#[derive(Component)]
-struct PlayerHead;
-
-/// Update: gives a replicated player a capsule to be seen as.
+/// Update: follows the replicated state with the body.
 ///
-/// `Without<Predicted>` is what leaves our own player out. Our entity arrives over the network like
-/// everyone else's, but the camera sits inside it, so a capsule there would fill the screen. It is
-/// also the entity the mesh would be least honest about: it is the one being corrected.
+/// The transform is the player's *feet*, which is what `PlayerState::position` is and what a
+/// character model measures from — the offset the placeholder capsule needed is gone with it.
 ///
-/// The mesh and material are created per player, which is wasteful and fine for a handful; sharing
-/// them belongs with the asset handling in M2.
-fn give_bodies(
-    arrived: Query<
-        (Entity, &Player),
-        (With<client::Remote>, Without<Predicted>, Added<PlayerState>),
-    >,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut commands: Commands,
-) {
-    let head_mesh = meshes.add(Cuboid::from_length(HEAD_SIZE));
-    let head_material = materials.add(Color::srgb(0.9, 0.75, 0.6));
-    // A nose, so the direction is unmistakable. A cube alone looks the same from four sides.
-    let nose_mesh = meshes.add(Cuboid::new(0.08, 0.08, 0.22));
-    let nose_material = materials.add(Color::srgb(0.15, 0.15, 0.18));
-
-    for (entity, player) in arrived.iter() {
-        commands
-            .entity(entity)
-            .insert((
-                Name::from(format!("Remote player {}", player.peer)),
-                Mesh3d(meshes.add(Capsule3d::new(BODY_RADIUS, BODY_HALF_HEIGHT * 2.0))),
-                MeshMaterial3d(materials.add(Color::srgb(0.8, 0.3, 0.25))),
-                Transform::default(),
-            ))
-            .with_children(|body| {
-                body.spawn((
-                    Name::from("Head"),
-                    PlayerHead,
-                    Mesh3d(head_mesh.clone()),
-                    MeshMaterial3d(head_material.clone()),
-                    // Both the body and this are sized so the whole silhouette fits inside the
-                    // collision capsule, which is the hitbox — see `movement.rs`, where a test
-                    // holds that to account. The first version of this head sat from 1.70 m to
-                    // 2.04 m, entirely above the 1.70 m capsule: perfectly visible and impossible
-                    // to shoot.
-                    //
-                    // The transform is relative to the body capsule's centre, not the feet.
-                    Transform::from_xyz(0.0, HEAD_Y - BODY_Y_OFFSET, 0.0),
-                ))
-                .with_children(|head| {
-                    // Forward is -Z, matching the convention movement uses.
-                    head.spawn((
-                        Name::from("Nose"),
-                        Mesh3d(nose_mesh.clone()),
-                        MeshMaterial3d(nose_material.clone()),
-                        Transform::from_xyz(0.0, 0.0, -HEAD_SIZE * 0.8),
-                    ));
-                });
-            });
-        info!("drawing player {}", player.peer);
-    }
-}
-
-/// Update: follows the replicated state with the capsule.
+/// Yaw only. Pitch turns the head on a real body, not the whole person, and the head is a bone
+/// inside an animated skeleton now rather than a box on a stick: aiming it is its own job and it is
+/// not done yet. Standing still and looking up, a player's body no longer leans back — which is
+/// right — but neither does anything of theirs move, which is the part still missing.
 ///
-/// `PlayerState::position` is the feet, the capsule mesh is centred, hence the offset. Yaw is
-/// applied but pitch is not: a capsule leaning back would look wrong, and a real body only turns at
-/// the waist. That is M2's problem.
-///
-/// Our own player is excluded for the same reason it gets no mesh: the camera is inside it.
+/// Our own player is excluded for the same reason it gets no body: the camera is inside it.
 fn place_bodies(
     mut bodies: Query<(&PlayerState, &Aim, &mut Transform), (With<client::Remote>, Without<Predicted>)>,
 ) {
     for (state, aim, mut transform) in bodies.iter_mut() {
-        transform.translation = state.position + Vec3::Y * BODY_Y_OFFSET;
+        transform.translation = state.position;
         transform.rotation = Quat::from_rotation_y(aim.yaw);
     }
 }
@@ -205,21 +140,4 @@ fn send_input(
     mut action: Single<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
 ) {
     action.0 = input.0;
-}
-
-/// Update: pitches each head to match its player's aim.
-///
-/// Yaw already turns the whole body, so the head only carries pitch. Splitting them this way is
-/// what a real character does too — the legs face where you walk, the head looks where you aim —
-/// and it is the reason `Aim` is replicated at all.
-fn place_heads(
-    mut heads: Query<(&ChildOf, &mut Transform), With<PlayerHead>>,
-    bodies: Query<&Aim>,
-) {
-    for (parent, mut transform) in heads.iter_mut() {
-        let Ok(aim) = bodies.get(parent.parent()) else {
-            continue;
-        };
-        transform.rotation = Quat::from_rotation_x(aim.pitch);
-    }
 }

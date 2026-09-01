@@ -1,6 +1,7 @@
 //! Game client: renders the world, samples input, predicts the local player.
 
 mod bot;
+mod character;
 mod corrections;
 mod crosshair;
 mod debug_draw;
@@ -50,6 +51,7 @@ fn main() {
             vehicle::VehiclePlugin,
             shot_effects::ShotEffectsPlugin,
             remote_players::RemotePlayersPlugin,
+            character::CharacterPlugin,
             harness::HarnessPlugin,
         ))
         // Adds nothing unless `NOOB_TUBE_BOT` is set — the plugin decides that itself, so the

@@ -29,6 +29,7 @@ What this cannot do is show you the model. For that, see the README under "Looki
 
 import base64
 import json
+import math
 import os
 import struct
 import sys
@@ -280,6 +281,10 @@ def animations(path):
             moving.append((span, glb.name(target["node"]), target["path"], len(values)))
 
         moving.sort(reverse=True)
+        travel = _travel(glb, clip)
+        if travel is not None:
+            distance, speed = travel
+            print(f"travels {distance:.2f} m, {speed:.2f} m/s — the speed the feet are pacing for")
         print(f"{len(moving)} channels move, {still} never do; "
               f"{loops} of the moving ones end where they started")
         print(f"  {'span':>9}  {'joint':36} {'path':12} keys")
@@ -310,6 +315,29 @@ def _joint_paths(glb):
             walker = parents.get(walker)
         out["/".join(reversed(chain))] = joint
     return out
+
+
+def _travel(glb, clip):
+    """How far the clip carries the figure, and how fast.
+
+    Root motion: a locomotion clip made with it advances the root bone, and that displacement over
+    the clip's length is the speed the stride was authored for. It is what foot lock needs — play a
+    walk at a different ground speed and the feet skate — and a clip exported with root motion
+    stripped reports nothing here, which is itself the answer to "which variant is this".
+    """
+    for wanted in ("root", "pelvis"):
+        for channel in clip.get("channels", []):
+            target = channel["target"]
+            if target["path"] != "translation" or glb.name(target["node"]) != wanted:
+                continue
+            values = glb.read(clip["samplers"][channel["sampler"]]["output"])
+            first, last = values[0], values[-1]
+            distance = math.hypot(last[0] - first[0], last[2] - first[2])
+            seconds = _duration(glb, clip)
+            if distance < 1e-4 or seconds <= 0.0:
+                return None
+            return distance, distance / seconds
+    return None
 
 
 def rigs(paths):
