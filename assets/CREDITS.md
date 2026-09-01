@@ -3,6 +3,38 @@
 Everything in this directory came from somewhere else. This file says where, because most of it is
 licensed on the condition that it does.
 
+## Mixamo Swat — the player character
+
+| | |
+|---|---|
+| Files | `characters/swat.glb` and `anims/*.glb` — **not in this repository** |
+| Source | https://www.mixamo.com — character "Swat", plus the "Rifle 8-Way Locomotion Pack" |
+| Author | Mixamo, an Adobe company |
+| Licence | Free with an Adobe account. Use is permitted; **redistribution is not.** |
+| Changes | Converted from FBX to glTF with `FBX2glTF`. Mixamo's own file names are kept, because the clip names are taken from them. |
+
+**This is why `tools/setup-assets` exists.** Everything else under `assets/` is here; this cannot be,
+and a glTF conversion is still the same animation data, so converting it changes nothing about the
+licence. Each developer downloads the two packs and runs:
+
+```bash
+tools/setup-assets                 # defaults to ../webgame/assets
+tools/setup-assets ~/mixamo        # or wherever the packs are
+```
+
+Nothing in the game requires the result — see `client/src/character.rs`, where a checkout without
+it falls back to the Quaternius character below. What it costs to be without it is 8-way
+locomotion: the fallback can only walk forward.
+
+The two skeletons agree on all 70 bone paths, which is the failure that is otherwise silent and
+is worth re-checking after any re-download:
+
+```bash
+tools/glb rigs assets/characters/swat.glb assets/anims/idle.glb
+```
+
+The three paths it reports unmatched are the character's own mesh nodes, which no clip animates.
+
 ## Universal Base Characters — the player bodies
 
 | | |

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Brings in the character assets that may not live in this repository.
+#
+# The Mixamo soldier and its 49 animation clips are licensed for use but **not** for
+# redistribution, so unlike everything else under assets/ they are not committed — see
+# assets/CREDITS.md, where the difference between the licences is spelt out. This turns whatever
+# you have on disk into what the game loads:
+#
+#   <source>/Shooter Pack/Swat.fbx                 --convert-->  assets/characters/swat.glb
+#   <source>/Rifle 8-Way Locomotion Pack/*.fbx     --convert-->  assets/anims/*.glb
+#   <source>/anims/*.glb                           --copy----->  assets/anims/*.glb
+#
+# The last line is the quick path: `webgame` converted these clips already, and its checkout is
+# the default source for exactly that reason.
+#
+# Usage:  tools/setup-assets [SOURCE]        (default: ../webgame/assets)
+#
+# Nothing in the game *requires* the result. A checkout without it falls back to the Quaternius
+# character, which is CC0 and is committed — see client/src/character.rs.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source_dir="${1:-$here/../webgame/assets}"
+shooter="$source_dir/Shooter Pack"
+rifle="$source_dir/Rifle 8-Way Locomotion Pack"
+converted="$source_dir/anims"
+
+fail() { printf '\n\033[31m%s\033[0m\n\n' "$1" >&2; exit 1; }
+step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
+
+[ -d "$source_dir" ] || fail "No such directory: $source_dir
+
+Pass the directory holding the Mixamo packs, or check out webgame beside this repository.
+Both packs are free from https://www.mixamo.com with an Adobe account:
+  · character \"Swat\"              -> Shooter Pack/Swat.fbx
+  · \"Rifle 8-Way Locomotion Pack\" -> Rifle 8-Way Locomotion Pack/*.fbx  (FBX Binary)
+Keep Mixamo's own file names: the clip names are taken from them."
+
+[ -f "$shooter/Swat.fbx" ] || fail "Not found: $shooter/Swat.fbx"
+
+# FBX2glTF converts the character. It is a single native binary; webgame vendors it through npm,
+# which is the likeliest place to find one already downloaded.
+converter="$(command -v FBX2glTF || true)"
+[ -n "$converter" ] || converter="$source_dir/../tools/convert-anims/node_modules/fbx2gltf/bin/Linux/FBX2glTF"
+[ -x "$converter" ] || fail "No FBX2glTF on PATH and none at
+  $converter
+
+It is one native binary. Either put one on PATH or run webgame's tools/setup-assets.sh once,
+which downloads it as an npm dependency."
+
+mkdir -p "$here/assets/characters" "$here/assets/anims"
+
+step "Converting the character"
+"$converter" --binary --input "$shooter/Swat.fbx" --output "$here/assets/characters/swat" \
+  2>&1 | grep -E "^Wrote|error" || true
+[ -f "$here/assets/characters/swat.glb" ] || fail "The conversion produced no swat.glb."
+
+if [ -d "$converted" ] && [ -n "$(find "$converted" -maxdepth 1 -name '*.glb' -print -quit)" ]; then
+  step "Copying clips that are already glTF ($converted)"
+  cp "$converted"/*.glb "$here/assets/anims/"
+elif [ -d "$rifle" ]; then
+  step "Converting clips ($rifle)"
+  find "$rifle" -maxdepth 1 -iname '*.fbx' ! -iname 'swat.fbx' -print0 |
+    while IFS= read -r -d '' clip; do
+      name="$(basename "${clip%.*}" | tr '[:upper:] ' '[:lower:]_')"
+      "$converter" --binary --input "$clip" --output "$here/assets/anims/$name" >/dev/null 2>&1
+    done
+else
+  fail "Neither $converted nor $rifle exists — nowhere to get the clips from."
+fi
+
+clips=$(find "$here/assets/anims" -maxdepth 1 -name '*.glb' | wc -l)
+step "Done: 1 character and $clips clips"
+echo "Check that they agree on a skeleton, which is the failure that is silent:"
+echo "  tools/glb rigs assets/characters/swat.glb assets/anims/idle.glb assets/anims/walk_left.glb"

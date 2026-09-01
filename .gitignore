@@ -14,6 +14,12 @@
 !/assets/animations/
 !/assets/characters/
 
+# Except the Mixamo soldier, which is a third answer again: licensed for use and explicitly not
+# for redistribution, so it stays out however convenient it would be to have it. `tools/setup-assets`
+# is how each developer produces their own copy. Its 49 clips live in /assets/anims/, which is
+# covered by the blanket rule above and is deliberately not opened.
+/assets/characters/swat.glb
+
 # The models directory holds two files under two different licences, so it is opened and then
 # closed again around the one that may travel.
 !/assets/models/

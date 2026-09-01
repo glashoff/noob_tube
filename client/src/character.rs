@@ -2,18 +2,29 @@
 //!
 //! A player entity arrives from the server carrying [`PlayerState`] and [`Aim`] and nothing
 //! visible. This hangs a character model under it and picks the animation that matches what the
-//! simulation says the player is doing — standing, walking, running, crouching or in the air.
+//! simulation says the player is doing — standing, walking, running, crouching or in the air, and
+//! in which of eight directions.
+//!
+//! **Two kits, and the difference between them is licensing rather than taste.** The Mixamo
+//! soldier is what the game is built around and what `webgame` used before it: a proper 8-way
+//! locomotion set, aiming idles, deaths. It may be used and not redistributed, so it is not in
+//! this repository and `tools/setup-assets` is what brings it in. Without it the game falls back
+//! to the Quaternius character, which is CC0 and committed — a whole figure rather than a capsule,
+//! but with forward locomotion only. Nothing here may *require* an asset that a fresh checkout
+//! does not have, which is the same rule the vehicle model follows.
 //!
 //! **The model and the clips come from different files**, and that only works because they share a
 //! skeleton exactly. Bevy binds an animation to a bone by the *path* of names from the scene root
-//! down, so `Armature/root/pelvis/spine_01` has to be spelt the same in both. It is:
+//! down, so `RootNode/mixamorig:Hips/mixamorig:Spine` has to be spelt the same in both. It is —
+//! measured, not hoped for:
 //!
 //! ```text
-//! tools/glb rigs assets/animations/*.glb assets/characters/*.gltf
+//! tools/glb rigs assets/characters/swat.glb assets/anims/idle.glb
 //! ```
 //!
-//! reports the five files in `assets/` as identical. That check is the whole reason this is a
-//! handful of systems rather than a retargeting project — see the README under "Character assets".
+//! reports all 70 bone paths shared, the only three unmatched being the character's own mesh
+//! nodes, which no clip has a curve for. That check is the whole reason this is a handful of
+//! systems rather than a retargeting project — see the README under "Character assets".
 
 use bevy::animation::{AnimatedBy, AnimationTargetId};
 use bevy::gltf::Gltf;
@@ -21,44 +32,75 @@ use bevy::prelude::*;
 use core::time::Duration;
 use lightyear::prelude::*;
 use noob_tube_shared::movement::CAPSULE_HEIGHT;
-use noob_tube_shared::player::{Player, PlayerState};
+use noob_tube_shared::player::{Aim, Player, PlayerState};
 
-/// The body, under the asset directory.
+/// Everything that makes one set of character assets usable, as a table entry.
 ///
-/// One of two that ship — `Superhero_Female_FullBody.gltf` is the other, and swapping this line is
-/// the whole of using it. Both are CC0; see `assets/CREDITS.md`.
-const BODY: &str = "characters/Superhero_Male_FullBody.gltf";
-/// The clip library, under the asset directory. 43 animations on the same skeleton.
-const CLIPS: &str = "animations/universal_animation_library_1.glb";
+/// Deliberately not a trait and not two code paths. The two kits differ in what they are *called*
+/// and how tall they are; what is done with them is the same, and a second soldier is a second
+/// entry rather than a second pipeline.
+struct Kit {
+    /// The body, under the asset directory.
+    body: &'static str,
+    /// Where the clips come from — one file each, or all in one library.
+    clips: Clips,
+    /// How tall the body is in its own file, standing, in metres.
+    ///
+    /// Measured rather than guessed; `tools/glb nodes <file>` reads it back out of the mesh's own
+    /// bounds. Replacing a body means measuring this again, because everything scales by it.
+    height: f32,
+    /// The ground speeds the walk, run and crouch-walk cycles were authored for, in metres per
+    /// second.
+    ///
+    /// This is what foot lock needs: play a stride at a speed it was not made for and the feet
+    /// skate along the ground. Playing it at `actual / authored` puts the stride back in step.
+    ///
+    /// Measured, not guessed — `tools/glb animations <clip>` prints it from how far the hips
+    /// travel over the clip. The soldier's numbers come out at 1.84, 4.61 and 1.96, which are
+    /// `webgame`'s 4.606 and 1.956 to three figures; the fallback kit's at 0.97, 5.36 and 0.75,
+    /// read out of the download's `_RM` variant since the committed one has root motion stripped.
+    paces: Paces,
+}
 
-/// How tall the body is in its own file, standing, in metres.
-///
-/// Measured rather than guessed — `tools/glb` reads it back out of the mesh's own bounds:
-///
-/// ```text
-/// tools/glb nodes assets/characters/Superhero_Male_FullBody.gltf
-/// ```
-///
-/// The female body is 1.767 by the same measure, so replacing [`BODY`] means replacing this too.
-const MODEL_HEIGHT: f32 = 1.810;
+/// The three locomotion cycles' authored speeds, in metres per second.
+struct Paces {
+    walk: f32,
+    run: f32,
+    crouch: f32,
+}
 
-/// What the model is scaled by so that it is exactly as tall as the collision capsule.
-///
-/// Not decoration. The capsule *is* the hitbox — a shot is tested against it and nothing else — so
-/// a model drawn at its own 1.81 m inside a 1.70 m capsule would put 11 cm of head where a player
-/// can aim and no raycast can reach. That mistake has been made here once already, with the
-/// placeholder head box this replaces, and it is invisible until somebody complains that head
-/// shots do not register.
-///
-/// What this does *not* fix is width: a character with an arm out reaches past a 35 cm capsule and
-/// no uniform scale changes that. It is the honest cost of a real model over a capsule, and the
-/// argument for the per-bone hitboxes under "Still to settle" in the README.
-const MODEL_SCALE: f32 = CAPSULE_HEIGHT / MODEL_HEIGHT;
+/// How a kit's animations are packaged.
+enum Clips {
+    /// One glTF per clip, named by its file: Mixamo's shape, and `webgame`'s.
+    ///
+    /// The clip inside each carries no useful name of its own — every one of the 49 is called
+    /// `mixamo.com` — so the file name is the name, which is also why `tools/setup-assets` keeps
+    /// Mixamo's own spelling.
+    PerFile { directory: &'static str },
+    /// All of them in one file, looked up by the name they carry: Quaternius' shape.
+    Library { file: &'static str },
+}
+
+/// The Mixamo soldier, and the 49 clips `tools/setup-assets` brings in beside it.
+const SWAT: Kit = Kit {
+    body: "characters/swat.glb",
+    clips: Clips::PerFile { directory: "anims" },
+    height: 1.78,
+    paces: Paces { walk: 1.84, run: 4.61, crouch: 1.96 },
+};
+
+/// The CC0 fallback, so that a checkout with no Mixamo assets still has a person in it.
+const MANNEQUIN: Kit = Kit {
+    body: "characters/Superhero_Male_FullBody.gltf",
+    clips: Clips::Library { file: "animations/universal_animation_library_1.glb" },
+    height: 1.810,
+    paces: Paces { walk: 0.97, run: 5.36, crouch: 0.75 },
+};
 
 /// Half a turn, because glTF says a model faces +Z and this game says forward is −Z.
 ///
-/// Confirmed against the file rather than taken from the specification: the eyes and eyebrows sit
-/// at z 0.04 to 0.09, on the +Z side of the head.
+/// Confirmed against both files rather than taken from the specification: the Quaternius eyes sit
+/// at z 0.04 to 0.09, and the soldier's toe bone is 10 cm in front of its ankle on the same side.
 const MODEL_YAW: f32 = core::f32::consts::PI;
 
 /// How long a change of animation takes to blend.
@@ -67,92 +109,192 @@ const MODEL_YAW: f32 = core::f32::consts::PI;
 /// a second is about one frame of a run cycle at these speeds.
 const BLEND: Duration = Duration::from_millis(120);
 
-/// The clips this game asks for, by the names they carry in the library.
-///
-/// Fewer than the library holds, and deliberately: a name that is not here is one nothing in the
-/// simulation can ask for. `Sprint_Loop` is absent because there is no sprint input — the ground
-/// speed tops out at 5.5 m/s and the jog cycle is paced for 5.36.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Motion {
-    Idle,
-    Walk,
-    Jog,
-    CrouchIdle,
-    CrouchWalk,
-    Airborne,
-}
-
-impl Motion {
-    /// The clip's name in the library.
-    fn clip(self) -> &'static str {
-        match self {
-            Motion::Idle => "Idle_Loop",
-            Motion::Walk => "Walk_Loop",
-            Motion::Jog => "Jog_Fwd_Loop",
-            Motion::CrouchIdle => "Crouch_Idle_Loop",
-            Motion::CrouchWalk => "Crouch_Fwd_Loop",
-            Motion::Airborne => "Jump_Loop",
-        }
-    }
-
-    /// The ground speed the clip's stride was authored for, in metres per second.
-    ///
-    /// This is what foot lock needs: play a walk cycle at a speed its stride was not made for and
-    /// the feet skate along the ground. Playing it at `actual / natural` puts the stride back in
-    /// step with the travel.
-    ///
-    /// The numbers are measured, not guessed, and they cannot be measured from the file in
-    /// `assets/` — root motion is stripped there, which is why it is the variant that is in. They
-    /// come from the `_RM` variant of the same download, where the root bone still travels:
-    ///
-    /// ```text
-    /// tools/glb animations 'Universal Animation Library[Standard]/Unreal-Godot/UAL1_Standard_RM.glb'
-    /// ```
-    ///
-    /// prints `travels 1.30 m, 0.97 m/s` for the walk and `5.00 m, 5.36 m/s` for the jog. A clip
-    /// that does not travel returns `None` and is played at its own pace.
-    fn natural_speed(self) -> Option<f32> {
-        match self {
-            Motion::Walk => Some(0.97),
-            Motion::Jog => Some(5.36),
-            Motion::CrouchWalk => Some(0.75),
-            Motion::Idle | Motion::CrouchIdle | Motion::Airborne => None,
-        }
-    }
-
-    fn all() -> [Motion; 6] {
-        [
-            Motion::Idle,
-            Motion::Walk,
-            Motion::Jog,
-            Motion::CrouchIdle,
-            Motion::CrouchWalk,
-            Motion::Airborne,
-        ]
-    }
-}
-
 /// Below this, a player is standing still rather than walking slowly.
 ///
 /// A shade under a tenth of a metre a second. Lower and a player who has stopped keeps shuffling on
 /// the last of their deceleration; higher and the first step of a walk is a slide.
 const STILL: f32 = 0.08;
 
-/// Where the walk cycle gives way to the jog.
-///
-/// The geometric mean of the two clips' natural speeds, `sqrt(0.97 * 5.36)`, which is the crossover
-/// that keeps the *ratio* each clip is stretched by as small as it can be. The two are far apart
-/// and there is nothing between them — the free library has forward locomotion at a walk and at a
-/// jog and nothing else — so between about 1.5 and 3.5 m/s one or the other is being pushed hard.
-/// It matters less than it sounds: movement ramps to full speed in 0.3 s, so that band is passed
-/// through rather than lived in.
-const TROT: f32 = 2.28;
-
 /// How far a clip may be sped up or slowed down before it is left alone to skate a little.
 ///
-/// A stride played at three times its pace does not read as running fast, it reads as broken. The
-/// crouch is what runs into this: it is authored for 0.75 m/s and this game crouch-walks at 2.6.
+/// A stride played at three times its pace does not read as running fast, it reads as broken. With
+/// the soldier's clips nothing comes near this — full speed is 1.19x its run — and it is the
+/// fallback kit that runs into it, whose crouch is authored for 0.75 m/s against this game's 2.6.
 const RATE: (f32, f32) = (0.5, 2.0);
+
+/// What a player's body is doing, as coarsely as the clips distinguish it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Gait {
+    Idle,
+    Walk,
+    Run,
+    CrouchIdle,
+    CrouchWalk,
+    Airborne,
+}
+
+/// Which way a player is travelling relative to the way they are facing.
+///
+/// Eight, because that is what the soldier's pack has and because it is what a shooter needs: a
+/// player strafing right while looking at you is the commonest thing on the screen, and running
+/// forward while doing it is a different silhouette entirely. The fallback kit has none of these
+/// and reads every one of them as forward — which is exactly why it is the fallback.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Facing {
+    Forward,
+    ForwardLeft,
+    Left,
+    BackwardLeft,
+    Backward,
+    BackwardRight,
+    Right,
+    ForwardRight,
+}
+
+impl Facing {
+    /// The eight, in the order the angle below indexes them.
+    const ALL: [Facing; 8] = [
+        Facing::Forward,
+        Facing::ForwardLeft,
+        Facing::Left,
+        Facing::BackwardLeft,
+        Facing::Backward,
+        Facing::BackwardRight,
+        Facing::Right,
+        Facing::ForwardRight,
+    ];
+
+    /// Which of the eight a direction of travel is nearest, seen from behind the player.
+    ///
+    /// `travel` is in world space and `yaw` is where the player is looking, so the first thing
+    /// this does is take the travel into the player's own frame — a body strafes relative to
+    /// where its head is pointed, not relative to the world.
+    ///
+    /// Forward is −Z, as everywhere else in this game, and the eighth-turns are centred on each
+    /// direction rather than starting at it: adding half a step before rounding is what makes
+    /// "almost exactly forward" round to forward rather than to whichever neighbour it leans on.
+    fn of(travel: Vec3, yaw: f32) -> Facing {
+        let local = Quat::from_rotation_y(-yaw) * travel;
+        let angle = f32::atan2(local.x, -local.z);
+        let step = core::f32::consts::TAU / 8.0;
+        let index = ((angle / step).round() as i32).rem_euclid(8) as usize;
+        // atan2(x, -z) grows towards +X, which is the player's right, so the index counts
+        // clockwise from forward while `ALL` is written anticlockwise. Reading it backwards is
+        // what puts a step to the right on the right foot.
+        Facing::ALL[(8 - index) % 8]
+    }
+
+    /// The suffix Mixamo spells this direction with.
+    fn suffix(self) -> &'static str {
+        match self {
+            Facing::Forward => "forward",
+            Facing::ForwardLeft => "forward_left",
+            Facing::Left => "left",
+            Facing::BackwardLeft => "backward_left",
+            Facing::Backward => "backward",
+            Facing::BackwardRight => "backward_right",
+            Facing::Right => "right",
+            Facing::ForwardRight => "forward_right",
+        }
+    }
+}
+
+/// One clip a kit can be asked for.
+type Move = (Gait, Facing);
+
+/// Every clip this game can ask for. Fewer than either pack holds, and deliberately: a name that is
+/// not here is one nothing in the simulation can reach.
+fn every_move() -> Vec<Move> {
+    let mut out = Vec::new();
+    for gait in [Gait::Idle, Gait::CrouchIdle, Gait::Airborne] {
+        out.push((gait, Facing::Forward));
+    }
+    for gait in [Gait::Walk, Gait::Run, Gait::CrouchWalk] {
+        for facing in Facing::ALL {
+            out.push((gait, facing));
+        }
+    }
+    out
+}
+
+impl Kit {
+    /// What this kit calls one movement, or `None` if it has nothing for it.
+    fn clip(&self, (gait, facing): Move) -> Option<String> {
+        Some(match self.clips {
+            Clips::PerFile { .. } => match gait {
+                Gait::Idle => "idle".to_string(),
+                Gait::CrouchIdle => "idle_crouching".to_string(),
+                Gait::Airborne => "jump_loop".to_string(),
+                Gait::Walk => format!("walk_{}", facing.suffix()),
+                Gait::Run => format!("run_{}", facing.suffix()),
+                Gait::CrouchWalk => format!("walk_crouching_{}", facing.suffix()),
+            },
+            // Forward locomotion only, so every direction reads as forward. Asking for the same
+            // clip eight times is fine — the graph holds one node per *movement*, and the eight
+            // share it.
+            Clips::Library { .. } => match gait {
+                Gait::Idle => "Idle_Loop",
+                Gait::CrouchIdle => "Crouch_Idle_Loop",
+                Gait::Airborne => "Jump_Loop",
+                Gait::Walk => "Walk_Loop",
+                Gait::Run => "Jog_Fwd_Loop",
+                Gait::CrouchWalk => "Crouch_Fwd_Loop",
+            }
+            .to_string(),
+        })
+    }
+
+    /// The speed the cycle for this gait was authored for, or `None` for one that does not travel.
+    fn pace(&self, gait: Gait) -> Option<f32> {
+        match gait {
+            Gait::Walk => Some(self.paces.walk),
+            Gait::Run => Some(self.paces.run),
+            Gait::CrouchWalk => Some(self.paces.crouch),
+            Gait::Idle | Gait::CrouchIdle | Gait::Airborne => None,
+        }
+    }
+
+    /// Where the walk gives way to the run, in metres per second.
+    ///
+    /// The geometric mean of the two cycles' authored speeds, which is the crossover that keeps
+    /// the *ratio* either is stretched by as small as it can be: at it, both are stretched alike.
+    /// Derived rather than chosen, so a kit whose clips are paced differently gets the right
+    /// crossover without anybody having to notice.
+    fn trot(&self) -> f32 {
+        (self.paces.walk * self.paces.run).sqrt()
+    }
+
+    /// What the model is scaled by so that it is exactly as tall as the collision capsule.
+    ///
+    /// Not decoration. The capsule *is* the hitbox — a shot is tested against it and nothing else
+    /// — so a body drawn at its own height inside a shorter capsule would put a head where a
+    /// player can aim and no raycast can reach. That mistake has been made here once already, with
+    /// the placeholder head box this replaces, and it is invisible until somebody complains that
+    /// head shots do not register.
+    ///
+    /// What this does *not* fix is width: a character with an arm out reaches past a 35 cm capsule
+    /// and no uniform scale changes that. It is the honest cost of a real model over a capsule,
+    /// and the argument for the per-bone hitboxes under "Still to settle" in the README.
+    fn scale(&self) -> f32 {
+        CAPSULE_HEIGHT / self.height
+    }
+
+    /// Whether this kit's files are on disk.
+    ///
+    /// From the filesystem rather than from the asset server, which would answer asynchronously —
+    /// some frames after the first player has already arrived and needed a body. The same choice
+    /// and the same reason as the vehicle model's.
+    fn present(&self) -> bool {
+        let assets = std::path::Path::new(crate::ASSETS);
+        if !assets.join(self.body).exists() {
+            return false;
+        }
+        match self.clips {
+            Clips::PerFile { directory } => assets.join(directory).join("idle.glb").exists(),
+            Clips::Library { file } => assets.join(file).exists(),
+        }
+    }
+}
 
 pub struct CharacterPlugin;
 
@@ -162,12 +304,12 @@ impl Plugin for CharacterPlugin {
             .add_systems(
                 Update,
                 (
-                    build_the_clip_graph.run_if(not(resource_exists::<Clips>)),
+                    name_the_clips.run_if(not(resource_exists::<Moves>)),
                     give_bodies,
-                    // Both need the graph, and it does not exist until the library has finished
-                    // loading — a few frames in, and longer on a cold disk. Gating them is what
-                    // keeps that from being a panic on the first frame.
-                    (wire_up_the_skeleton, choose_the_motion).run_if(resource_exists::<Clips>),
+                    // Both need the graph, and a kit whose clips live in one library does not have
+                    // one until that library has finished loading. Gating them is what keeps that
+                    // from being a panic on the first frame.
+                    (wire_up_the_skeleton, choose_the_motion).run_if(resource_exists::<Moves>),
                 )
                     .chain()
                     // The same reason `remote_players` waits: interpolation writes the smoothed
@@ -178,27 +320,30 @@ impl Plugin for CharacterPlugin {
     }
 }
 
-/// What is loaded, before anything is known about it.
+/// Which kit is in use, and the handles that were asked for from it.
 #[derive(Resource)]
 struct CharacterAssets {
+    kit: &'static Kit,
     body: Handle<WorldAsset>,
-    library: Handle<Gltf>,
+    /// Only for a kit whose clips share one file, which has to be loaded before the names in it
+    /// can be looked up.
+    library: Option<Handle<Gltf>>,
 }
 
-/// The animation graph, once the library has finished loading, and where each clip sits in it.
+/// The animation graph, and where each movement sits in it.
 #[derive(Resource)]
-struct Clips {
+struct Moves {
     graph: Handle<AnimationGraph>,
-    nodes: Vec<(Motion, AnimationNodeIndex)>,
+    nodes: Vec<(Move, AnimationNodeIndex)>,
     /// One clip, kept only so the wiring can check itself against it. See
     /// [`wire_up_the_skeleton`], which counts how many of the bones it just labelled this clip
     /// actually has a curve for — a number that is either "most of them" or "none".
     probe: Handle<AnimationClip>,
 }
 
-impl Clips {
-    fn node(&self, motion: Motion) -> Option<AnimationNodeIndex> {
-        self.nodes.iter().find(|(which, _)| *which == motion).map(|(_, node)| *node)
+impl Moves {
+    fn node(&self, wanted: Move) -> Option<AnimationNodeIndex> {
+        self.nodes.iter().find(|(which, _)| *which == wanted).map(|(_, node)| *node)
     }
 }
 
@@ -213,52 +358,110 @@ type JustArrived = (With<client::Remote>, Without<Predicted>, Added<PlayerState>
 /// A body whose model has spawned but whose skeleton has not been given its plumbing.
 type NotWiredYet = (With<CharacterBody>, Without<Wired>);
 
-/// On the entity Bevy gave an [`AnimationPlayer`] to, naming the player it belongs to.
+/// On the entity holding the [`AnimationPlayer`], naming the player it belongs to.
 ///
 /// The link has to be stored because the skeleton arrives asynchronously and several levels down:
 /// by the time there is an `AnimationPlayer` to drive, the player entity is four parents away.
 #[derive(Component)]
 struct Animates(Entity);
 
-/// Startup: asks for the body and the clip library.
+/// Startup: picks the kit that is on disk and asks for it.
+///
+/// The soldier wins where it is present, because it is what the game is built around; the CC0
+/// figure is what a checkout without it still gets, and it is a whole person rather than a capsule.
+/// Said out loud at startup, because "which character am I looking at" is otherwise a thing to
+/// deduce from the picture.
 fn load_the_character(assets: Res<AssetServer>, mut commands: Commands) {
-    commands.insert_resource(CharacterAssets {
-        body: assets.load(GltfAssetLabel::Scene(0).from_asset(BODY)),
-        library: assets.load::<Gltf>(CLIPS),
-    });
+    let kit = if SWAT.present() {
+        info!("character: the Mixamo soldier, with 8-way locomotion");
+        &SWAT
+    } else {
+        info!(
+            "character: the CC0 fallback, forward locomotion only — `tools/setup-assets` brings \
+             in the soldier",
+        );
+        &MANNEQUIN
+    };
+
+    let body = assets.load(GltfAssetLabel::Scene(0).from_asset(kit.body));
+    let mut library = None;
+    match kit.clips {
+        // One file per clip needs no lookup, so the graph can be built here and now.
+        Clips::PerFile { directory } => {
+            let mut graph = AnimationGraph::new();
+            let mut nodes = Vec::new();
+            let mut probe = None;
+            for wanted in every_move() {
+                let Some(name) = kit.clip(wanted) else {
+                    continue;
+                };
+                let clip: Handle<AnimationClip> =
+                    assets.load(GltfAssetLabel::Animation(0).from_asset(format!("{directory}/{name}.glb")));
+                probe.get_or_insert_with(|| clip.clone());
+                nodes.push((wanted, graph.add_clip(clip, 1.0, graph.root)));
+            }
+            let probe = probe.expect("every movement names a clip");
+            info!("{} clips ready", nodes.len());
+            commands.queue(move |world: &mut World| {
+                let graph = world.resource_mut::<Assets<AnimationGraph>>().add(graph);
+                world.insert_resource(Moves { graph, nodes, probe });
+            });
+        }
+        // Nothing to build yet: the names in a library cannot be looked up until it has loaded.
+        Clips::Library { file } => library = Some(assets.load::<Gltf>(file)),
+    }
+    commands.insert_resource(CharacterAssets { kit, body, library });
 }
 
-/// Update, until it succeeds: builds the animation graph once the library has loaded.
+/// Update, until it succeeds: builds the graph for a kit whose clips share one file.
 ///
 /// By name rather than by index. The library holds 43 clips and glTF gives them no order worth
 /// relying on; `Idle_Loop` will still be `Idle_Loop` after the pack is updated, where clip 9 will
-/// not be. A name that is missing is reported once and then simply cannot be asked for.
-fn build_the_clip_graph(
+/// not be.
+fn name_the_clips(
     assets: Res<CharacterAssets>,
     library: Res<Assets<Gltf>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
     mut commands: Commands,
 ) {
-    let Some(gltf) = library.get(&assets.library) else {
+    let Some(handle) = assets.library.as_ref() else {
+        return;
+    };
+    let Some(gltf) = library.get(handle) else {
         return;
     };
     let mut graph = AnimationGraph::new();
     let mut nodes = Vec::new();
     let mut probe = None;
-    for motion in Motion::all() {
-        let Some(clip) = gltf.named_animations.get(motion.clip()) else {
-            error!("{CLIPS} has no clip called {}", motion.clip());
+    // The same name several times over, because a forward-only kit answers every direction with
+    // one clip. Adding it once and sharing the node is what keeps eight entries from being eight
+    // copies of the same curves.
+    let mut added: Vec<(String, AnimationNodeIndex)> = Vec::new();
+    for wanted in every_move() {
+        let Some(name) = assets.kit.clip(wanted) else {
             continue;
         };
-        probe.get_or_insert_with(|| clip.clone());
-        nodes.push((motion, graph.add_clip(clip.clone(), 1.0, graph.root)));
+        let node = match added.iter().find(|(seen, _)| *seen == name) {
+            Some((_, node)) => *node,
+            None => {
+                let Some(clip) = gltf.named_animations.get(name.as_str()) else {
+                    error!("the clip library has nothing called {name}");
+                    continue;
+                };
+                probe.get_or_insert_with(|| clip.clone());
+                let node = graph.add_clip(clip.clone(), 1.0, graph.root);
+                added.push((name, node));
+                node
+            }
+        };
+        nodes.push((wanted, node));
     }
     let Some(probe) = probe else {
-        error!("{CLIPS} held none of the clips this game asks for");
+        error!("the clip library held none of the clips this game asks for");
         return;
     };
-    info!("{} animation clips ready", nodes.len());
-    commands.insert_resource(Clips { graph: graphs.add(graph), nodes, probe });
+    info!("{} clips ready, covering {} movements", added.len(), nodes.len());
+    commands.insert_resource(Moves { graph: graphs.add(graph), nodes, probe });
 }
 
 /// Update: hangs a model under a player that has just arrived.
@@ -266,8 +469,7 @@ fn build_the_clip_graph(
 /// `Without<Predicted>` leaves our own player out: the camera sits inside it, and a body there
 /// would fill the screen. It is a child rather than the player entity itself because the two want
 /// different transforms — the player entity carries the pose the simulation writes, in world units
-/// and facing −Z, and this carries the half turn and the scale that make a glTF model agree with
-/// that.
+/// and facing −Z, and this carries the half turn and the scale that make a glTF model agree.
 fn give_bodies(
     arrived: Query<(Entity, &Player), JustArrived>,
     assets: Res<CharacterAssets>,
@@ -282,7 +484,7 @@ fn give_bodies(
                 CharacterBody,
                 WorldAssetRoot(assets.body.clone()),
                 Transform::from_rotation(Quat::from_rotation_y(MODEL_YAW))
-                    .with_scale(Vec3::splat(MODEL_SCALE)),
+                    .with_scale(Vec3::splat(assets.kit.scale())),
             ));
         info!("drawing player {}", player.peer);
     }
@@ -318,7 +520,7 @@ fn wire_up_the_skeleton(
     children: Query<&Children>,
     named: Query<&Name>,
     already: Query<(), With<AnimationPlayer>>,
-    clips: Res<Clips>,
+    clips: Res<Moves>,
     library: Res<Assets<AnimationClip>>,
     mut commands: Commands,
 ) {
@@ -440,21 +642,22 @@ fn walk_the_bones(
 
 /// Update: plays the clip that matches what the simulation says the player is doing.
 ///
-/// Read from `PlayerState` rather than from the frame-to-frame movement of the transform. The state
-/// is the simulation's own answer — it already knows whether a player is on the ground and whether
-/// they are crouching — and differencing positions would turn interpolation's smoothing into a
-/// jitter in the choice of clip.
+/// Read from `PlayerState` and `Aim` rather than from watching the transform move. The simulation
+/// already knows whether a player is on the ground and whether they are crouching, and
+/// differencing positions would turn interpolation's smoothing into a flicker in the choice of
+/// clip.
 fn choose_the_motion(
-    clips: Res<Clips>,
-    bodies: Query<&PlayerState>,
+    moves: Res<Moves>,
+    assets: Res<CharacterAssets>,
+    bodies: Query<(&PlayerState, &Aim)>,
     mut skeletons: Query<(&Animates, &mut AnimationPlayer, &mut AnimationTransitions)>,
 ) {
     for (owner, mut player, mut transitions) in skeletons.iter_mut() {
-        let Ok(state) = bodies.get(owner.0) else {
+        let Ok((state, aim)) = bodies.get(owner.0) else {
             continue;
         };
-        let (motion, rate) = what_they_are_doing(state);
-        let Some(node) = clips.node(motion) else {
+        let (wanted, rate) = what_they_are_doing(assets.kit, state, aim.yaw);
+        let Some(node) = moves.node(wanted) else {
             continue;
         };
         if transitions.get_main_animation() != Some(node) {
@@ -471,24 +674,28 @@ fn choose_the_motion(
 /// Horizontal speed only: falling is not walking, and a player dropping off a ledge at 12 m/s
 /// should not have their legs sprint. Being off the ground wins over everything else, because a
 /// crouch clip played in mid-air is a person sitting in the sky.
-fn what_they_are_doing(state: &PlayerState) -> (Motion, f32) {
-    let speed = state.velocity.with_y(0.0).length();
-    let motion = if !state.on_ground {
-        Motion::Airborne
+fn what_they_are_doing(kit: &Kit, state: &PlayerState, yaw: f32) -> (Move, f32) {
+    let travel = state.velocity.with_y(0.0);
+    let speed = travel.length();
+    let gait = if !state.on_ground {
+        Gait::Airborne
     } else if state.crouching {
-        if speed < STILL { Motion::CrouchIdle } else { Motion::CrouchWalk }
+        if speed < STILL { Gait::CrouchIdle } else { Gait::CrouchWalk }
     } else if speed < STILL {
-        Motion::Idle
-    } else if speed < TROT {
-        Motion::Walk
+        Gait::Idle
+    } else if speed < kit.trot() {
+        Gait::Walk
     } else {
-        Motion::Jog
+        Gait::Run
     };
-    let rate = match motion.natural_speed() {
-        Some(natural) => (speed / natural).clamp(RATE.0, RATE.1),
+    // A standing player has no direction of travel to read, and asking for one would hand back
+    // whatever numerical noise is left in a velocity that has decayed to nothing.
+    let facing = if speed < STILL { Facing::Forward } else { Facing::of(travel, yaw) };
+    let rate = match kit.pace(gait) {
+        Some(authored) => (speed / authored).clamp(RATE.0, RATE.1),
         None => 1.0,
     };
-    (motion, rate)
+    ((gait, facing), rate)
 }
 
 #[cfg(test)]
@@ -496,42 +703,100 @@ mod tests {
     use super::*;
     use noob_tube_shared::movement::{CROUCH_SPEED, MAX_SPEED};
 
-    /// The drawn figure has to be no taller than the collision capsule, because that capsule is the
-    /// hitbox and nothing else is. A model that reached above it would give every player a head
-    /// they can see, aim at, and never hit.
-    #[test]
-    fn the_model_is_drawn_no_taller_than_the_hitbox() {
-        let drawn = MODEL_HEIGHT * MODEL_SCALE;
-        assert!(
-            drawn <= CAPSULE_HEIGHT + 1e-4,
-            "the model is drawn {drawn} m tall inside a {CAPSULE_HEIGHT} m hitbox",
-        );
-        // And not so much shorter that the head is buried inside the capsule with room above it.
-        assert!(
-            drawn > CAPSULE_HEIGHT - 0.05,
-            "the model is drawn {drawn} m tall in a {CAPSULE_HEIGHT} m hitbox, which leaves a gap",
-        );
+    fn walking(velocity: Vec3) -> PlayerState {
+        PlayerState { velocity, on_ground: true, ..PlayerState::default() }
     }
 
-    /// Every speed the simulation can produce has to land on a clip, or a player stands frozen in
-    /// the middle of a sprint. Sweeping is worth more than three chosen cases: the interesting
-    /// failures are at the boundaries, and the boundaries move when the constants do.
+    /// The drawn figure has to be no taller than the collision capsule, because that capsule is the
+    /// hitbox and nothing else is. A body that reached above it would give every player a head they
+    /// can see, aim at, and never hit.
+    #[test]
+    fn neither_kit_is_drawn_taller_than_the_hitbox() {
+        for kit in [&SWAT, &MANNEQUIN] {
+            let drawn = kit.height * kit.scale();
+            assert!(
+                drawn <= CAPSULE_HEIGHT + 1e-4,
+                "{} is drawn {drawn} m tall inside a {CAPSULE_HEIGHT} m hitbox",
+                kit.body,
+            );
+            assert!(
+                drawn > CAPSULE_HEIGHT - 0.05,
+                "{} is drawn {drawn} m tall in a {CAPSULE_HEIGHT} m hitbox, which leaves a gap",
+                kit.body,
+            );
+        }
+    }
+
+    /// Walking straight forward has to read as forward, and the seven others have to land on their
+    /// own clip. Sweeping the whole circle is worth more than eight chosen cases: it is the
+    /// *boundaries* that are interesting, and they move when the rounding does.
+    #[test]
+    fn every_direction_of_travel_lands_on_its_own_clip() {
+        // Dead ahead is −Z, and each eighth-turn to the left of it.
+        let expected: [(f32, Facing); 8] = [
+            (0.0, Facing::Forward),
+            (45.0, Facing::ForwardLeft),
+            (90.0, Facing::Left),
+            (135.0, Facing::BackwardLeft),
+            (180.0, Facing::Backward),
+            (225.0, Facing::BackwardRight),
+            (270.0, Facing::Right),
+            (315.0, Facing::ForwardRight),
+        ];
+        for (degrees, wanted) in expected {
+            let travel = Quat::from_rotation_y(degrees.to_radians()) * Vec3::NEG_Z;
+            assert_eq!(Facing::of(travel, 0.0), wanted, "at {degrees} degrees");
+        }
+    }
+
+    /// And it has to mean the same thing however the player is turned, because a body strafes
+    /// relative to its own head rather than relative to the world. This is the half that a test
+    /// against a player facing north cannot see at all.
+    #[test]
+    fn direction_is_read_in_the_players_own_frame() {
+        for yaw in [0.0, 0.7, 1.9, -2.4, 3.1] {
+            let right = Quat::from_rotation_y(yaw) * Vec3::X;
+            assert_eq!(Facing::of(right, yaw), Facing::Right, "yawed by {yaw}");
+            let ahead = Quat::from_rotation_y(yaw) * Vec3::NEG_Z;
+            assert_eq!(Facing::of(ahead, yaw), Facing::Forward, "yawed by {yaw}");
+        }
+    }
+
+    /// A direction that is nearly one of the eight has to round to it rather than to a neighbour,
+    /// which is what the half-step before rounding is for.
+    #[test]
+    fn a_direction_rounds_to_the_nearest_of_the_eight() {
+        for offset in [-22.0f32, -10.0, 0.0, 10.0, 22.0] {
+            let travel = Quat::from_rotation_y(offset.to_radians()) * Vec3::NEG_Z;
+            assert_eq!(Facing::of(travel, 0.0), Facing::Forward, "{offset} degrees off forward");
+        }
+    }
+
+    /// Every speed the simulation can produce has to land on a clip that exists, at a rate that is
+    /// not absurd — for both kits, because the fallback's clips are paced quite differently.
     #[test]
     fn every_speed_a_player_can_reach_picks_a_clip() {
-        for step in 0..=110 {
-            let speed = step as f32 * MAX_SPEED / 100.0;
-            for crouching in [false, true] {
-                let state = PlayerState {
-                    velocity: Vec3::new(speed, -3.0, 0.0),
-                    on_ground: true,
-                    crouching,
-                    ..PlayerState::default()
-                };
-                let (motion, rate) = what_they_are_doing(&state);
-                assert!(
-                    (RATE.0..=RATE.1).contains(&rate),
-                    "{motion:?} at {speed} m/s wants to play at {rate}x",
-                );
+        for kit in [&SWAT, &MANNEQUIN] {
+            for step in 0..=110 {
+                let speed = step as f32 * MAX_SPEED / 100.0;
+                for crouching in [false, true] {
+                    let state = PlayerState {
+                        velocity: Vec3::new(speed, -3.0, 0.0),
+                        on_ground: true,
+                        crouching,
+                        ..PlayerState::default()
+                    };
+                    let (wanted, rate) = what_they_are_doing(kit, &state, 0.0);
+                    assert!(
+                        (RATE.0..=RATE.1).contains(&rate),
+                        "{:?} at {speed} m/s wants to play at {rate}x",
+                        wanted,
+                    );
+                    assert!(
+                        every_move().contains(&wanted),
+                        "{wanted:?} is not a movement any kit was asked to load",
+                    );
+                }
             }
         }
     }
@@ -545,62 +810,81 @@ mod tests {
             on_ground: false,
             ..PlayerState::default()
         };
-        assert_eq!(what_they_are_doing(&state).0, Motion::Airborne);
+        assert_eq!(what_they_are_doing(&SWAT, &state, 0.0).0.0, Gait::Airborne);
     }
 
     /// Vertical speed must not reach the choice at all — the clearest way to say it is that a
     /// player standing still on the ground is idle however fast the solver thinks they are sinking.
     #[test]
     fn falling_speed_is_not_walking_speed() {
-        let state = PlayerState {
-            velocity: Vec3::new(0.0, -20.0, 0.0),
-            on_ground: true,
-            ..PlayerState::default()
-        };
-        assert_eq!(what_they_are_doing(&state).0, Motion::Idle);
+        let state = walking(Vec3::new(0.0, -20.0, 0.0));
+        assert_eq!(what_they_are_doing(&SWAT, &state, 0.0).0.0, Gait::Idle);
     }
 
-    /// The two locomotion clips have to be stretched by as little as possible, and the crossover is
-    /// what decides that. At the crossover both are stretched by the same ratio — which is what
-    /// makes `TROT` the geometric mean rather than the arithmetic one, and is the thing that
-    /// silently breaks if somebody rounds it.
+    /// The two locomotion cycles have to be stretched by as little as possible, and the crossover
+    /// is what decides that. At it both are stretched by the same ratio — which is what makes it
+    /// the geometric mean rather than the arithmetic one, and is the thing that silently breaks if
+    /// somebody replaces it with a round number.
     #[test]
-    fn the_crossover_stretches_both_clips_alike() {
-        let walk = TROT / Motion::Walk.natural_speed().expect("the walk travels");
-        let jog = Motion::Jog.natural_speed().expect("the jog travels") / TROT;
-        assert!(
-            (walk - jog).abs() < 0.02,
-            "at {TROT} m/s the walk is stretched {walk}x and the jog {jog}x",
-        );
+    fn the_crossover_stretches_both_cycles_alike() {
+        for kit in [&SWAT, &MANNEQUIN] {
+            let walk = kit.trot() / kit.paces.walk;
+            let run = kit.paces.run / kit.trot();
+            assert!(
+                (walk - run).abs() < 0.02,
+                "{}: at {} m/s the walk is stretched {walk}x and the run {run}x",
+                kit.body,
+                kit.trot(),
+            );
+        }
     }
 
-    /// A crouch-walk is the one place the library cannot keep up, and that is worth stating rather
-    /// than discovering: the clip paces 0.75 m/s and this game crouches at 2.6, so it is played at
-    /// the clamp and the feet do skate. If the crouch speed or the clip ever changes, this is the
-    /// test that says the compromise is gone.
+    /// The soldier's clips are paced for this game and the fallback's are not, and that difference
+    /// is the whole reason both kits exist. Stated as a test so that replacing either pack says
+    /// which side of the line it lands on.
     #[test]
-    fn the_crouch_walk_is_the_clip_that_cannot_keep_up() {
-        let state = PlayerState {
+    fn the_soldier_never_has_to_be_stretched_and_the_fallback_does() {
+        let running = walking(Vec3::new(MAX_SPEED, 0.0, 0.0));
+        let crouching = PlayerState {
             velocity: Vec3::new(CROUCH_SPEED, 0.0, 0.0),
-            on_ground: true,
             crouching: true,
-            ..PlayerState::default()
+            ..walking(Vec3::ZERO)
         };
-        let (motion, rate) = what_they_are_doing(&state);
-        assert_eq!(motion, Motion::CrouchWalk);
-        assert_eq!(rate, RATE.1, "the crouch no longer runs into the clamp");
+        for state in [running, crouching] {
+            let (_, soldier) = what_they_are_doing(&SWAT, &state, 0.0);
+            assert!(
+                (0.8..=1.4).contains(&soldier),
+                "the soldier is being stretched {soldier}x, which it never used to be",
+            );
+        }
+        let (_, fallback) = what_they_are_doing(&MANNEQUIN, &crouching, 0.0);
+        assert_eq!(fallback, RATE.1, "the fallback crouch no longer runs into the clamp");
     }
 
-    /// Not a real test of behaviour, but of an assumption everything above rests on: the clip names
-    /// are the ones the library actually carries. Spelling is checked against the file by
-    /// `tools/glb animations`, and this at least holds the list to one place.
+    /// Each kit has to have a name for every movement the game can ask for, or a player freezes
+    /// mid-stride on whichever one is missing.
     #[test]
-    fn every_motion_names_a_distinct_clip() {
-        let mut seen: Vec<&str> = Motion::all().iter().map(|motion| motion.clip()).collect();
-        seen.sort_unstable();
-        let before = seen.len();
-        seen.dedup();
-        assert_eq!(before, seen.len(), "two motions ask for the same clip");
+    fn both_kits_name_every_movement() {
+        for kit in [&SWAT, &MANNEQUIN] {
+            for wanted in every_move() {
+                assert!(kit.clip(wanted).is_some(), "{} has no clip for {wanted:?}", kit.body);
+            }
+        }
     }
 
+    /// The soldier's eight directions have to be eight *different* clips, or the pack is not what
+    /// it was chosen for. The fallback's are deliberately all one, which is the same assertion
+    /// read the other way.
+    #[test]
+    fn only_one_of_the_kits_can_actually_strafe() {
+        let names = |kit: &Kit, gait| {
+            let mut seen: Vec<String> =
+                Facing::ALL.iter().filter_map(|f| kit.clip((gait, *f))).collect();
+            seen.sort();
+            seen.dedup();
+            seen.len()
+        };
+        assert_eq!(names(&SWAT, Gait::Run), 8, "the soldier should have eight run clips");
+        assert_eq!(names(&MANNEQUIN, Gait::Run), 1, "the fallback should have exactly one");
+    }
 }

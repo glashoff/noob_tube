@@ -821,58 +821,97 @@ solves the same problem with its `client/scenarios/` directory.
 
 ### M2 — Character and animation
 
-A player is a person now rather than a capsule with a box for a head. The plan this replaces was
-built around Mixamo and `fbx2gltf`; what actually happened is written up under
-[Character assets](#character-assets-settled), and none of the conversion step survived — the
-Quaternius kit is glTF, in metres, with root motion already stripped.
+A player is a person now rather than a capsule with a box for a head — the **Mixamo soldier**, the
+same one `webgame` used, with its Rifle 8-Way Locomotion Pack. The plan this replaces was built
+around exactly that and then went round the houses; both the detour and why it ended here are under
+[Character assets](#character-assets-settled).
 
-**The model and the clips come from different files**, and that works only because they share a
+**Two kits, and the difference is licensing rather than taste.** The soldier may be used and not
+redistributed, so it is not in this repository and `tools/setup-assets` is what brings it in. A
+checkout without it falls back to the Quaternius character, which is CC0 and committed. Nothing may
+*require* an asset a fresh checkout does not have — the same rule the vehicle model follows — and
+the client says at startup which one it found. What being without the soldier costs is stated
+plainly: the fallback can only walk forward.
+
+```bash
+tools/setup-assets                 # defaults to ../webgame/assets
+tools/glb rigs assets/characters/swat.glb assets/anims/idle.glb
+```
+
+**The model and the clips come from different files**, which works only because they share a
 skeleton exactly. Bevy binds an animation to a bone by the *path* of names from the scene root
-down, so `Armature/root/pelvis/spine_01` has to be spelt the same in both — and it is, including
-the scene root, which is called `Armature` in all five files. `tools/glb rigs` is what says so, and
-`client/src/character.rs` is a handful of systems rather than a retargeting project because of it.
+down, so `RootNode/mixamorig:Hips/mixamorig:Spine` has to be spelt the same in both. Measured, not
+hoped for: all 70 bone paths shared, the only three unmatched being the character's own mesh nodes,
+which no clip has a curve for. That was this milestone's named risk, and it is now a one-second
+check.
 
-**The model is scaled to the hitbox, not to taste.** The collision capsule is the hitbox — a shot
-is tested against it and nothing else — and the body is 1.81 m in its own file against a 1.70 m
-capsule. Drawn at its own size, 11 cm of head would be visible, aimable and unhittable. That is the
-same mistake the placeholder head box made once already, so the scale is derived rather than typed:
-`CAPSULE_HEIGHT / MODEL_HEIGHT`, with a test on each end.
+**The model is scaled to the hitbox, not to taste.** The collision capsule *is* the hitbox and the
+soldier is 1.78 m in its own file against a 1.70 m capsule. Drawn at its own size, 8 cm of head
+would be visible, aimable and unhittable — the mistake the placeholder head box made once already.
+The scale is derived rather than typed, with a test on each end, for both kits.
 
-What no uniform scale fixes is **width**. A character with an arm out reaches past a 35 cm capsule,
-and that is the honest cost of a real model over a capsule — it is the argument for the per-bone
-hitboxes under [Still to settle](#still-to-settle), which just became a real gap rather than a
-theoretical one.
+What no uniform scale fixes is **width**. A character with an arm out reaches past a 35 cm capsule.
+That is the honest cost of a real model over a capsule, and it makes the per-bone hitboxes under
+[Still to settle](#still-to-settle) a real gap rather than a theoretical one.
+
+#### The plumbing the file did not come with
+
+The figure appeared, correctly posed, and did not move — and the reason is worth writing down
+because nothing about it is visible from the outside. Bevy's glTF loader builds its list of
+animation roots **while walking a file's animations**. A character model has none: it is a mesh and
+a skeleton. So it comes out with no `AnimationPlayer` on it and no `AnimationTargetId` on any bone.
+Nothing is missing from the file and nothing is wrong with the loader; the plumbing simply had
+nothing to be built from.
+
+It is laid by hand the same way the loader lays it, and **the root is found rather than assumed**.
+The first attempt took the spawned scene's top entity, and every path came out
+`Scene/Armature/root/...` against a library spelling `Armature/root/...` — not one bone of
+seventy-three recognised. Bevy's wrapper is Bevy's business; what cannot change is that the right
+root is the one whose paths the library knows. Every candidate is tried and the best wins, and the
+count is reported:
+
+```text
+52 of 76 bones under 780v0 are animated by the library
+```
+
+Which turned a silent failure into a one-line diagnosis, and is the reason to prefer a check that
+can fail loudly over a comment saying it should work.
 
 #### Choosing a clip
 
-From `PlayerState`, not from watching the transform move. The simulation already knows whether a
-player is on the ground and whether they are crouching, and differencing positions would turn
-interpolation's smoothing into a flicker in the choice of clip. Horizontal speed only: a player
-dropping off a ledge at 12 m/s should not have their legs sprint.
+From `PlayerState` and `Aim`, not from watching the transform move. The simulation already knows
+whether a player is on the ground and whether they are crouching, and differencing positions would
+turn interpolation's smoothing into a flicker in the choice of clip. Horizontal speed only: a
+player dropping off a ledge at 12 m/s should not have their legs sprint.
+
+**Eight directions.** The travel is taken into the player's own frame first, because a body strafes
+relative to its own head rather than relative to the world, and then rounded to the nearest
+eighth-turn. A player strafing right while looking at you is the commonest silhouette in a shooter
+and the one the fallback kit cannot draw at all.
 
 **Foot lock** is playing the clip at `actual speed / the speed its stride was authored for`. Those
-natural speeds cannot be measured from the file in `assets/` — root motion is stripped there, which
-is exactly why it is the variant that is in. They come from the `_RM` variant of the same download,
-where the root bone still travels, and `tools/glb animations` prints them:
+speeds are measured rather than guessed — `tools/glb animations` prints how far the hips travel
+over a clip:
 
-| clip | natural speed |
-|---|---|
-| `Walk_Loop` | 0.97 m/s |
-| `Jog_Fwd_Loop` | 5.36 m/s |
-| `Crouch_Fwd_Loop` | 0.75 m/s |
-| `Sprint_Loop` | 8.25 m/s — unused, there is no sprint input |
+| | soldier | fallback |
+|---|---|---|
+| walk | 1.84 m/s | 0.97 m/s |
+| run | **4.61 m/s** | 5.36 m/s |
+| crouch-walk | **1.96 m/s** | 0.75 m/s |
 
-**The walk and the jog are far apart and there is nothing between them.** The crossover is at
-`sqrt(0.97 * 5.36)` = 2.28 m/s, the geometric mean, because that is what keeps the *ratio* either
-clip is stretched by as small as it can be — at the crossover both are stretched alike, which a
-test holds. Between roughly 1.5 and 3.5 m/s one or the other is being pushed hard. It matters less
-than it sounds: movement ramps to full speed in 0.3 s, so that band is passed through rather than
-lived in. At full speed, 5.5 m/s against the jog's 5.36, the stretch is 1.03 and the feet are
-planted.
+The two bold figures are `webgame`'s 4.606 and 1.956 to three significant figures, measured
+independently here from the converted GLBs. At full speed the soldier's run is stretched 1.19×,
+which is `webgame`'s number as well.
 
-**The crouch is the one that cannot keep up.** It paces 0.75 m/s and this game crouch-walks at 2.6,
-so it runs into the clamp at 2× and the feet skate. Stated in a test rather than left to be
-noticed, so that changing either number says whether the compromise is gone.
+**The crossover between walk and run is derived, not chosen**: the geometric mean of the two
+authored speeds, which is what keeps the ratio either is stretched by as small as it can be — at
+it, both are stretched alike. 2.91 m/s for the soldier, 2.28 for the fallback, and a test holds
+both to the property rather than to the number.
+
+The difference between the kits shows up exactly there. The soldier is never stretched more than
+1.3× at any speed this game produces. The fallback's crouch is authored for 0.75 m/s against a
+crouch speed of 2.6, runs into the 2× clamp, and skates. Both facts are tests, so replacing either
+pack says which side of the line it lands on.
 
 #### What is not done
 
@@ -881,13 +920,14 @@ noticed, so that changing either number says whether the compromise is gone.
   rig's rather than the world's, and the animation rewrites its rotation every frame. Doing it
   right means measuring the bone's rest orientation and post-multiplying after the animation
   systems — worth doing, not worth guessing at.
-- **No strafe or backpedal.** The free library has forward locomotion only, so sidestepping reads
-  as walking forward.
+- **The aiming idles are unused.** `idle_aiming` and `idle_crouching_aiming` are in the pack, and
+  nothing yet knows whether a player has their weapon up.
+- **Deaths and turns are unused.** Six death clips and four turn-in-place clips are sitting there.
 - **Our own player still has no body**, because the camera is inside it. A third-person view and
   first-person arms are both waiting on that.
-- **A seated driver is hidden rather than posed.** `Driving_Loop` and `Sitting_Enter`/`Exit` are in
-  the library and unused.
-- **Per-bone hitboxes**, as above.
+- **A seated driver is hidden rather than posed.**
+- **Per-bone hitboxes**, as above. The pack's own skeleton is what `webgame` generated
+  `skeleton.json` from, so the data exists.
 
 ### M3 — Multiplayer and shooting
 The server simulates authoritatively at 64 Hz and replicates player entities. Clients send input
@@ -2287,81 +2327,72 @@ and stays out; a build that ships it is a question to answer before cutting rele
 
 ## Character assets: settled
 
-The player body and its animations are **Quaternius**, CC0, in the repository. What that took, and
-what it costs, is worth writing down — it was an open question for two milestones.
+The player is the **Mixamo soldier**, which is where `webgame` started and where this ended up
+after a detour worth recording, because the detour is what produced the tooling.
 
 | | |
 |---|---|
-| Bodies | `Superhero_Male_FullBody`, `Superhero_Female_FullBody`, `Mannequin_F`, and the male `Mannequin` inside the animation library |
-| Clips | 43 in `universal_animation_library_1.glb`, 43 more in `_2.glb` |
-| Rig | 65 joints, Unreal Engine mannequin *naming*, **bit-identical across all five files** |
-| Scale | metres — head bone at 1.60 m, so no model scale and no `fbx2gltf` step |
-| Root motion | already stripped in the non-`_RM` variants |
+| Body | `characters/swat.glb`, 19 450 triangles, 1024² textures — 13 MB of GPU memory |
+| Clips | 49, including 8-way walk, run, sprint and crouch-walk, aiming idles, six deaths |
+| Rig | 70 bone paths, Mixamo's own (`mixamorig:Hips`) |
+| Scale | metres already — no model scale and no correction |
+| Licence | free with an Adobe account; **use yes, redistribution no** |
 
-The last two rows delete two whole jobs the [Root motion](#root-motion) section was written to
-describe. Foot lock still applies; the stripping does not.
+So it is not in this repository. `tools/setup-assets` converts it from the two downloaded packs
+with `FBX2glTF`, and `assets/CREDITS.md` says what the packs are and where they come from.
 
-**What is usable for a shooter**, out of library 1: `Idle_Loop`, `Walk_Loop`, `Jog_Fwd_Loop`,
-`Sprint_Loop`, `Crouch_Idle_Loop`, `Crouch_Fwd_Loop`, `Jump_Start`/`Jump_Loop`/`Jump_Land`,
-`Death01`, `Hit_Chest`, `Hit_Head`, `Roll`, and the pistol set. Library 2 is fantasy-flavoured but
-lends five: `Hit_Knockback`, `OverhandThrow`, `Melee_Hook`, `Slide_Start`/`Loop`/`Exit`,
-`ClimbUp_1m`. `Driving_Loop` and `Sitting_Enter`/`Idle_Loop`/`Exit` are in library 1 and are what a
-seated driver needs.
+### The detour, and what it was worth
 
-**Two gaps, both real.** Locomotion is **forward only** — there is no strafe or backpedal, so
-sidestepping will read as walking forward until something is authored or bought. And the weapon
-poses are a **pistol**, not a rifle.
+Quaternius' CC0 kit was evaluated first, on the strength of being redistributable — and it is still
+here, as the fallback a checkout without Mixamo gets. What it could not do was the job:
 
-**What was rejected.** A Sketchfab character called Mira was the first candidate and lost on the
-measurement: its rig shares no bone path with the animation library, it ships one 13-second idle
-loop rather than a clip set, it is 77 178 triangles against the mannequin's 13 744, and it has four
-arms, which humanoid clips have nothing to say about. `tools/glb rigs` reported that in a second,
-which is the argument for having built it.
+- **Forward locomotion only.** No strafe, no backpedal. The 8-way set is behind the paid tier.
+- **Clips paced for a different game.** Its crouch cycle is authored for 0.75 m/s against this
+  game's 2.6, so it plays at the clamp and the feet skate. Its walk and jog are 0.97 and 5.36 with
+  nothing between.
+- **The bodies are superheroes**, which is a look and not a soldier.
+
+What the detour bought is `tools/glb`, and that turned out to matter more than the assets. Deciding
+between four character packs by eye is guesswork; `tools/glb rigs` compares skeletons on full bone
+paths and answers "these interchange" or "this needs retargeting" in a second, which is the check
+this milestone's [named risk](#risks) was about. `tools/glb info` prints what a model costs in GPU
+memory, which is not the size of the file and which had already taken this machine down twice.
+Three candidate models were rejected on measurements from it rather than on taste:
+
+| | triangles | verdict |
+|---|---|---|
+| Mira (Sketchfab) | 77 178 | own rig, one 13-second idle, four arms |
+| Silver Soldier | 261 035 | Reallusion rig, one clip |
+| Stylized Sci-Fi Soldier | 510 358 | Reallusion rig, one clip |
+| **Mixamo Swat** | **19 450** | 49 clips on a matching rig |
+
+The last row is the whole argument. It is the smallest of them and the only one that brought
+animation with it.
 
 ### Dressing a character
 
-The free tier is bare bodies: the clothed characters are in Quaternius' paid Source tier. There are
-three ways to put clothes on what is here, in increasing order of effort.
+Moot for the soldier, which arrives dressed. It is written down for the fallback and for whatever
+comes next, because the question comes back with every new body.
 
-**Paint them into the texture.** The Superhero body is a smooth full-body suit, so a uniform, a
-wetsuit or armour plating is a base-colour map and nothing else — no rig work, no new geometry, and
-it costs nothing at run time because the mesh is unchanged. Two skin tones already ship this way
-(`_Dark` and `_Light`), which is the same trick applied to skin. Kenney's character packs are built
-entirely on this idea and ship editable SVGs, if an example is wanted.
+**Paint it into the texture.** A smooth full-body model takes a uniform as a base-colour map and
+nothing else — no rig work, no new geometry, nothing at run time. Kenney's character packs are
+built entirely on this and ship editable SVGs.
 
-**Attach a garment on the same rig.** This is exactly what the eight hairstyles in
-`assets/characters/` already are: a separate `.gltf` carrying the same 65-joint skin, drawn on the
-same skeleton and animated by the same clips. A jacket, a vest or boots authored the same way drop
-in identically.
-
-Where to get one is the harder half, and the honest answer is narrower than it first looks. The
-bone *names* are Unreal Engine's — `root`, `pelvis`, `spine_01`, `clavicle_l`, `upperarm_l`,
-`thigh_l`, `ball_l` — but this is **not** Unreal's skeleton. Three differences, and each is enough
-to stop a straight drop-in:
-
-- `Head` is capitalised; Unreal's is `head`.
-- Every chain ends in a `_leaf_` bone — `index_04_leaf_l`, `ball_leaf_l`. Unreal has none.
-- There are no twist bones (`upperarm_twist_01_l`) and no IK bones (`ik_foot_root`). A garment
-  weighted against those would arrive referencing bones that are not here.
-
-So an asset from the Unreal ecosystem needs a **bone rename**, not a retarget — much cheaper, since
-the hierarchy of the bones that do exist is the same, and Blender does it in one pass. Assets from
-Quaternius' own "Universal" kits need nothing. Whatever the source, check before building on it:
+**Attach a garment on the same rig.** A separate glTF carrying the same skin, drawn on the same
+skeleton and animated by the same clips. Whether one from elsewhere fits is a measurement, not a
+guess:
 
 ```bash
-tools/glb rigs assets/characters/Superhero_Male_FullBody.gltf <the candidate>
+tools/glb rigs assets/characters/swat.glb <the candidate>
 ```
 
-The most reliable garment is one taken from the body itself: duplicate the part of the body mesh
-the garment covers, push it out slightly, and it inherits the body's own vertex weights — a rig
-match by construction rather than by luck. That is the standard Blender route and it needs no
-skinning work at all.
+`identical` means it drops in; a handful of differing names means a bone rename in Blender, which
+is much cheaper than a retarget because the hierarchy already agrees; `nothing in common` means
+retargeting.
 
-**Model it in Blender** against the same armature and export it as its own `.gltf`. Only necessary
-for something that has to deform differently from the body under it — a long coat, a backpack.
-
-The first two need no new machinery in the game beyond drawing more than one skinned mesh on one
-skeleton, which is the same thing the hair already requires.
+**Take it from the body itself.** Duplicate the part of the body mesh the garment covers, push it
+out slightly, and it inherits the body's own vertex weights — a rig match by construction rather
+than by luck, and no skinning work at all.
 
 ## Still to settle
 

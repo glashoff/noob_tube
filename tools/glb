@@ -357,24 +357,26 @@ def animations(path):
 
 
 def _joint_paths(glb):
-    """Every joint's path of bone names, from the skeleton's root down.
+    """Every bone's path of names, from the scene root down.
 
     Paths rather than bare names, because that is what Bevy matches on: an `AnimationTargetId` is
-    a hash of the chain of names from the animation root to the bone. Two rigs that use the same
-    names in a different hierarchy do not interchange, and comparing name sets would say they do.
+    a hash of the chain of names from the scene root to the bone. Two rigs that use the same names
+    in a different hierarchy do not interchange, and comparing name sets would say they do.
+
+    From the *scene root*, not from the skeleton's, because that is where the loader starts — a
+    wrapper node above the skeleton is part of every path under it. And every named node, not only
+    the skinned joints, because a clip-only file carries no skin at all: an animation pack is a
+    bone tree and some curves, and refusing to compare it would refuse the commonest case there is.
     """
-    if not glb.get("skins"):
-        return {}
     parents = glb.parents()
-    joints = set(glb.get("skins")[0]["joints"])
     out = {}
-    for joint in glb.get("skins")[0]["joints"]:
+    for index in range(len(glb.get("nodes"))):
         chain = []
-        walker = joint
-        while walker is not None and walker in joints:
+        walker = index
+        while walker is not None:
             chain.append(glb.name(walker))
             walker = parents.get(walker)
-        out["/".join(reversed(chain))] = joint
+        out["/".join(reversed(chain))] = index
     return out
 
 
@@ -386,7 +388,7 @@ def _travel(glb, clip):
     walk at a different ground speed and the feet skate — and a clip exported with root motion
     stripped reports nothing here, which is itself the answer to "which variant is this".
     """
-    for wanted in ("root", "pelvis"):
+    for wanted in ("root", "pelvis", "mixamorig:Hips"):
         for channel in clip.get("channels", []):
             target = channel["target"]
             if target["path"] != "translation" or glb.name(target["node"]) != wanted:
@@ -408,8 +410,9 @@ def rigs(paths):
         glb = Gltf(path)
         found = _joint_paths(glb)
         if not found:
-            print(f"{os.path.basename(path):44} no skin — no skeleton to compare")
+            print(f"{os.path.basename(path):44} no nodes at all")
             continue
+        joints = sum(len(skin.get("joints", [])) for skin in glb.get("skins"))
         clips = len(glb.get("animations"))
         meshes = sum(
             1
@@ -417,8 +420,8 @@ def rigs(paths):
             for primitive in mesh.get("primitives", [])
             if "JOINTS_0" in primitive.get("attributes", {})
         )
-        print(f"{os.path.basename(path):44} {len(found):3} joints, {clips:3} clips, "
-              f"{meshes} skinned mesh{'es' if meshes != 1 else ''}")
+        print(f"{os.path.basename(path):44} {len(found):3} nodes ({joints} skinned), "
+              f"{clips:3} clips, {meshes} skinned mesh{'es' if meshes != 1 else ''}")
         rigged.append((path, found))
 
     if len(rigged) < 2:
