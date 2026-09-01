@@ -514,19 +514,41 @@ pub fn probe_wheels(
     let down = rotation * Vec3::NEG_Y;
     let direction = Dir3::new(down).unwrap_or(Dir3::NEG_Y);
     let reach = spec.reach();
+    // The ray starts *above* the mount, and that is the whole of why a wheel can come back out of
+    // the ground. The level's ground is a trimesh — two triangles, no inside — so a ray that starts
+    // under it and points down hits nothing at all. A mount that dipped below the surface for one
+    // tick therefore lost its strut permanently: no hit, no spring, no force to lift it out, and a
+    // vehicle with all four under would fall for ever. Starting the cast overhead costs one number
+    // and turns "gone" into "compressed hard, push".
+    //
+    // The start is the *top of the nominal box*, so anything short of the whole vehicle being under
+    // the surface finds it again. Not higher: a crate sitting on the bonnet rests above the
+    // roofline, so a ray that starts there cannot hit it on the way down and mistake a load for the
+    // road. Measured from each mount, so moving a strut moves its own ray with it.
 
     spec.mounts.map(|local| {
         let mount = position + rotation * local;
-        let hit = space.cast_ray(mount, direction, reach, true, &filter);
+        let overhead = spec.half_extents.y - local.y;
+        let hit = space.cast_ray(mount - down * overhead, direction, overhead + reach, true, &filter);
         match hit {
-            Some(hit) => Wheel {
-                mount,
-                centre: mount + down * (hit.distance - spec.wheel_radius),
-                contact: mount + down * hit.distance,
-                normal: hit.normal,
-                compression: reach - hit.distance,
-                grounded: true,
-            },
+            Some(hit) => {
+                // Signed, measured from the mount: negative is ground above the mount.
+                let distance = hit.distance - overhead;
+                // Clamped at the strut's own length, which is the bump stop. Unclamped, a mount
+                // resting on the ground gave `reach` of compression — the wheel centre a whole
+                // wheel radius *above* its own mounting point, which is what drew a tyre up
+                // through the bonnet, and 29 kN a strut, which is what threw the vehicle.
+                let compression = (reach - distance).clamp(0.0, spec.rest_length);
+                let centre = mount + down * (spec.rest_length - compression);
+                Wheel {
+                    mount,
+                    centre,
+                    contact: centre + down * spec.wheel_radius,
+                    normal: hit.normal,
+                    compression,
+                    grounded: true,
+                }
+            }
             None => Wheel {
                 mount,
                 centre: mount + down * spec.rest_length,
@@ -550,14 +572,25 @@ pub fn probe_wheels(
 /// the sideways force that grip produces is what swings the vehicle round, at the contact patch,
 /// through the length of the wheelbase. That is why a vehicle with a wheel in the air understeers
 /// and one on ice does not turn at all, without any of it being written down anywhere.
+/// What the driving step reads off one vehicle: what it is, what is being asked of it, whether
+/// anybody is aboard, where its wheels are, and the body to push.
+type Stepped = (
+    Entity,
+    &'static VehicleKind,
+    &'static Controls,
+    Has<Driven>,
+    &'static mut Wheels,
+    Forces,
+);
+
 pub fn drive_vehicles<F: QueryFilter + 'static>(
     space: SpatialQuery,
     time: Res<Time<Fixed>>,
-    mut vehicles: Query<(Entity, &VehicleKind, &Controls, &mut Wheels, Forces), F>,
+    mut vehicles: Query<Stepped, F>,
 ) {
     let dt = time.delta_secs();
 
-    for (entity, kind, controls, mut wheels, mut body) in vehicles.iter_mut() {
+    for (entity, kind, controls, occupied, mut wheels, mut body) in vehicles.iter_mut() {
         let spec = kind.spec();
         let position = body.position().0;
         let rotation = body.rotation().0;
@@ -612,11 +645,19 @@ pub fn drive_vehicles<F: QueryFilter + 'static>(
             );
 
             let along = velocity.dot(forward);
-            // Braking covers three things that are the same act: the handbrake, asking to go
-            // backwards while still going forwards, and asking to go forwards while still rolling
-            // back. The half a metre a second is the dead band that lets the third become reverse
-            // rather than an eternal fight against a stopped vehicle.
+            // Braking covers four things that are the same act: the handbrake, asking to go
+            // backwards while still going forwards, asking to go forwards while still rolling
+            // back, and nobody being aboard. The half a metre a second is the dead band that
+            // lets the third become reverse rather than an eternal fight against a stopped
+            // vehicle.
+            //
+            // A vehicle nobody is sitting in is one of them: its handbrake is on. Parked is a
+            // *state*, not an absence of input — a real one left in gear on a slope stays there,
+            // and a `Controls::default()` that merely asks for nothing let a buggy roll away down
+            // anything that was not flat. It can still be shunted sideways, because braking only
+            // takes out the speed along the tyre; what it stops is rolling.
             let braking = controls.handbrake
+                || !occupied
                 || (controls.throttle < 0.0 && along > 0.5)
                 || (controls.throttle > 0.0 && along < -0.5);
 
@@ -872,7 +913,11 @@ mod tests {
     }
 
     /// Puts the driver's hands on it. `steer` is the wheel angle, not the input.
+    ///
+    /// Seats them too, and that is not bookkeeping: a vehicle nobody is in has its handbrake on, so
+    /// a test that asked for throttle without a driver was asking a parked car to move.
     fn hands(app: &mut App, car: Entity, throttle: f32, steer: f32) {
+        app.world_mut().entity_mut(car).insert(Driven(1));
         let mut controls = app.world_mut().get_mut::<Controls>(car).expect("controls");
         controls.throttle = throttle;
         controls.steer = steer * VehicleKind::Buggy.spec().max_steer;
@@ -1124,15 +1169,91 @@ mod tests {
         }
     }
 
+    /// A parked vehicle stays parked. Its handbrake is on, so a shove along its length dies
+    /// where the same shove sideways always did.
+    ///
+    /// The reason this is a rule and not an accident: `Controls::default()` asks for nothing, and
+    /// asking for nothing used to mean coasting. A buggy left on anything that was not flat rolled
+    /// away, and one nudged by another vehicle kept going.
+    #[test]
+    fn a_vehicle_nobody_is_in_does_not_roll_away() {
+        let spec = VehicleKind::Buggy.spec();
+        let mut app = driving_app();
+        let car = park(&mut app, Vec3::Y * spec.ride_height());
+        run(&mut app, 0.5);
+        app.world_mut().get_mut::<LinearVelocity>(car).expect("a velocity").0 = Vec3::NEG_Z * 8.0;
+        run(&mut app, 1.0);
+
+        let left = speed(&app, car).length();
+        assert!(left < 1.0, "shoved to 8 m/s it is still doing {left:.2} m/s with nobody in it");
+    }
+
+    /// A strut cannot compress further than its own length.
+    ///
+    /// Past that the wheel centre would be above the point it hangs from, which is what drew a
+    /// tyre up through the bonnet, and the spring force went with it: unclamped, a mount resting on
+    /// the ground asked for `reach` of compression and 29 kN out of one strut.
+    #[test]
+    fn a_strut_cannot_compress_past_its_own_length() {
+        let spec = VehicleKind::Buggy.spec();
+        let mut app = driving_app();
+        // Sitting on the floor, well below where its springs would hold it.
+        let car = park(&mut app, Vec3::Y * 0.1);
+        app.update();
+
+        for wheel in app.world().get::<Wheels>(car).expect("wheels").0 {
+            assert!(
+                wheel.compression <= spec.rest_length + 1e-4,
+                "a strut compressed {:.3} m, past its own {:.3} m",
+                wheel.compression,
+                spec.rest_length,
+            );
+        }
+    }
+
+    /// A wheel that has gone under the ground finds it again and is pushed back out.
+    ///
+    /// The ground is a trimesh — two triangles with no inside — so a ray cast down from beneath it
+    /// hits nothing. A mount that dipped below the surface therefore lost its strut for good: no
+    /// hit, no spring, nothing to lift it, and a vehicle with all four under fell for ever. It is
+    /// why the cast starts above the mount.
+    #[test]
+    fn a_wheel_under_the_ground_comes_back_out() {
+        let mut app = driving_app();
+        // Low enough that every strut's mounting point is under the floor, which is the state a
+        // wheel never used to come back from.
+        let car = park(&mut app, Vec3::Y * 0.4);
+        app.update();
+
+        let wheels = app.world().get::<Wheels>(car).expect("wheels").0;
+        assert!(
+            wheels.iter().all(|wheel| wheel.mount.y < 0.0),
+            "the test is not testing anything: no mount is under the floor",
+        );
+        assert!(
+            wheels.iter().all(|wheel| wheel.grounded),
+            "a buried wheel found no ground at all, so nothing will ever push it out",
+        );
+
+        run(&mut app, 3.0);
+        let y = pose(&app, car).y;
+        assert!(y > 0.0, "it is still at y {y:.3}, under the floor it was dropped through");
+    }
+
     /// A tyre resists sideways much harder than it resists rolling. That difference *is* the tyre:
     /// without it a vehicle is a sledge, and steering it would do nothing but change which way it
     /// points while it kept going the way it was.
+    ///
+    /// With somebody aboard and off the throttle, which is what coasting is. Empty it would have
+    /// its handbrake on and would not roll either way, which is a different fact about a different
+    /// vehicle — see `a_vehicle_nobody_is_in_does_not_roll_away`.
     #[test]
     fn it_slides_sideways_far_less_easily_than_it_rolls() {
         let spec = VehicleKind::Buggy.spec();
         let shove = |push: Vec3| {
             let mut app = driving_app();
             let car = park(&mut app, Vec3::Y * spec.ride_height());
+            hands(&mut app, car, 0.0, 0.0);
             run(&mut app, 0.5);
             app.world_mut().get_mut::<LinearVelocity>(car).expect("a velocity").0 = push;
             run(&mut app, 1.0);
