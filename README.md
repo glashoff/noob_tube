@@ -1361,7 +1361,16 @@ the vehicle slid off the bottom of the screen. It is a **ratio** now — 0.17 of
 camera is — so winding the wheel changes how far away the vehicle is and nothing else. At the
 default seven metres that is 1.19 m against the old 1.2, so the view nobody asked to change did not.
 
-**V takes the driver's weapon out, and puts it away again**, and the camera follows from that.
+**The right mouse button takes the driver's weapon out, and puts it away again**, and the camera
+follows from that. It was `V` at first, and the button is better for a reason worth stating: this is
+the switch between two ways of driving, gunner or passenger looking around, and it is used while
+steering — a hand already on the mouse should not have to leave it. The wheel is the zoom and stays
+that.
+
+It only listens while the cursor is grabbed, which the key deliberately did not. The argument for
+not gating the key was that a mode which could not be left after pressing Escape would be a trap,
+and that does not survive the move: the click that takes the grab back is right there. Ungrabbed,
+the pointer belongs to the inspector and to whatever is behind the window.
 
 The switch is over the weapon rather than over the camera because the two cannot both be had. A
 camera that pulls itself back behind the vehicle is pulling the crosshair with it — the yaw is one

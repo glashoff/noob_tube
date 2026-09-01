@@ -46,7 +46,11 @@ const CHASE_FURTHEST: f32 = 20.0;
 const PIXELS_PER_NOTCH: f32 = 20.0;
 
 /// Takes the driver's weapon out, and puts it away again.
-const WEAPON_KEY: KeyCode = KeyCode::KeyV;
+///
+/// The right button rather than a key, because it is the switch between two *ways of driving* —
+/// gunner or passenger looking around — and a hand that is already on the mouse should not have to
+/// leave it. The wheel is the chase camera's zoom and stays that.
+const WEAPON_BUTTON: MouseButton = MouseButton::Right;
 
 /// How hard the camera is pulled back behind a vehicle, and the speed at which it pulls that hard.
 ///
@@ -373,11 +377,20 @@ fn look(
 /// firing" is what the server already sees when a trigger is not pulled. There is no new state on
 /// the wire and nothing to arbitrate.
 ///
-/// Deliberately not gated on the cursor being grabbed, unlike [`look`]. The grab is there because
-/// relative mouse movement stops arriving without it; a key press arrives either way, and a mode
-/// that could not be left after pressing Escape would be a trap.
-fn draw_or_stow_the_weapon(keys: Res<ButtonInput<KeyCode>>, mut player: Single<&mut LocalPlayer>) {
-    if keys.just_pressed(WEAPON_KEY) {
+/// Gated on the cursor being grabbed, which the key it replaced was deliberately not. The reason
+/// for not gating a key was that a mode which could not be left after pressing Escape would be a
+/// trap; that argument does not survive the move to a mouse button, because the click that takes
+/// the grab back is right there and a button press is how every other window on the desktop is
+/// operated. Ungrabbed, the pointer belongs to the inspector and to whatever is behind the window,
+/// and a right-click there has nothing to do with this game.
+fn draw_or_stow_the_weapon(
+    mouse: Res<ButtonInput<MouseButton>>,
+    // Optional for the same reason `sample_input`'s is: a headless client has no cursor to grab.
+    cursor: Option<Single<&CursorOptions, With<PrimaryWindow>>>,
+    mut player: Single<&mut LocalPlayer>,
+) {
+    let grabbed = cursor.is_some_and(|cursor| cursor.grab_mode != CursorGrabMode::None);
+    if grabbed && mouse.just_pressed(WEAPON_BUTTON) {
         player.armed = !player.armed;
     }
 }
