@@ -114,14 +114,34 @@ const GUN_DEPRESSION: f32 = 0.52;
 /// Measured off the model rather than eyeballed. The steering wheel's own node sits at
 /// (−0.519, 0.045, −0.428) once the model→chassis map is applied, which puts the driver on the
 /// vehicle's **left** — forward is −Z and up is +Y, so +X is the right-hand side. The seat itself
-/// is a little behind the wheel, at the `Interior` node's z, and the feet go on the floor of the
-/// cab at the same height everything else about a driver uses.
+/// is a little behind the wheel, at the `Interior` node's z. The height is not the cab floor: it
+/// is whatever puts his *backside on the cushion*, because that is the contact a person reads,
+/// and where the feet then land is left to fall where it falls — 7 cm below the floor of the
+/// cab, as it turns out. Legs through a footwell nobody can see beat a driver hovering above
+/// his own seat, which is what the alternative looked like.
 ///
 /// Distinct from [`SEATED_FEET`], which [`carry_driver`] writes into `PlayerState`. That one is
 /// deliberately on the centreline: it is where a shot leaves from and where the camera stands, and
 /// putting *those* off to one side would give the driver a view out of the passenger's ear. This
 /// is only where the body is drawn.
-pub(crate) const DRIVER_SEAT: Vec3 = Vec3::new(-0.516, -0.516, -0.039);
+pub(crate) const DRIVER_SEAT: Vec3 = Vec3::new(-0.516, SEAT_CUSHION - BACKSIDE, -0.039);
+
+/// The seat cushion directly under the driver, in chassis space.
+///
+/// From the model's own vertices, not from a bounding box. A box round the seat mesh has its top
+/// at the seat *backs*, 50 cm higher, and reading the height off one put the driver 11 cm above the
+/// cushion with the arithmetic insisting he was 33 cm inside it. The cushion also slopes: −0.22 at
+/// its front lip, −0.33 at the back. This is the height at the driver's own z.
+const SEAT_CUSHION: f32 = -0.3016;
+
+/// How far the seated body's backside sits above the character's own root.
+///
+/// The lowest skinned vertex under the pelvis and the backs of the thighs, with the driving clip
+/// evaluated and the vertices moved the way the GPU moves them — a bone is inside the flesh, and
+/// the question "does he touch the cushion" is about the skin. Scaled by the same 1.70/1.78 the
+/// model is drawn at. The same calculation puts the hip bone 0.5584 m above the root, against
+/// 0.559 measured in the running game, which is what says the sums are right.
+const BACKSIDE: f32 = 0.3842;
 
 /// The top of the cross-beam behind the seats, in the vehicle model's own units.
 ///
