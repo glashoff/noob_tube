@@ -2505,10 +2505,52 @@ is logged, once per packet, as `sequence ... already received`. Between 0 and 80
 the runs above. It is not lost data — the channel is reliable and resends — but it is wasted
 bandwidth and alarming log noise, and a bigger map makes it worse rather than better.
 
+#### Maps, and the menu in front of them
+
+Terrain is the first thing here that is *content* rather than constants, so it had to arrive with
+the map management this game did not have — a sculpt you cannot save is a demo. **F2** opens a
+modal menu: what maps there are, which one is being played, load, and a form to make another.
+
+A map is a manifest and a blob, and only one of them is binary. 66k samples as text is some 400 KB
+of digits and a slow parse, and nobody hand-edits a height field; everything *else* about a map is a
+handful of numbers that will change constantly for months, so it is JSON with every field defaulted
+and an added field costs no migration. The manifest is written first, which matters on a crash: a
+name without heights beside it is not listed at all, so a half-written map is invisible rather than
+loadable-and-wrong.
+
+Any connected player may create, load or save. There is no ownership and no permissions — the
+stance the rest of the game takes — and what is guarded is size and accident:
+
+- **Extent and spacing go through `Grid::new`**, which is the server's gate, so an over-cap map is
+  refused before anything is allocated for it. A 10 km map at 5 cm spacing is 40 000² samples and
+  3.2 GB, allocated on the server and then sent to everyone who joins. The dialog validates against
+  *that same function* as it is typed rather than against a second copy of the caps, and shows the
+  derived sample count and the baseline size as they move.
+- **Creating is rate-limited per peer**, because it is the one action that leaves a file behind.
+- **A name is an allowlist** — letters, digits, space, hyphen, underscore — so `../../etc/passwd`
+  becomes `etcpasswd`. That is not the guard that matters, though. **A load resolves a name against
+  the list of maps the server itself found**, which is why there is no separate traversal check
+  standing beside the load, waiting to be forgotten on the second code path.
+
+A switch puts everybody back on the ground, because a new map is flat at the middle of *its own*
+range and that is only y = 0 if the author chose a symmetric one. It reads the heights directly
+rather than casting rays: the collider for the new map does not exist yet, being built from the
+resource the switch has just written, one system later.
+
+The menu takes the keyboard while it is up, and every command in it is a function key or a modifier
+combination. That is not decoration — the fields take typing, so any plain letter used as a command
+would be a letter that could not appear in a map name. Commands are read off the *physical* key and
+only text off the logical one, which is how the first version failed: `Tab` and `Backspace` matched
+on `logical_key` did nothing at all, silently, and the typing simply went to the wrong field.
+
+Verified against two processes: made a map, switched everybody to it, restarted the server, found
+it in the list, loaded it, and saved over it. A 128×64 m map at 2 m spacing arrives as 65×33
+samples and one drawn tile where the built-in map has sixty-four.
+
 #### Still to come
 
-Steps 6 to 11 of the plan: maps that can be made, loaded and saved; sculpting; placement;
-undo; water; and texturing derived from slope and height rather than painted. The rendering step is
+Steps 7 to 11 of the plan: sculpting; placement; undo; water; and texturing derived from slope and
+height rather than painted. The rendering step is
 half done — the shape is visible, and `ExtendedMaterial` with layers chosen by slope is not.
 
 ## Risks

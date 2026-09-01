@@ -8,6 +8,7 @@ mod debug_draw;
 mod harness;
 mod hud;
 mod local_player;
+mod map_menu;
 mod props;
 mod remote_players;
 mod shot_effects;
@@ -58,7 +59,7 @@ fn main() {
         ))
         // Adds nothing unless `NOOB_TUBE_BOT` is set — the plugin decides that itself, so the
         // condition lives beside the reason for it rather than here.
-        .add_plugins(bot::BotPlugin)
+        .add_plugins((bot::BotPlugin, map_menu::MapMenuPlugin))
         .add_plugins(client::ClientPlugins {
             tick_duration: net.tick_duration(),
         })

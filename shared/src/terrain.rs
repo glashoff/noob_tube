@@ -327,7 +327,7 @@ pub enum MapRequest {
 /// guess whether its request worked. The trouble travels with the list rather than as a message of
 /// its own, because the two are always looked at together — "that name is taken, and here is what
 /// is taken" is one answer.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, Reflect)]
 pub struct MapList {
     /// Every map on the server, sorted. This is also the only list a load may resolve against.
     pub maps: Vec<String>,

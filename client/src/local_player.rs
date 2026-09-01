@@ -313,11 +313,15 @@ fn grab_cursor(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     over_ui: Res<PointerOverUi>,
+    menu: Res<crate::map_menu::MapMenu>,
     window: Single<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
     let (window, mut cursor) = window.into_inner();
     let inside = window.cursor_position().is_some();
-    if mouse.just_pressed(MouseButton::Left) && inside && window.focused && !over_ui.0 {
+    // A fourth click that must not grab: one landing on the map menu, which is modal and needs the
+    // pointer for as long as it is up.
+    if mouse.just_pressed(MouseButton::Left) && inside && window.focused && !over_ui.0 && !menu.open
+    {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
     }
@@ -414,7 +418,7 @@ fn draw_or_stow_the_weapon(
 /// [`ScriptedInput`] overrides the keyboard and the mouse when the harness drives the player. The
 /// look angles are taken from the player either way, so a script can steer by writing `yaw` while
 /// leaving the rest of the input alone.
-fn sample_input(
+pub(crate) fn sample_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     // What the screen is showing of everyone else, as of this frame.

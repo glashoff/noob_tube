@@ -5778,6 +5778,7 @@ dependencies = [
  "bevy",
  "lightyear",
  "noob_tube_shared",
+ "serde_json",
 ]
 
 [[package]]
