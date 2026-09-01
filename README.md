@@ -1718,6 +1718,24 @@ inside something. Asking about the neighbourhood of the point the server reporte
 that was actually meant; nothing the shot passed through can answer it, and now nothing the shot
 passed through is asked.
 
+#### A seat comes back when its driver does not
+
+A player who disconnected while driving took their `Driver` and `Driven` with them into nothing.
+The components stayed on the vehicle, pointing at an entity that no longer existed: `use_vehicles`
+read the seat as taken, nobody could get in, the throttle stayed wherever it had been left, and
+`the_world_follows_the_drivers` went on handing that vehicle to a peer that had gone. For the rest
+of the round.
+
+It was known and unfixed for a while, on the grounds that disconnecting mid-drive is rare. Then a
+test bot's connection timed out mid-drive and cost a server restart, which is the usual way a rare
+case establishes its rate.
+
+Giving the seat back is now one function that both ways out of it call — the key and the lost
+connection — because the whole of the bug was that it had been written out once, in the branch that
+handles the key. The disconnect side is an observer on the *player* entity rather than on the
+connection, since the player is the thing the seat points at; lightyear despawns it for us, so it
+covers a clean disconnect, a timeout and a crash alike.
+
 #### Lag compensation
 
 Every shot is tested against the world the shooter was looking at, not the present one.

@@ -19,7 +19,7 @@ use bevy::window::ExitCondition;
 use core::time::Duration;
 use lightyear::prelude::*;
 use noob_tube_shared::tuning::NetConfig;
-use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, SERVER_PORT};
+use noob_tube_shared::PLACEHOLDER_PRIVATE_KEY;
 use std::net::{Ipv4Addr, SocketAddr};
 
 fn main() {
@@ -227,7 +227,7 @@ fn world_inspector() -> impl Plugin {
 }
 
 fn connect(net: Res<NetConfig>, mut commands: Commands) {
-    let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
+    let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), net.port);
     // Port 0 lets the OS pick, so several clients can run on one machine.
     let local_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
 

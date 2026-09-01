@@ -208,6 +208,13 @@ pub struct NetConfig {
     /// Lightyear's default is 1.0 — exactly one tick, the least that can work: below it the server
     /// would sometimes simulate tick `T` before the input for `T` arrived.
     pub min_client_lead_ticks: f32,
+    /// UDP port the game itself runs on: the server binds it, the client dials it.
+    ///
+    /// It exists so that two servers can share a machine, which is the only way to reproduce
+    /// anything that needs a session of its own while somebody is playing on the default one. Both
+    /// binaries read the same field, so one `NOOB_TUBE_PORT=6000` in front of each is a whole
+    /// second session.
+    pub port: u16,
     /// TCP port for the metadata endpoint, beside the game's UDP socket.
     ///
     /// The server publishes its config there so a client can adopt the tick rate before building
@@ -276,7 +283,8 @@ impl Default for NetConfig {
             lag_comp_history_ticks: 35,
             // The behaviour everything so far was measured against.
             predict_vehicles: VehiclePrediction::Full,
-            // Beside SERVER_PORT, which is UDP; the two do not collide.
+            port: crate::SERVER_PORT,
+            // Beside the game port, which is UDP; the two do not collide.
             meta_port: crate::SERVER_PORT + 1,
         }
     }
@@ -294,8 +302,22 @@ impl NetConfig {
             None => Self::default(),
         };
         config.apply_env();
+        config.follow_the_game_port();
         config.validate();
         config
+    }
+
+    /// Moves the metadata port with the game port, when it was sitting just above it.
+    ///
+    /// Two servers on one machine is the whole reason [`port`](Self::port) exists, and a second one
+    /// that took the first's *metadata* socket would be exactly as unusable as one that took its
+    /// game socket. So moving one number is enough. An operator who has placed the metadata port
+    /// somewhere of their own keeps it there, and zero — which switches it off — is left alone,
+    /// because neither is "just above the game port".
+    fn follow_the_game_port(&mut self) {
+        if self.port != crate::SERVER_PORT && self.meta_port == crate::SERVER_PORT + 1 {
+            self.meta_port = self.port + 1;
+        }
     }
 
     /// Rejects combinations that cannot mean anything, before lightyear asserts on them from
@@ -348,6 +370,7 @@ impl NetConfig {
         env_parse("NOOB_TUBE_MAX_PREDICTED_TICKS", &mut self.max_predicted_ticks);
         env_parse("NOOB_TUBE_MIN_CLIENT_LEAD_TICKS", &mut self.min_client_lead_ticks);
         env_parse("NOOB_TUBE_JITTER_SAFETY_MULTIPLE", &mut self.jitter_safety_multiple);
+        env_parse("NOOB_TUBE_PORT", &mut self.port);
         env_parse("NOOB_TUBE_META_PORT", &mut self.meta_port);
         env_parse("NOOB_TUBE_LAG_COMPENSATION", &mut self.lag_compensation);
         env_parse("NOOB_TUBE_LAG_COMP_HISTORY_TICKS", &mut self.lag_comp_history_ticks);

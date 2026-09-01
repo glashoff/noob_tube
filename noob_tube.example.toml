@@ -28,6 +28,18 @@
 # wall-clock error.
 tick_hz = 64.0
 
+# UDP port the game runs on: the server binds it, the client dials it.
+#
+# It is here so that two sessions can share a machine — one to play on, one to reproduce something
+# in — which needs nothing more than the same variable in front of both binaries:
+#   NOOB_TUBE_PORT=6000 cargo run -p noob_tube_server
+#   NOOB_TUBE_PORT=6000 cargo run -p noob_tube_client
+#
+# Moving it moves `meta_port` with it, as long as that one is still sitting just above the default:
+# a second server that took the first's metadata socket would be exactly as unusable as one that
+# took its game socket.
+port = 5000
+
 # TCP port where the server publishes this config, beside the game's UDP socket.
 #
 # A client fetches it before building its app and adopts the tick rate — and only the tick rate.

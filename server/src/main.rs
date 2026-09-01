@@ -23,7 +23,7 @@ use noob_tube_shared::lag_compensation::HitboxHistory;
 use noob_tube_shared::shooting::{self, Health, ShotFired};
 use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin};
 use noob_tube_shared::types::Authored;
-use noob_tube_shared::{PLACEHOLDER_PRIVATE_KEY, SERVER_PORT};
+use noob_tube_shared::PLACEHOLDER_PRIVATE_KEY;
 use std::net::{Ipv4Addr, SocketAddr};
 
 fn main() {
@@ -110,6 +110,7 @@ fn main() {
         .init_resource::<PendingShots>()
         .add_observer(on_client_connected)
         .add_observer(on_peer_connected)
+        .add_observer(on_player_gone)
         .add_plugins(remote_inspection())
         .run();
 }
@@ -599,11 +600,7 @@ fn use_vehicles(
             state.position = position.0 + rotation.0 * Vec3::new(-2.0, -0.6, 0.0);
             state.velocity = Vec3::ZERO;
             commands.entity(player).remove::<Driving>();
-            commands.entity(vehicle).remove::<(Driver, Driven)>();
-            // Hands off the wheel, and not only for tidiness. `Controls` is what the driving step
-            // reads, nothing else clears it, and stepping out at full throttle would otherwise
-            // leave the vehicle accelerating away by itself for the rest of the round.
-            commands.entity(vehicle).insert(Controls::default());
+            empty_the_seat(vehicle, &mut commands);
             info!("{:?} got out", owner.0);
             continue;
         }
@@ -631,6 +628,48 @@ fn use_vehicles(
         // components in the same tick, with the answer decided by which ran last.
         info!("{:?} got in", owner.0);
     }
+}
+
+/// Gives a vehicle back: the half of getting out that is about the car rather than the person.
+///
+/// One function because there are two ways out of a seat and only one of them is a decision. The
+/// other is a connection ending, and the whole of that bug was this being written out once, in the
+/// branch that handles the key.
+///
+/// Clearing [`Controls`] is not tidiness. It is what the driving step reads, nothing else clears
+/// it, and a seat given up at full throttle would otherwise leave the vehicle accelerating away by
+/// itself for the rest of the round.
+fn empty_the_seat(vehicle: Entity, commands: &mut Commands) {
+    commands
+        .entity(vehicle)
+        .remove::<(Driver, Driven)>()
+        .insert(Controls::default());
+}
+
+/// Fires when a player entity goes away, which for a lost connection is the only notice there is.
+///
+/// A player who disconnects while driving takes their [`Driver`] and [`Driven`] with them into
+/// nothing: the components stay, pointing at an entity that no longer exists, and the seat is
+/// locked for the rest of the round. Nobody can get in, `use_vehicles` skips the vehicle as taken,
+/// and [`the_world_follows_the_drivers`] goes on handing it to a peer that has gone. Measured, and
+/// then met again for real — a bot whose connection timed out mid-drive cost a server restart.
+///
+/// An observer on the player rather than on the connection, because the player entity is the thing
+/// the seat actually points at. Lightyear despawns it for us — it carries
+/// [`Lifetime::SessionBased`] — so this fires for a clean disconnect, a timeout and a crash alike,
+/// and it would fire too if a player were ever removed for any other reason. There is nothing to
+/// place: the body is gone.
+fn on_player_gone(
+    trigger: On<Remove, Player>,
+    vehicles: Query<(Entity, &Driver)>,
+    mut commands: Commands,
+) {
+    let player = trigger.entity;
+    let Some((vehicle, _)) = vehicles.iter().find(|(_, driver)| driver.0 == player) else {
+        return;
+    };
+    empty_the_seat(vehicle, &mut commands);
+    info!("a driver went away; {vehicle} is free again");
 }
 
 /// FixedUpdate: lets a vehicle nobody is driving finish the turn its wheels were in.
@@ -876,7 +915,7 @@ fn remote_inspection() -> impl Plugin {
 
 /// Binds the UDP socket and starts accepting connections.
 fn start_listening(net: Res<NetConfig>, mut commands: Commands) {
-    let addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), SERVER_PORT);
+    let addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), net.port);
 
     let server = commands
         .spawn((
@@ -981,3 +1020,67 @@ fn on_peer_connected(
     info!("player spawned for peer {peer}");
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A seat has to come back when its driver's connection does not.
+    ///
+    /// The failure this covers is silent and permanent: the vehicle keeps a [`Driver`] pointing at
+    /// an entity that no longer exists, so `use_vehicles` reads the seat as taken for the rest of
+    /// the round and nobody can get in. It cost a server restart before it was fixed, which is
+    /// exactly the kind of thing a test is cheaper than.
+    #[test]
+    fn a_seat_comes_back_when_its_driver_disconnects() {
+        let mut app = App::new();
+        app.add_observer(on_player_gone);
+
+        let driver = app.world_mut().spawn(Player { peer: 7 }).id();
+        let vehicle = app
+            .world_mut()
+            .spawn((
+                VehicleKind::Buggy,
+                Driver(driver),
+                Driven(7),
+                Controls { throttle: 1.0, ..Controls::default() },
+            ))
+            .id();
+
+        app.world_mut().despawn(driver);
+        app.update();
+
+        let vehicle = app.world().entity(vehicle);
+        assert!(vehicle.get::<Driver>().is_none(), "the seat is still taken");
+        assert!(vehicle.get::<Driven>().is_none(), "everyone else still sees a driver");
+        // And the throttle came back with it, or the empty vehicle drives off by itself.
+        assert_eq!(
+            vehicle.get::<Controls>().map(|controls| controls.throttle),
+            Some(0.0),
+            "the wheel was left where the driver left it",
+        );
+    }
+
+    /// And a vehicle nobody was in is left alone, which is the other half of the same rule.
+    #[test]
+    fn a_parked_vehicle_is_not_touched_by_somebody_elses_disconnect() {
+        let mut app = App::new();
+        app.add_observer(on_player_gone);
+
+        let held = app.world_mut().spawn(Player { peer: 1 }).id();
+        let leaving = app.world_mut().spawn(Player { peer: 2 }).id();
+        let vehicle = app
+            .world_mut()
+            .spawn((VehicleKind::Buggy, Driver(held), Driven(1), Controls::default()))
+            .id();
+
+        app.world_mut().despawn(leaving);
+        app.update();
+
+        assert_eq!(
+            app.world().entity(vehicle).get::<Driver>().map(|driver| driver.0),
+            Some(held),
+            "somebody else's disconnect emptied a seat that was in use",
+        );
+    }
+}

@@ -23,6 +23,10 @@ pub mod remote;
 
 
 /// Default UDP port the server listens on.
+///
+/// The default only: what a process actually uses is
+/// [`NetConfig::port`](crate::tuning::NetConfig::port), which starts here and can be moved so that
+/// two sessions can share a machine.
 pub const SERVER_PORT: u16 = 5000;
 
 /// Base netcode protocol id. Clients and servers only talk to each other when these match, so
