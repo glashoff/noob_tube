@@ -15,6 +15,7 @@ pub mod props;
 pub mod protocol;
 pub mod shooting;
 pub mod simulation;
+pub mod terrain;
 pub mod tuning;
 pub mod types;
 pub mod vehicle;

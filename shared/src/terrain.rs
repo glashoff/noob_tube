@@ -1,0 +1,647 @@
+//! The ground: a height field, what it is allowed to be, and the two files it lives in.
+//!
+//! See `terrain.md` for the design this implements. This is step one of it — the data model and
+//! the codec, and deliberately nothing else. There is no rendering here, no collider, and no
+//! replication; those are steps two, four and five, and each of them is easier to get right
+//! against a model that already round-trips.
+//!
+//! Three things carry their reasons rather than their values, because the values are arbitrary and
+//! the reasons are not.
+//!
+//! **The quantisation is not a storage trick.** `u16` over an explicit `[min_y, max_y]` range costs
+//! half of `f32` and gives 2 mm over a 128 m range, which is more than terrain ever needs. But the
+//! reason it is `u16` in memory rather than `f32` rounded on the way to disk is determinism: a
+//! sculpt brush rounds to *this* lattice inside the stroke, so every machine lands on the same
+//! numbers after every stroke and repeated small strokes cannot accumulate apart. That is what
+//! makes it safe to replicate a sculpt as a gesture instead of as a list of samples.
+//!
+//! **The `+ 1` in the sample count is not an off-by-one.** Heights are grid *points*, not cells, so
+//! an n-metre terrain at 1 m spacing needs n+1 of them. It is also why heightmap tools export
+//! 2ⁿ+1 sizes — 513, 1025, 2049 — and why a cap written as a round 512² would reject a canonical
+//! 513² import by exactly one sample per axis, for no reason at all.
+//!
+//! **The caps are mandatory, not tidy.** Extent and spacing arrive from a client, and their
+//! quotient drives a server-side allocation and the size of every future baseline. Unclamped, that
+//! is a denial of service with a one-line exploit: a 10 km map at 5 cm spacing is 40000² samples
+//! and 3.2 GB. They live here so the menu can grey out an over-cap input against the same
+//! constants the server enforces, rather than against a second copy that drifts.
+
+use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
+
+/// The format this module writes. Bumped when a change would stop an older map loading.
+pub const VERSION: u32 = 1;
+
+/// Metres between samples: the finest and coarsest a map may be.
+///
+/// Finer than a quarter metre buys nothing a sculpt brush can express; coarser than eight is
+/// unusable as ground.
+pub const MIN_SPACING: f32 = 0.25;
+pub const MAX_SPACING: f32 = 8.0;
+
+/// The most samples one axis may have.
+///
+/// 2049 rather than 2048, so the canonical heightmap sizes land exactly on it — see the note about
+/// the `+ 1` above. On its own this is not the guard that matters: two axes each just under it
+/// multiply to four million samples, which is why [`MAX_SAMPLES`] exists as well.
+pub const MAX_SAMPLES_PER_AXIS: u32 = 2049;
+
+/// What a baseline may cost a joining client, in bytes of heights.
+///
+/// Sized from the wire rather than from memory, because that is the limit that bites first: the
+/// heights are sent to every client that joins, and a map nobody can join is worse than a map that
+/// is too small. Four mebibytes admits 1025² — a kilometre at 1 m spacing — and refuses 2049².
+pub const MAX_BASELINE_BYTES: usize = 4 << 20;
+
+/// The most samples a map may have in total, from [`MAX_BASELINE_BYTES`].
+pub const MAX_SAMPLES: u32 = (MAX_BASELINE_BYTES / core::mem::size_of::<u16>()) as u32;
+
+/// Why a map was refused.
+///
+/// One enum for creation and for loading, because they reject the same things for the same
+/// reasons and a client that is told "too many samples" should not care which path said it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapFault {
+    /// Spacing outside [`MIN_SPACING`]..=[`MAX_SPACING`], or not a number.
+    Spacing,
+    /// An extent that is not a positive, finite number of metres.
+    Extent,
+    /// More than [`MAX_SAMPLES_PER_AXIS`] along one axis.
+    TooLongAnAxis,
+    /// More than [`MAX_SAMPLES`] samples in total.
+    TooManySamples,
+    /// `min_y` and `max_y` do not describe a positive, finite range.
+    Range,
+    /// The blob of heights is not `nx * nz * 2` bytes.
+    ///
+    /// The manifest states the sample counts and the blob is however many bytes it is; the two
+    /// files can be separated, edited, or half-written. Unchecked, a mismatch reads the height
+    /// field off the end of itself.
+    BlobSize { expected: usize, found: usize },
+    /// A version this code does not know how to read.
+    Version(u32),
+}
+
+impl core::fmt::Display for MapFault {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Spacing => {
+                write!(f, "spacing must be between {MIN_SPACING} m and {MAX_SPACING} m")
+            }
+            Self::Extent => write!(f, "the extent must be a positive number of metres"),
+            Self::TooLongAnAxis => {
+                write!(f, "an axis may have at most {MAX_SAMPLES_PER_AXIS} samples")
+            }
+            Self::TooManySamples => write!(f, "a map may have at most {MAX_SAMPLES} samples"),
+            Self::Range => write!(f, "max_y must be above min_y"),
+            Self::BlobSize { expected, found } => {
+                write!(f, "the heights are {found} bytes where the manifest says {expected}")
+            }
+            Self::Version(version) => write!(f, "map version {version} is not one this build reads"),
+        }
+    }
+}
+
+/// The lattice the heights sit on: where the samples are, and what a sample means.
+///
+/// Everything about a map that is not a height. Copied freely — it is seven numbers, and passing it
+/// by value is what lets the quantisation live on it rather than on the terrain, so a brush can
+/// round to the lattice without holding the field.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Reflect)]
+pub struct Grid {
+    /// Samples along x and z. Independent, so a map can be a strip rather than a square.
+    pub nx: u32,
+    pub nz: u32,
+    /// Metres between samples.
+    pub spacing: f32,
+    /// World x and z of sample (0, 0).
+    pub origin_x: f32,
+    pub origin_z: f32,
+    /// The world heights that sample values 0 and [`u16::MAX`] mean.
+    ///
+    /// Fixed at creation: changing either would requantise every height in the map, which is a
+    /// migration rather than an edit.
+    pub min_y: f32,
+    pub max_y: f32,
+}
+
+impl Grid {
+    /// The grid an author's two numbers describe.
+    ///
+    /// Extent and spacing rather than sample counts, because those are what somebody making a map
+    /// actually thinks in. The counts are derived and shown back to them, since they are what the
+    /// caps are enforced against.
+    ///
+    /// Centred on the world origin, which is where this game's level already is.
+    pub fn new(
+        extent_x: f32,
+        extent_z: f32,
+        spacing: f32,
+        min_y: f32,
+        max_y: f32,
+    ) -> Result<Self, MapFault> {
+        if !spacing.is_finite() || !(MIN_SPACING..=MAX_SPACING).contains(&spacing) {
+            return Err(MapFault::Spacing);
+        }
+        if !extent_x.is_finite() || !extent_z.is_finite() || extent_x <= 0.0 || extent_z <= 0.0 {
+            return Err(MapFault::Extent);
+        }
+        // Rounded, not truncated: an author asking for 500 m at 3 m spacing wants the nearest grid
+        // to that, not one that quietly comes up two metres short.
+        let along = |extent: f32| (extent / spacing).round() as i64 + 1;
+        let nx = along(extent_x).clamp(2, i64::from(u32::MAX)) as u32;
+        let nz = along(extent_z).clamp(2, i64::from(u32::MAX)) as u32;
+        // Centred on what the grid *is*, not on what was asked for. The two differ whenever the
+        // extent is not a whole number of spacings — 500 m at 3 m spacing comes out as 501 — and
+        // centring on the request would leave the map half a metre off the origin for no reason a
+        // reader could see.
+        let grid = Self {
+            nx,
+            nz,
+            spacing,
+            origin_x: -((nx - 1) as f32) * spacing / 2.0,
+            origin_z: -((nz - 1) as f32) * spacing / 2.0,
+            min_y,
+            max_y,
+        };
+        grid.check()?;
+        Ok(grid)
+    }
+
+    /// Whether this grid is one the server will allocate for and send.
+    ///
+    /// Separate from [`new`](Self::new) because a grid also arrives already built, out of a
+    /// manifest somebody may have edited by hand, and it has to face the same questions then.
+    pub fn check(&self) -> Result<(), MapFault> {
+        if !self.spacing.is_finite() || !(MIN_SPACING..=MAX_SPACING).contains(&self.spacing) {
+            return Err(MapFault::Spacing);
+        }
+        if !self.origin_x.is_finite() || !self.origin_z.is_finite() {
+            return Err(MapFault::Extent);
+        }
+        if !self.min_y.is_finite() || !self.max_y.is_finite() || self.max_y <= self.min_y {
+            return Err(MapFault::Range);
+        }
+        if self.nx < 2 || self.nz < 2 {
+            return Err(MapFault::Extent);
+        }
+        if self.nx > MAX_SAMPLES_PER_AXIS || self.nz > MAX_SAMPLES_PER_AXIS {
+            return Err(MapFault::TooLongAnAxis);
+        }
+        // As `u64`, because the whole point of this check is a product that does not fit.
+        if u64::from(self.nx) * u64::from(self.nz) > u64::from(MAX_SAMPLES) {
+            return Err(MapFault::TooManySamples);
+        }
+        Ok(())
+    }
+
+    /// How many samples this grid holds. Only ever called on a checked grid, so it cannot overflow.
+    pub fn samples(&self) -> usize {
+        self.nx as usize * self.nz as usize
+    }
+
+    /// How many metres across the map is, per axis. The inverse of what an author typed.
+    pub fn extent_x(&self) -> f32 {
+        (self.nx - 1) as f32 * self.spacing
+    }
+
+    pub fn extent_z(&self) -> f32 {
+        (self.nz - 1) as f32 * self.spacing
+    }
+
+    /// The vertical range there is to spend.
+    pub fn span(&self) -> f32 {
+        self.max_y - self.min_y
+    }
+
+    /// Where in the world one sample sits, on the ground plane.
+    pub fn world_of(&self, ix: u32, iz: u32) -> Vec2 {
+        Vec2::new(
+            self.origin_x + ix as f32 * self.spacing,
+            self.origin_z + iz as f32 * self.spacing,
+        )
+    }
+
+    /// Where in the heights one sample lives. Row-major, x fastest — the order the blob is in.
+    pub fn index(&self, ix: u32, iz: u32) -> usize {
+        iz as usize * self.nx as usize + ix as usize
+    }
+
+    /// A world height as a sample value.
+    ///
+    /// Saturating rather than wrapping at both ends: a brush that pushes past the range should
+    /// stop at it, and the alternative is a mountain that comes out as a pit.
+    pub fn quantise(&self, y: f32) -> u16 {
+        let unit = ((y - self.min_y) / self.span()).clamp(0.0, 1.0);
+        (unit * f32::from(u16::MAX)).round() as u16
+    }
+
+    /// A sample value as a world height. The exact inverse of [`quantise`](Self::quantise) on the
+    /// lattice, which is what makes a stroke that reads and writes the field idempotent.
+    pub fn height(&self, sample: u16) -> f32 {
+        self.min_y + f32::from(sample) / f32::from(u16::MAX) * self.span()
+    }
+
+    /// The sample a fresh map is filled with.
+    ///
+    /// The midpoint of the range, and not the floor of it: sculpting goes both ways, and a field
+    /// that starts at its bottom can only be raised. The first attempt to carve a riverbed would
+    /// clamp, and an author would have to lift the whole map before they could dig anything.
+    ///
+    /// The exact midpoint is 32767.5, which is not a sample, so this is the one above it — half a
+    /// step high, or 1 mm on a 128 m range.
+    pub fn midpoint(&self) -> u16 {
+        self.quantise((self.min_y + self.max_y) / 2.0)
+    }
+}
+
+/// A map's heights, and the sea over them.
+///
+/// The heights are the bulk of the file and the whole of the wire baseline; everything else about a
+/// map is small and lives in [`Manifest`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Terrain {
+    pub grid: Grid,
+    /// World y of the sea surface, or `None` for a dry map.
+    ///
+    /// Water is *everywhere* at this height and the field only says where the bottom is close
+    /// enough to matter — which is what makes the shore rule, the underwater tint and the splash
+    /// test one comparison against a plane, with no "is there terrain here" case in front of them.
+    pub water_y: Option<f32>,
+    /// `nx * nz` samples, row-major, x fastest.
+    pub heights: Vec<u16>,
+}
+
+impl Terrain {
+    /// A new map: flat at half height, everywhere.
+    pub fn new(
+        extent_x: f32,
+        extent_z: f32,
+        spacing: f32,
+        min_y: f32,
+        max_y: f32,
+    ) -> Result<Self, MapFault> {
+        let grid = Grid::new(extent_x, extent_z, spacing, min_y, max_y)?;
+        Ok(Self { heights: vec![grid.midpoint(); grid.samples()], grid, water_y: None })
+    }
+
+    /// The height at one sample, in metres.
+    pub fn height_at(&self, ix: u32, iz: u32) -> f32 {
+        self.grid.height(self.heights[self.grid.index(ix, iz)])
+    }
+
+    /// The heights as they go on disk and on the wire: little-endian `u16`, row-major, x fastest.
+    ///
+    /// Little-endian stated rather than assumed. Every machine this runs on is little-endian, so
+    /// `to_le_bytes` costs nothing today; writing it down is what stops the file format from
+    /// quietly being "whatever this machine does".
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.heights.len() * 2);
+        for sample in &self.heights {
+            out.extend_from_slice(&sample.to_le_bytes());
+        }
+        out
+    }
+
+    /// The other half, and the place the two files are made to agree.
+    ///
+    /// The grid is checked first and the blob's length second, because a grid that fails its caps
+    /// gives a length nobody should be allocating against.
+    pub fn decode(grid: Grid, water_y: Option<f32>, blob: &[u8]) -> Result<Self, MapFault> {
+        grid.check()?;
+        let expected = grid.samples() * 2;
+        if blob.len() != expected {
+            return Err(MapFault::BlobSize { expected, found: blob.len() });
+        }
+        let heights = blob
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        Ok(Self { grid, water_y, heights })
+    }
+
+    /// What goes in the `.json` beside the blob.
+    pub fn manifest(&self) -> Manifest {
+        Manifest {
+            version: VERSION,
+            grid: self.grid,
+            water_y: self.water_y,
+            layers: Vec::new(),
+            markers: Vec::new(),
+        }
+    }
+}
+
+/// The readable half of a map: everything that is not a height.
+///
+/// JSON through `serde`, and every added field defaulted, because this is the part that changes
+/// constantly while the design is young. A binary manifest would make each new field a codec
+/// change, a version bump and a migration for maps that already exist — paid on every field,
+/// including the ones that turn out to be wrong a week later.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Manifest {
+    pub version: u32,
+    pub grid: Grid,
+    #[serde(default)]
+    pub water_y: Option<f32>,
+    /// Up to four, each naming an ordinary material asset. Empty until step four wants them.
+    #[serde(default)]
+    pub layers: Vec<Layer>,
+    /// What has been placed on the map. Empty until step eight wants them.
+    #[serde(default)]
+    pub markers: Vec<Marker>,
+}
+
+impl Manifest {
+    /// Whether this is a map this build can open, before anything is allocated for it.
+    pub fn check(&self) -> Result<(), MapFault> {
+        if self.version > VERSION {
+            return Err(MapFault::Version(self.version));
+        }
+        self.grid.check()
+    }
+}
+
+/// One texture layer and how big it tiles.
+///
+/// Which layer appears at a point is a *rule* — a slope range, a height range — evaluated per pixel
+/// in the fragment shader. There is no splat map anywhere in this design, and the rule parameters
+/// arrive with step eleven; this is the part of a layer that is a name and a number.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Layer {
+    pub texture: String,
+    pub tile_scale: f32,
+}
+
+/// Something placed on the map: where it goes, not what it is.
+///
+/// A marker is not the thing it spawns. The height is relative to the ground, so a marker survives
+/// the terrain under it being sculpted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Marker {
+    pub kind: String,
+    pub x: f32,
+    pub z: f32,
+    /// Metres above the ground beneath, not world y.
+    #[serde(default)]
+    pub y: f32,
+    /// A quaternion in the file too, because a yaw cannot say "leaning against that rock".
+    #[serde(default)]
+    pub rotation: Option<[f32; 4]>,
+    /// The convenience an author writing a manifest by hand actually wants.
+    #[serde(default)]
+    pub yaw: Option<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two numbers an author types, and the grid they mean.
+    #[test]
+    fn extent_and_spacing_give_the_sample_count_a_heightmap_tool_would() {
+        let grid = Grid::new(512.0, 512.0, 1.0, -64.0, 64.0).expect("a canonical map");
+        assert_eq!((grid.nx, grid.nz), (513, 513), "512 m at 1 m spacing is 513 grid points");
+        assert_eq!(grid.extent_x(), 512.0, "and it says the extent back unchanged");
+    }
+
+    /// A map may be a strip. Nothing here assumes a square.
+    #[test]
+    fn the_two_axes_are_independent() {
+        let grid = Grid::new(400.0, 100.0, 2.0, 0.0, 50.0).expect("a strip");
+        assert_eq!((grid.nx, grid.nz), (201, 51));
+        assert_eq!((grid.extent_x(), grid.extent_z()), (400.0, 100.0));
+    }
+
+    /// The canonical import sizes have to fit, which is the whole reason the axis cap is 2049 and
+    /// not 2048.
+    #[test]
+    fn a_canonical_heightmap_size_is_not_rejected_by_one_sample() {
+        for n in [513u32, 1025, 2049] {
+            assert!(n <= MAX_SAMPLES_PER_AXIS, "{n} is a size heightmap tools export");
+        }
+        let grid = Grid { nx: 2049, nz: 2049, ..Grid::new(8.0, 8.0, 1.0, 0.0, 1.0).unwrap() };
+        assert_eq!(
+            grid.check(),
+            Err(MapFault::TooManySamples),
+            "2049 squared is 8.4 MB of heights and has to be refused by the total, not the axis"
+        );
+    }
+
+    /// The cap that an extreme aspect ratio would otherwise walk through.
+    #[test]
+    fn a_long_thin_map_is_caught_by_the_total_and_not_by_either_axis() {
+        let grid = Grid { nx: 2049, nz: 1200, ..Grid::new(8.0, 8.0, 1.0, 0.0, 1.0).unwrap() };
+        assert!(
+            grid.nx <= MAX_SAMPLES_PER_AXIS && grid.nz <= MAX_SAMPLES_PER_AXIS,
+            "both axes are inside their own cap, which is the point",
+        );
+        assert_eq!(grid.check(), Err(MapFault::TooManySamples));
+    }
+
+    /// The exploit the caps exist for: a 10 km map at 5 cm spacing.
+    #[test]
+    fn the_denial_of_service_map_is_refused() {
+        assert_eq!(Grid::new(10_000.0, 10_000.0, 0.05, -64.0, 64.0), Err(MapFault::Spacing));
+        assert_eq!(Grid::new(10_000.0, 10_000.0, 1.0, -64.0, 64.0), Err(MapFault::TooLongAnAxis));
+    }
+
+    /// Nonsense in, refusal out — including the values that are not numbers at all.
+    #[test]
+    fn a_grid_that_is_not_a_grid_is_refused() {
+        assert_eq!(Grid::new(100.0, 100.0, f32::NAN, 0.0, 1.0), Err(MapFault::Spacing));
+        assert_eq!(Grid::new(f32::INFINITY, 100.0, 1.0, 0.0, 1.0), Err(MapFault::Extent));
+        assert_eq!(Grid::new(0.0, 100.0, 1.0, 0.0, 1.0), Err(MapFault::Extent));
+        assert_eq!(Grid::new(100.0, 100.0, 1.0, 5.0, 5.0), Err(MapFault::Range));
+        assert_eq!(Grid::new(100.0, 100.0, 1.0, 0.0, f32::NAN), Err(MapFault::Range));
+    }
+
+    /// Every sample value survives the round trip through metres and back.
+    ///
+    /// Exhaustive, because there are only 65536 of them and "for all" is a stronger statement than
+    /// any sample of them would be. This is the property a sculpt brush stands on: a stroke that
+    /// reads a height, adds nothing and writes it back must change nothing at all.
+    #[test]
+    fn every_sample_survives_the_trip_through_metres() {
+        let grid = Grid::new(64.0, 64.0, 1.0, -64.0, 64.0).expect("a grid");
+        for sample in 0..=u16::MAX {
+            let there_and_back = grid.quantise(grid.height(sample));
+            assert_eq!(there_and_back, sample, "{sample} came back as {there_and_back}");
+        }
+    }
+
+    /// What the quantisation actually costs, stated as a number rather than as a hope.
+    #[test]
+    fn a_128_metre_range_resolves_to_two_millimetres() {
+        let grid = Grid::new(64.0, 64.0, 1.0, -64.0, 64.0).expect("a grid");
+        let step = grid.height(1) - grid.height(0);
+        assert!(step < 0.002, "one step is {:.4} mm", step * 1000.0);
+    }
+
+    /// Past either end a brush stops rather than wrapping. A mountain must not come out as a pit.
+    #[test]
+    fn pushing_past_the_range_saturates_rather_than_wrapping() {
+        let grid = Grid::new(64.0, 64.0, 1.0, -64.0, 64.0).expect("a grid");
+        assert_eq!(grid.quantise(1000.0), u16::MAX);
+        assert_eq!(grid.quantise(-1000.0), 0);
+        assert_eq!(grid.quantise(f32::NEG_INFINITY), 0);
+    }
+
+    /// A fresh map is flat at half height, so the first stroke works whichever way it goes.
+    #[test]
+    fn a_new_map_starts_halfway_up_its_own_range() {
+        let terrain = Terrain::new(64.0, 64.0, 1.0, -64.0, 64.0).expect("a map");
+        assert_eq!(terrain.heights.len(), terrain.grid.samples());
+        assert!(
+            terrain.heights.iter().all(|&h| h == terrain.grid.midpoint()),
+            "a new map is not flat"
+        );
+        let y = terrain.height_at(0, 0);
+        assert!(y.abs() < 0.002, "the midpoint of -64..64 came out at {y} rather than at 0");
+        // Room to dig as well as to raise, which is the whole reason for the midpoint.
+        assert!(y - terrain.grid.min_y > 63.0 && terrain.grid.max_y - y > 63.0);
+    }
+
+    /// Row-major, x fastest — the order the blob is in, and the one thing a reader cannot guess.
+    #[test]
+    fn the_samples_are_laid_out_with_x_running_fastest() {
+        let grid = Grid::new(24.0, 16.0, 8.0, 0.0, 1.0).expect("a grid");
+        assert_eq!((grid.nx, grid.nz), (4, 3));
+        assert_eq!(grid.index(0, 0), 0);
+        assert_eq!(grid.index(1, 0), 1, "the next sample along x is the next in the blob");
+        assert_eq!(grid.index(0, 1), 4, "the next row is a whole nx away");
+        assert_eq!(grid.index(3, 2), 11);
+    }
+
+    /// Samples land where the grid says, centred on the origin the level already uses.
+    #[test]
+    fn a_map_is_centred_on_the_world_origin() {
+        let grid = Grid::new(100.0, 40.0, 5.0, 0.0, 1.0).expect("a grid");
+        assert_eq!(grid.world_of(0, 0), Vec2::new(-50.0, -20.0));
+        assert_eq!(grid.world_of(grid.nx - 1, grid.nz - 1), Vec2::new(50.0, 20.0));
+        assert_eq!(grid.world_of(10, 4), Vec2::ZERO, "the middle sample is the origin");
+    }
+
+    /// And still centred when the extent is not a whole number of spacings, which is the case that
+    /// would otherwise put the map half a spacing off the origin.
+    #[test]
+    fn a_map_that_does_not_divide_evenly_is_still_centred() {
+        let grid = Grid::new(500.0, 500.0, 3.0, 0.0, 1.0).expect("a grid");
+        assert_eq!(grid.nx, 168, "500 over 3 rounds to 167 spans");
+        assert_eq!(grid.extent_x(), 501.0, "so the map is a metre wider than was asked for");
+        let low = grid.world_of(0, 0);
+        let high = grid.world_of(grid.nx - 1, grid.nz - 1);
+        assert!(
+            (low + high).length() < 1e-4,
+            "it runs {low:?} to {high:?}, which is not centred on the origin",
+        );
+    }
+
+    /// Heights out and back, byte for byte and sample for sample.
+    #[test]
+    fn the_heights_survive_the_blob() {
+        let mut terrain = Terrain::new(24.0, 16.0, 8.0, -10.0, 10.0).expect("a map");
+        for (index, sample) in terrain.heights.iter_mut().enumerate() {
+            *sample = (index as u16).wrapping_mul(4919);
+        }
+        let blob = terrain.encode();
+        assert_eq!(blob.len(), terrain.grid.samples() * 2);
+        let back = Terrain::decode(terrain.grid, terrain.water_y, &blob).expect("it decodes");
+        assert_eq!(back, terrain);
+    }
+
+    /// The two files can be separated, edited, or half-written. A mismatch that is not caught
+    /// reads the height field off the end of itself.
+    #[test]
+    fn a_blob_that_does_not_match_its_manifest_is_refused() {
+        let terrain = Terrain::new(24.0, 16.0, 8.0, -10.0, 10.0).expect("a map");
+        let mut blob = terrain.encode();
+        blob.pop();
+        assert_eq!(
+            Terrain::decode(terrain.grid, None, &blob),
+            Err(MapFault::BlobSize { expected: 24, found: 23 })
+        );
+        assert_eq!(
+            Terrain::decode(terrain.grid, None, &[]),
+            Err(MapFault::BlobSize { expected: 24, found: 0 })
+        );
+    }
+
+    /// A grid is checked before its length is believed, so a map over its caps never reaches an
+    /// allocation.
+    #[test]
+    fn a_blob_is_not_even_measured_against_a_grid_that_failed_its_caps() {
+        let grid = Grid { nx: 2049, nz: 2049, ..Grid::new(8.0, 8.0, 1.0, 0.0, 1.0).unwrap() };
+        assert_eq!(Terrain::decode(grid, None, &[]), Err(MapFault::TooManySamples));
+    }
+
+    /// The manifest is the half that changes, so it has to survive a round trip through text.
+    #[test]
+    fn the_manifest_survives_json() {
+        let mut terrain = Terrain::new(64.0, 64.0, 1.0, -64.0, 64.0).expect("a map");
+        terrain.water_y = Some(-3.5);
+        let mut manifest = terrain.manifest();
+        manifest.layers.push(Layer { texture: "grass.png".into(), tile_scale: 4.0 });
+        manifest.markers.push(Marker {
+            kind: "crate".into(),
+            x: 1.5,
+            z: -2.0,
+            y: 0.0,
+            rotation: None,
+            yaw: Some(1.57),
+        });
+
+        let text = serde_json::to_string_pretty(&manifest).expect("it serialises");
+        let back: Manifest = serde_json::from_str(&text).expect("it deserialises");
+        assert_eq!(back, manifest);
+        assert!(back.check().is_ok());
+    }
+
+    /// An added field must cost nothing, which is the whole argument for JSON over a binary
+    /// manifest. A map written before layers and markers existed still loads.
+    #[test]
+    fn a_manifest_from_before_the_new_fields_still_loads() {
+        let text = r#"{
+            "version": 1,
+            "grid": { "nx": 65, "nz": 65, "spacing": 1.0,
+                      "origin_x": -32.0, "origin_z": -32.0, "min_y": -64.0, "max_y": 64.0 }
+        }"#;
+        let manifest: Manifest = serde_json::from_str(text).expect("an older map still loads");
+        assert_eq!(manifest.grid.nx, 65);
+        assert_eq!(manifest.water_y, None, "a map with no water stores nothing");
+        assert!(manifest.layers.is_empty() && manifest.markers.is_empty());
+        assert!(manifest.check().is_ok());
+    }
+
+    /// A manifest from a newer build is refused rather than half-read.
+    #[test]
+    fn a_map_from_a_later_version_is_refused() {
+        let terrain = Terrain::new(64.0, 64.0, 1.0, -64.0, 64.0).expect("a map");
+        let mut manifest = terrain.manifest();
+        manifest.version = VERSION + 1;
+        assert_eq!(manifest.check(), Err(MapFault::Version(VERSION + 1)));
+    }
+
+    /// A hand-edited manifest faces the same caps a created map does. This is the path that would
+    /// otherwise get the check forgotten on it.
+    #[test]
+    fn a_manifest_gets_the_same_caps_a_new_map_does() {
+        let text = r#"{
+            "version": 1,
+            "grid": { "nx": 40000, "nz": 40000, "spacing": 0.05,
+                      "origin_x": 0.0, "origin_z": 0.0, "min_y": -64.0, "max_y": 64.0 }
+        }"#;
+        let manifest: Manifest = serde_json::from_str(text).expect("it parses");
+        assert_eq!(manifest.check(), Err(MapFault::Spacing));
+    }
+
+    /// The caps have to be the ones the wire budget implies, or the menu greys out against one
+    /// number while the server enforces another.
+    #[test]
+    fn the_sample_cap_is_the_baseline_budget_and_nothing_else() {
+        assert_eq!(MAX_SAMPLES as usize * 2, MAX_BASELINE_BYTES);
+        let kilometre = Grid::new(1024.0, 1024.0, 1.0, -64.0, 64.0).expect("a kilometre fits");
+        assert_eq!((kilometre.nx, kilometre.nz), (1025, 1025));
+        assert!(kilometre.samples() * 2 < MAX_BASELINE_BYTES);
+    }
+}

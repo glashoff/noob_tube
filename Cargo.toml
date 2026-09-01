@@ -11,6 +11,9 @@ license = "AGPL-3.0-or-later"
 noob_tube_shared = { path = "shared" }
 bevy = { version = "0.19.1", default-features = false, features = ["serialize"] }
 serde = { version = "1", features = ["derive"] }
+# For terrain map manifests. See terrain.md §1: the heights are binary because they have to
+# be, and everything else is JSON because it changes constantly while the design is young.
+serde_json = "1"
 # Logging from the metadata thread, which runs outside the ECS. Bevy's `info!` and friends come
 # from bevy_log, which the shared crate does not pull in — it builds bevy with default features off.
 tracing = "0.1"

@@ -10,6 +10,7 @@ bevy = { workspace = true }
 lightyear = { workspace = true }
 lightyear_avian3d = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 bevy_remote = { workspace = true, optional = true }
