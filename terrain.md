@@ -110,7 +110,7 @@ fix the extent: `(nx-1) * spacing` by `(nz-1) * spacing` metres.
 The usual way to texture terrain is a *splat map*: a second grid, RGBA, one byte per layer weight,
 painted by hand and stored alongside the heights. This design has none. Which texture appears at a
 point is a function of that point's height, its slope, and its distance to any path drawn on the
-map (§10) — evaluated per pixel in the fragment shader (§5).
+map (§11) — evaluated per pixel in the fragment shader (§5).
 
 The case for storing a painted splat instead is real, and it is worth stating at its strongest
 before dismissing it. From the predecessor's design notes, which chose that way:
@@ -135,7 +135,7 @@ receives is the heights and nothing else.
 **What it costs**, on the record: a map can never have a patch of moss or a worn bare spot that the
 ground's own shape does not explain. Every visual distinction has to be expressible as a rule.
 
-**And the way back is not a splat.** Paths and roads are wanted eventually (§10), and they arrive as
+**And the way back is not a splat.** Paths and roads are wanted eventually (§11), and they arrive as
 *2D vector paths* somebody places — an ordered handful of control points, evaluated per pixel — not
 as a raster somebody paints. That keeps the invariant whole: a road is still derived, from a curve
 instead of from height and slope.
@@ -506,17 +506,28 @@ terrain.
 
 ---
 
-## 7. Spawn points, and the hotbar that places them
+## 7. Placing things
 
-Three things get placed: where players start, where vehicles start, where crates start. All three
-already exist as constants — `CRATES`, `VEHICLE_STARTS` and `spawn_point` in
+One mechanism places everything that stands on the ground: spawn points, vehicles, crates, trees,
+whatever comes next. They differ in what they spawn and in nothing else, so they share a record, a
+hotbar, a set of gestures and a validation path.
+
+The first three already exist as constants — `CRATES`, `VEHICLE_STARTS` and `spawn_point` in
 [`level.rs`](shared/src/level.rs) — and that file already says what is wrong with them:
 
 > Real spawn points come with real levels. […] Harmless on an empty plane, wrong on a real map, and
 > fixed by picking a free spawn point rather than counting.
 
-So this is less a new feature than moving three constants into the map file and letting somebody
-drag them around.
+So this starts as moving three constants into the map file and letting somebody drag them around,
+and the generalisation costs nothing: a marker's `kind` is a palette id rather than a closed enum
+of three, and adding a placeable becomes adding an asset instead of a code change.
+
+**Trees are the case worth being careful about.** Placing them individually is right for the ones
+that matter — a landmark, cover at a chokepoint, something an author aimed at. It is not how a
+forest gets made; ten thousand of those come from a seed and the height field (§12), cost no
+bandwidth, and are not markers at all. Both can be true on one map. What must not happen is the
+placement system growing a scatter brush and quietly becoming the forest — that is the point at
+which the marker list stops being a few dozen readable lines.
 
 ### A marker is not the thing it spawns
 
@@ -528,7 +539,7 @@ The distinction that keeps this cheap:
   at round start and replicated exactly as it is today.
 
 Three things follow. Markers never enter prediction, because nothing predicts them. A round reset
-is a re-read of the markers rather than a special case. And **placement is exempt from §8's
+is a re-read of the markers rather than a special case. And **placement is exempt from §9's
 rollback rule**: a marker has no collider, so nothing it does can change where a player may stand,
 and there is no per-tile rebuild to make idempotent. Only spawning the live entity immediately
 would need the tick discipline, and then it would need it for the entity rather than the marker.
@@ -622,9 +633,14 @@ The structure worth copying is that **a slot holds a thing, and the key you pres
 verb** — place, delete, rotate. One slot therefore does all three, and the slot count is not
 multiplied by the number of actions.
 
-Today there are three placeables, so seven slots start empty and assignable. The ten are there
-because the set grows — more vehicle kinds, props, whatever the built layer turns into — and
-retrofitting a hotbar is worse than leaving gaps in one.
+What goes in a slot is chosen from a **palette dialog** — the full list of placeables the server
+offers, with the slot picked first and the entry second. The hotbar is the fast path for the ten
+things you are using right now; the dialog is where the other hundred live. That split is what lets
+the placeable set grow without the hotbar having to.
+
+The palette itself comes from the server, alongside the map. An author on a server with more
+assets sees more entries, and a marker whose `kind` names something the server does not have is a
+load error rather than a silently missing crate.
 
 ### Placement is a gesture, like a sculpt
 
@@ -654,7 +670,65 @@ cheapest place in the system to know that.
 
 ---
 
-## 8. Terrain edits and rollback
+## 8. Undo
+
+One step deep, the author's own last edit, and only when nothing has happened since.
+
+That sounds like a limitation and is mostly a design: a shared world with several editors turns
+general undo into a merge problem — undoing edit N when N+1 was built on top of it has no
+answer that is right in every case. Refusing that case outright costs almost nothing, because it
+is not what anybody is asking for. What an author wants, essentially always, is *I just did that,
+take it back*.
+
+### The condition, exactly
+
+The server keeps one monotonically increasing **edit sequence number** per map. Every accepted
+edit of any kind — sculpt, place, delete, rotate — increments it, and the server remembers who
+made the last one.
+
+An undo request carries the sequence number the client believes is current. The server accepts
+only if that number still matches, and if the last edit was the requester's own. Otherwise it
+refuses, and the client says so rather than doing something approximate.
+
+Both halves are needed and for different reasons. **The sequence check** is what makes this safe
+under concurrency: it is a compare-and-swap, so two authors racing to undo cannot both win, and an
+undo can never land on top of an edit it did not account for. **The ownership check** is a matter
+of taste rather than safety — undoing someone else's stroke is mechanically fine and socially
+surprising. It is one condition, and worth having.
+
+### A sculpt undo is a before-image, not an inverse
+
+This is the part that decides the implementation.
+
+For a placement the inverse is trivial and needs nothing stored: undoing a place is a delete of a
+known id, undoing a rotate is the previous rotation, undoing a delete is re-creating the marker
+the server still has.
+
+For a sculpt there **is no inverse gesture.** Raising by half a metre and then lowering by half a
+metre does not restore the field: heights clamp at `min_y` and `max_y`, and every stroke rounds to
+the `u16` lattice (§1), so both ends of the round trip lose information exactly where the stroke
+was most extreme. An undo built from an inverse brush would leave the terrain almost right, which
+is worse than either alternative.
+
+So a sculpt keeps a **before-image**: the affected box of samples as it was. Its size is bounded by
+the same cap that bounds a stroke (§6), the editor holds exactly one of them, and it is memory
+rather than anything on disk.
+
+**Undo is therefore the one gesture that carries samples rather than a gesture**, which §6 makes a
+rule of not doing. The exception is justified and bounded: it is the only exact answer, it is
+capped at one stroke's footprint, and it happens at human speed rather than per tick. Everything
+else about it is ordinary — it travels the same ordered reliable channel, and a sculpt undo changes
+heights, so it lands at `commit_tick + max_rollback_ticks` like any other (§9).
+
+### What it does not do
+
+Undo is per-session and in memory. It is not a history, it does not survive a restart, and saving
+does not clear it — a saved edit can still be undone, and then saved again. A map wanting real
+history wants versioning, which is a different feature and not this one wearing a smaller name.
+
+---
+
+## 9. Terrain edits and rollback
 
 This is the one piece of design here with no precedent to copy, because it follows from prediction
 machinery the predecessor does not have in this form.
@@ -680,7 +754,7 @@ triggers it.
 
 ---
 
-## 9. The one derivation that has to exist twice
+## 10. The one derivation that has to exist twice
 
 Surface classification — *what am I standing on* — is needed on the CPU for footstep sounds, impact
 decals and anything else that cares about the material under a player. The shader's copy is WGSL
@@ -699,14 +773,14 @@ Two mitigations, and the second is the one that actually settles it:
   half a metre into the sand. Collision never consults it, so a divergence cannot reach the
   simulation — which is the test that matters, and the same one that makes the visual half safe.
 
-**Paths are exempt from all of this** (§10). "Am I standing on a road?" is a pure function of the
+**Paths are exempt from all of this** (§11). "Am I standing on a road?" is a pure function of the
 path list, which lives in `shared` and is the same data on both sides — one call, no second
 implementation, no approximation. The duplication above is the price of deriving from *height and
 slope* specifically, and it applies only to the ground rules.
 
 ---
 
-## 10. Paths and roads — later, and vector
+## 11. Paths and roads — later, and vector
 
 Wanted, not designed here. This section records the shape and the one constraint specific to this
 engine; the predecessor works the rest out in detail, including LOD-gap measurements for a road
@@ -739,7 +813,7 @@ organised around:
   shader as §5's rules. The server never evaluates it, nothing can diverge, and it costs nothing.
 - **The height half is a terrain gesture.** Cutting a level corridor changes the height field,
   which changes the collider, which changes where players can stand — so it falls under §6's
-  determinism discipline and §8's `commit_tick + max_rollback_ticks` rule like any other sculpt. It
+  determinism discipline and §9's `commit_tick + max_rollback_ticks` rule like any other sculpt. It
   is genuinely a different brush from flatten: flatten levels to one height, this levels to a
   *profile* sampled and smoothed along the path.
 
@@ -752,7 +826,7 @@ a collider of its own, and that is a different feature wearing the same word.
 
 ---
 
-## 11. Vegetation — sketch only
+## 12. Vegetation — sketch only
 
 Not designed here beyond the property that makes it affordable.
 
@@ -776,7 +850,7 @@ on 0.12).
 
 ---
 
-## 12. Work steps
+## 13. Work steps
 
 1. **Data model and codec.** `TerrainHeights` in `shared`: `u16` quantisation, `water_y`, the
    extent-and-spacing derivation, the midpoint fill, encode and decode. Unit tests on
@@ -794,17 +868,18 @@ on 0.12).
    survives a restart — with no sculpting in it yet.
 7. **Sculpting.** Raise/lower first, then flatten, smooth, ramp. Gestures,
    `commit_tick + max_rollback_ticks`, per-tile rebuild, unsaved-state tracking in the menu.
-8. **Spawn markers.** The three kinds, the hotbar, place/delete/rotate as gestures, and round start
-   reading markers instead of `CRATES`, `VEHICLE_STARTS` and `spawn_point`.
-9. **Water.** The surface mesh with its depth attribute, and an editor control for `water_y`.
-10. **Derived texturing.** The full rule set, then triplanar, then tile break — in that order,
+8. **Placement.** Markers, the hotbar and its palette dialog, place/delete/rotate as gestures, and
+   round start reading markers instead of `CRATES`, `VEHICLE_STARTS` and `spawn_point`.
+9. **Undo.** The edit sequence number, the compare-and-swap, and the sculpt before-image.
+10. **Water.** The surface mesh with its depth attribute, and an editor control for `water_y`.
+11. **Derived texturing.** The full rule set, then triplanar, then tile break — in that order,
    measuring each.
 
 Steps 1–3 are the ones that can invalidate the plan. Everything after them is addition.
 
 ---
 
-## 13. Open questions
+## 14. Open questions
 
 - **What the new-map dialog offers by default.** `HALF_EXTENT` is 250 m today, so a 512 m map at
   1 m spacing covers the current playable area and lands on the canonical 513² grid. At `f32` and
