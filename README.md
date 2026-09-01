@@ -1534,7 +1534,7 @@ middle of its receiver.
 
 Its own scene is not normalised the way a Sketchfab export usually is — it is 63.7 units long and
 carries a chain of node transforms that compose to a plain scale — so the length is measured and
-everything else is a ratio against it. Scaled to 2.4 m, a little under two thirds of the vehicle.
+everything else is a ratio against it. Scaled to 1.2 m, about a third of the vehicle.
 
 It hangs off the *vehicle model* rather than off the chassis, and is placed in the model's own
 units. Where the beam is depends on the model and on nothing else, so the two stay glued together:
@@ -1542,9 +1542,30 @@ the vehicle could be respecified tomorrow and the gun would still be on its beam
 gun is absent exactly when the beam is — on a client with no vehicle model there is nothing to bolt
 it to, and the box gets no gun.
 
-It does not turn, and it does not fire. It is a fitting, not a weapon: the driver's shot still comes
-from the seat. Making it a second seat that aims independently is the thing that would dissolve the
-camera trade described below, and it is its own piece of work.
+**It turns with the driver, and the tracer comes out of its barrel.** Where a shot goes has not
+changed — it is still cast from the seat, by the driver, with the same angles as ever — but the
+picture now agrees with it. The gun's barrel is laid along the aim ray and the tracer starts at the
+end of that barrel instead of beside the driver's head.
+
+Both turns are worked out in the *vehicle model's* own frame rather than the world's, which is what
+makes the gun follow a car that is cornering, leaning on its springs or parked on a slope: the whole
+chain from the chassis down is already in the transform, so subtracting it once leaves two angles
+that mean the same thing at any attitude.
+
+Both of them are about the foot of the post — the point measured onto the beam — so the gun stays
+bolted to it however it is aimed. A real pintle elevates about a trunnion higher up instead, and
+that is not available here: the post and the gun are a single mesh in the file, and turning about
+the trunnion lifts the foot 9 cm out of its socket at full elevation. Turning about the socket is
+the other kind of mount, and the only one this geometry can be.
+
+The elevation is clamped and the traverse is not. A pintle behind the seats can be swung all the way
+round — that is what it is for — but 23.3° is where the bottom of the stock swings down onto the
+plane of the beam, so the limit is 0.40 rad rather than a taste. A driver aiming steeper than that
+still gets the traverse; the barrel simply stops following, which is what a real mount does.
+
+It still does not fire on its own, and it has no gunner. Making it a second seat that aims
+independently is the thing that would dissolve the camera trade described below, and it is its own
+piece of work.
 
 **The licence is a third answer again, and the first one that is uncomfortable.** The Warthog is
 CC BY, so it may travel with the repository. The animation library is licensed for use but not
@@ -1628,6 +1649,19 @@ crate on rails does not turn and the entity should say so.
 Bullet holes are also **hung on what they hit** rather than pinned in world space, when that thing
 can move. A hole left floating where a crate used to be is the same objection that keeps decals off
 players, only slower and so easier to miss.
+
+Which is exactly what made the next one so odd. **Shooting the ground beside the buggy left holes on
+the ground that then drove off with the buggy.** The message says where a shot ended and not what it
+ended *on*, so each client casts its own ray to find the surface and its normal — and that ray was
+cast from the shooter's eye, along the whole flight. The server's shot ignores the vehicle its
+shooter is sitting in; a ray does not, and it stopped against that vehicle's own bodywork. So the
+hole went to the right place, took its normal from the wrong surface, and was hung on the buggy.
+
+The ray is now cast over the last 15 cm before the endpoint instead of the whole flight, and the
+answer is rejected unless it lands on that endpoint — which it does not when the probe itself begins
+inside something. Asking about the neighbourhood of the point the server reported is the question
+that was actually meant; nothing the shot passed through can answer it, and now nothing the shot
+passed through is asked.
 
 #### Lag compensation
 

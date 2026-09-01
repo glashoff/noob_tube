@@ -27,8 +27,10 @@ use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::{Predicted, client};
 use noob_tube_shared::physics::Layer;
-use noob_tube_shared::player::{Player, PlayerInput, PlayerState};
+use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState};
+use noob_tube_shared::shooting;
 use noob_tube_shared::tuning::NetConfig;
+use crate::local_player::LocalPlayer;
 use noob_tube_shared::vehicle::{
     self, Controls, Driven, Driving, FRONT_WHEELS, Righting, VehicleKind, WHEELS, Wheels,
     probe_wheels,
@@ -64,19 +66,32 @@ const GUN: &str = "models/machine_gun.glb";
 /// Sketchfab export usually is — the number is large because the units are. What matters is only
 /// that everything below is a ratio against it.
 const GUN_LENGTH: f32 = 63.74;
-/// How long we want it to be, in metres. A little under two thirds of the vehicle, which is about
-/// what a pintle-mounted gun is against the truck under it.
-const GUN_WANTED_LENGTH: f32 = 2.4;
+/// How long we want it to be, in metres. About a third of the vehicle, which is what a
+/// pintle-mounted gun is against the truck under it.
+const GUN_WANTED_LENGTH: f32 = 1.2;
 /// The foot of its pintle, in its own units: the one point that has to end up on the beam.
 ///
 /// Measured rather than taken as the origin, which is somewhere in the middle of the receiver. The
 /// bottom two units of the model are a single 2.1-wide post, and this is the centre of its underside.
 const GUN_FOOT: Vec3 = Vec3::new(3.50, -11.21, 0.0);
-/// Which way the gun faces, within the vehicle model's own frame.
+/// Which way the gun faces with nobody in the seat, within the vehicle model's own frame.
 ///
 /// Its barrel points along its own +X. The vehicle model's nose is at −X, and half a turn is what
-/// puts one on the other — the vehicle's own quarter turn then carries both to −Z together.
+/// puts one on the other — the vehicle's own quarter turn then carries both to −Z together. With
+/// somebody driving it is [`aim_the_gun`] that decides, and this is only where it rests.
 const GUN_YAW: f32 = core::f32::consts::PI;
+/// The end of the barrel, in the gun's own units: where a tracer comes out.
+///
+/// The barrel is a tube along +X ending at x = 42.06, and this is the centre of its last ring of
+/// vertices. Low-poly tubes carry rings only at their ends, which is why the middle of the barrel
+/// has no vertices at all and the far end has them all.
+const GUN_MUZZLE: Vec3 = Vec3::new(42.06, 3.33, 0.0);
+/// How far the gun may be elevated or depressed, in radians.
+///
+/// Not a matter of taste. Everything turns about [`GUN_FOOT`], the bottom of the stock is 25.2
+/// units behind that point and 10.8 above it, and 23.3° is where the one swings down onto the
+/// plane of the other. Past it the gun would put its own tail through the beam it is bolted to.
+const GUN_SWING: f32 = 0.40;
 /// The top of the cross-beam behind the seats, in the vehicle model's own units.
 ///
 /// Found by looking for what the geometry actually is rather than by eye: the roll cage is the only
@@ -123,6 +138,7 @@ impl Plugin for VehiclePlugin {
         app.register_type::<Wheel>()
             .register_type::<ModelWheel>()
             .register_type::<Rolling>()
+            .register_type::<MountedGun>()
             .add_systems(
                 Update,
                 (
@@ -131,6 +147,7 @@ impl Plugin for VehiclePlugin {
                     place_wheels,
                     find_the_models_wheels,
                     swing_the_models_wheels,
+                    aim_the_gun,
                 )
                     .chain(),
             )
@@ -217,6 +234,36 @@ enum Part {
 /// every vehicle's whole node tree every frame for the rest of the round.
 #[derive(Component)]
 struct Unfitted;
+
+/// The gun bolted to the beam, and where its barrel ends.
+///
+/// `pub(crate)` because a tracer starts here — see `shot_effects`. The muzzle is a point in the
+/// gun's own units and this entity is the gun's own frame, so where it is in the world is one
+/// `transform_point` away from a `GlobalTransform` and nothing here has to work it out.
+#[derive(Component, Clone, Copy, Debug, Reflect)]
+#[reflect(Component)]
+pub(crate) struct MountedGun {
+    /// The vehicle it is bolted to, stored for the same reason [`ModelWheel`] stores it.
+    pub(crate) chassis: Entity,
+    pub(crate) muzzle: Vec3,
+    /// How much of its own size it is drawn at, which [`gun_pose`] needs and nothing else does.
+    size: f32,
+}
+
+/// Where the gun sits when it is traversed and elevated by those two angles.
+///
+/// Both turns are about [`GUN_FOOT`] — the one point measured onto the beam — so the gun stays
+/// bolted to it however it is aimed. A real pintle would elevate about a trunnion higher up
+/// instead, and cannot be had here: the post and the gun are a single mesh in the file, so turning
+/// about the trunnion would lift the foot 9 cm out of its socket at full elevation. Turning about
+/// the socket is the other kind of mount, and the only one of the two this geometry can be.
+fn gun_pose(traverse: f32, pitch: f32, size: f32) -> Transform {
+    // Traverse outside elevation: the post turns and the gun tips on it, not the other way about.
+    let rotation = Quat::from_rotation_y(traverse) * Quat::from_rotation_z(pitch);
+    Transform::from_translation(GUN_MOUNT - rotation * (GUN_FOOT * size))
+        .with_rotation(rotation)
+        .with_scale(Vec3::splat(size))
+}
 
 /// How far a vehicle's wheels have turned.
 ///
@@ -317,16 +364,12 @@ fn give_bodies(
                     // Divided by the vehicle model's scale because that is already applied above,
                     // and this is underneath it.
                     let size = GUN_WANTED_LENGTH / GUN_LENGTH / scale;
-                    let turn = Quat::from_rotation_y(GUN_YAW);
-                    // Turned about the foot of its pintle rather than about its own origin, which
-                    // is somewhere in the middle of the receiver: this is the translation that
-                    // leaves the foot exactly on the beam.
                     model.spawn((
                         Name::from("Mounted gun"),
+                        MountedGun { chassis: entity, muzzle: GUN_MUZZLE, size },
                         WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(GUN))),
-                        Transform::from_translation(GUN_MOUNT - turn * (GUN_FOOT * size))
-                            .with_rotation(turn)
-                            .with_scale(Vec3::splat(size)),
+                        // Where it rests until somebody sits down — see `aim_the_gun`.
+                        gun_pose(GUN_YAW, 0.0, size),
                     ));
                 });
             });
@@ -760,6 +803,77 @@ fn swing_the_models_wheels(
     }
 }
 
+/// The traverse and elevation that lay the gun's barrel along a world direction.
+///
+/// Said in the vehicle model's own frame, which is why the chassis rotation has to come in: the
+/// whole chain from the chassis down is already in the transform, and subtracting it once here is
+/// what leaves angles that mean the same thing whether the car is turning, leaning on its springs
+/// or standing on a slope.
+///
+/// The barrel is the gun's own +X. A rotation about Y takes +X towards −Z, which is where the sign
+/// on `at.z` comes from, and a rotation about Z raises it, which is why the elevation is a plain
+/// arcsine of the height.
+fn barrel_angles(chassis: Quat, direction: Vec3) -> (f32, f32) {
+    let at = (chassis * Quat::from_rotation_y(MODEL_YAW)).inverse() * direction;
+    (
+        f32::atan2(-at.z, at.x),
+        at.y.clamp(-1.0, 1.0).asin().clamp(-GUN_SWING, GUN_SWING),
+    )
+}
+
+/// Update: points the mounted gun where whoever is driving is looking.
+///
+/// Two turns about two points — see [`Pintle`]. Both are worked out in the vehicle *model's* own
+/// frame rather than in the world's, which is what makes the gun follow a car that is turning,
+/// leaning on its springs or standing on a slope: the whole chain from the chassis down is already
+/// in the transform, so subtracting it once here leaves angles that mean the same thing at any
+/// attitude.
+///
+/// The elevation is clamped and the traverse is not. A pintle behind the seats can be swung all the
+/// way round — that is what it is for — but it cannot be tipped past [`GUN_SWING`] without putting
+/// its own stock through the roll cage.
+///
+/// It does not fire. What comes out of the barrel is the driver's own shot, cast from the seat as
+/// it always was; this only makes the picture agree with it.
+fn aim_the_gun(
+    vehicles: Query<(&Rotation, Option<&Driven>)>,
+    aims: Query<(&Player, &Aim)>,
+    own: Option<Single<(&Player, &LocalPlayer)>>,
+    mut guns: Query<(&MountedGun, &mut Transform)>,
+) {
+    // For ourselves, the angles the camera is using this frame rather than the replicated `Aim`,
+    // which is written once per tick and so steps at the tick rate. The crosshair moves at frame
+    // rate; a gun that visibly lagged behind it would be the difference between aiming and asking
+    // a turret to catch up.
+    let mine = own.map(|own| {
+        let (who, view) = *own;
+        (who.peer, view.yaw, view.pitch)
+    });
+    for (gun, mut pose) in guns.iter_mut() {
+        let Ok((rotation, driven)) = vehicles.get(gun.chassis) else {
+            continue;
+        };
+        let looking = driven.and_then(|driven| {
+            mine.filter(|(peer, ..)| *peer == driven.0)
+                .map(|(_, yaw, pitch)| (yaw, pitch))
+                .or_else(|| {
+                    aims.iter()
+                        .find(|(who, _)| who.peer == driven.0)
+                        .map(|(_, aim)| (aim.yaw, aim.pitch))
+                })
+        });
+        let (traverse, pitch) = match looking {
+            // The same ray the shot is cast down.
+            Some((yaw, pitch)) => {
+                barrel_angles(rotation.0, shooting::aim_ray(Vec3::ZERO, yaw, pitch).1)
+            }
+            // An empty seat: back to pointing over the bonnet, which is where it started.
+            None => (GUN_YAW, 0.0),
+        };
+        *pose = gun_pose(traverse, pitch, gun.size);
+    }
+}
+
 /// PostUpdate: puts a driver in the seat of a vehicle nobody predicts.
 ///
 /// Scheduled by `local_player`, chained immediately before the camera reads the seat. It is
@@ -843,5 +957,125 @@ mod tests {
                 "strut {index} at {mount:?} was sorted onto another corner",
             );
         }
+    }
+
+    /// The rearmost point of the gun, in its own units: the bottom of the stock.
+    ///
+    /// A fixture for the same reason the tyre positions above are one, and it is what
+    /// [`GUN_SWING`] was worked out from — the elevation at which this meets the beam.
+    const GUN_TAIL: Vec3 = Vec3::new(-21.68, -0.375, 0.0);
+
+    /// The foot of the post has to stay on the beam whatever the driver is looking at. It is the
+    /// one thing about the mounting that was measured against the model, and turning about the
+    /// wrong point is exactly how it would be given away — invisibly at rest, and by a gun leaning
+    /// off its beam the moment somebody looks up.
+    #[test]
+    fn the_gun_stays_bolted_to_the_beam_however_it_is_aimed() {
+        for step in -4..=4 {
+            let pitch = GUN_SWING * step as f32 / 4.0;
+            for traverse in [0.0, 1.0, GUN_YAW, -2.2] {
+                let foot = gun_pose(traverse, pitch, 0.02).transform_point(GUN_FOOT);
+                assert!(
+                    foot.distance(GUN_MOUNT) < 1e-5,
+                    "aimed {traverse}/{pitch} the foot left the beam for {foot:?}"
+                );
+            }
+        }
+    }
+
+    /// And it may not swing its own stock through what it is bolted to. This is where [`GUN_SWING`]
+    /// comes from, so the test is that the limit is the real one: at it the tail is clear, and past
+    /// it the tail is through the beam.
+    #[test]
+    fn the_gun_cannot_swing_its_stock_through_the_cage() {
+        // In the gun's own units, about its own foot: the beam is the plane the foot sits in.
+        // In the gun's own units and about its own foot, which is the point on the beam: the
+        // beam is then the plane the tail has to stay above.
+        let above = |pitch: f32| (Quat::from_rotation_z(pitch) * (GUN_TAIL - GUN_FOOT)).y;
+        assert!(above(GUN_SWING) > 0.0, "the stock is already through the beam at the limit");
+        assert!(above(GUN_SWING + 0.05) < 0.0, "the limit is further out than the geometry needs");
+        assert!(above(-GUN_SWING) > 0.0, "depressing the barrel put the stock through the beam");
+    }
+
+    /// The barrel has to end up along the direction the driver is looking, whatever the car is
+    /// doing underneath it. Two frames stand between the two — the chassis and the model's own
+    /// quarter turn — and getting either the wrong way round leaves a gun that tracks the aim
+    /// perfectly while pointing somewhere else.
+    #[test]
+    fn the_gun_points_where_its_driver_is_looking() {
+        let barrel = |chassis: Quat, traverse: f32, pitch: f32| {
+            chassis
+                * Quat::from_rotation_y(MODEL_YAW)
+                * Quat::from_rotation_y(traverse)
+                * Quat::from_rotation_z(pitch)
+                * Vec3::X
+        };
+        let attitudes = [
+            Quat::IDENTITY,
+            Quat::from_rotation_y(1.3),
+            Quat::from_rotation_y(-2.7),
+            // On a slope, and leaning on its springs.
+            Quat::from_euler(EulerRot::YXZ, 0.6, 0.2, -0.15),
+        ];
+        for chassis in attitudes {
+            for yaw in [0.0, 1.0, 2.5, -2.0, core::f32::consts::PI] {
+                // Inside the elevation the mount actually has; past it the gun cannot follow, and
+                // is not meant to.
+                for pitch in [0.0, 0.3, -0.3, GUN_SWING] {
+                    let (_, wanted) = shooting::aim_ray(Vec3::ZERO, yaw, pitch);
+                    let (traverse, elevated) = barrel_angles(chassis, wanted);
+                    // Only where the mount can actually reach. A car standing on a slope tilts the
+                    // whole frame these angles are said in, so an aim well inside the elevation in
+                    // the world can be outside it on the vehicle — and then the barrel is meant to
+                    // stop short, which the test below is about.
+                    if elevated.abs() >= GUN_SWING - 1e-3 {
+                        continue;
+                    }
+                    let along = barrel(chassis, traverse, elevated);
+                    assert!(
+                        along.distance(wanted) < 1e-4,
+                        "aimed {yaw}/{pitch} at {wanted:?}, barrel lies along {along:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// With nobody in the seat the gun rests pointing over the bonnet, and that has to be the same
+    /// pose aiming straight ahead produces — or the gun would visibly jump the moment the driver
+    /// sat down.
+    #[test]
+    fn an_empty_seat_leaves_the_gun_where_aiming_ahead_would_put_it() {
+        let (_, ahead) = shooting::aim_ray(Vec3::ZERO, 0.0, 0.0);
+        let (traverse, pitch) = barrel_angles(Quat::IDENTITY, ahead);
+        assert!((traverse - GUN_YAW).abs() < 1e-5, "resting at {GUN_YAW}, aimed ahead {traverse}");
+        assert!(pitch.abs() < 1e-5, "aiming level is not level: {pitch}");
+    }
+
+    /// Past the elevation the mount has, the gun stops rather than following. It still turns to
+    /// face the right way — a driver looking almost straight up is still looking *somewhere*, and
+    /// the traverse is what says where.
+    #[test]
+    fn aiming_past_the_elevation_stops_the_barrel_and_not_the_traverse() {
+        let (_, steep) = shooting::aim_ray(Vec3::ZERO, 1.2, 1.4);
+        let (traverse, elevated) = barrel_angles(Quat::IDENTITY, steep);
+        assert!((elevated - GUN_SWING).abs() < 1e-5, "elevated to {elevated}, limit is {GUN_SWING}");
+        let (level_traverse, _) = barrel_angles(Quat::IDENTITY, shooting::aim_ray(Vec3::ZERO, 1.2, 0.0).1);
+        assert!(
+            (traverse - level_traverse).abs() < 1e-4,
+            "the clamp moved the traverse from {level_traverse} to {traverse}"
+        );
+    }
+
+    /// Looking up has to raise the muzzle. The sign of an elevation is invisible in a screenshot of
+    /// a level gun and unmistakable in play.
+    #[test]
+    fn looking_up_raises_the_muzzle() {
+        // At the resting traverse, so "forward" is the model's own nose at −X.
+        let level = gun_pose(GUN_YAW, 0.0, 0.02).transform_point(GUN_MUZZLE);
+        let raised = gun_pose(GUN_YAW, GUN_SWING, 0.02).transform_point(GUN_MUZZLE);
+        assert!(raised.y > level.y + 0.1, "the muzzle went from {level:?} to {raised:?}");
+        // And the muzzle is out over the bonnet, which is what makes it a muzzle.
+        assert!(level.x < GUN_MOUNT.x, "the barrel ends behind its own post: {level:?}");
     }
 }

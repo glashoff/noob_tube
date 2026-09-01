@@ -17,6 +17,7 @@
 
 use bevy::light::NotShadowCaster;
 use avian3d::prelude::{Collider, Position, Rotation};
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::{MessageReceiver, Predicted, Rollback, client};
@@ -28,6 +29,7 @@ use noob_tube_shared::simulation;
 use noob_tube_shared::vehicle::Driven;
 
 use crate::crosshair;
+use crate::vehicle::MountedGun;
 
 /// How long a tracer stays up. Long enough to see, short enough that a burst reads as several
 /// shots rather than one bar of light.
@@ -44,11 +46,19 @@ const MAX_HOLES: usize = 160;
 const HOLE_SIZE: f32 = 0.09;
 /// How far a hole floats off the surface, so it does not fight the wall for the same pixels.
 const HOLE_LIFT: f32 = 0.01;
+/// How far short of the shot's endpoint the surface under a bullet hole is looked for, and how far
+/// the answer may be out before it stops being an answer about that endpoint at all.
+///
+/// See [`spawn_hole`]: the question is what is *at* the point the server reported, not what the
+/// flight passed through on the way there.
+const HOLE_PROBE: f32 = 0.15;
+const HOLE_PROBE_SLACK: f32 = 0.07;
 
-/// Where the local player's tracer starts, relative to the camera: right, down, and forward.
+/// Where the local player's tracer starts *on foot*, relative to the camera: right, down, forward.
 ///
 /// From the eye exactly, one's own tracer is a line seen end-on — a dot, or nothing. Real weapons
-/// are held to one side of the head, and this is that offset and nothing more.
+/// are held to one side of the head, and this is that offset and nothing more. A driver needs none
+/// of it: they have a gun on the back with a barrel that ends somewhere real. See [`muzzle_of`].
 const MUZZLE_OFFSET: Vec3 = Vec3::new(0.14, -0.12, 1.6);
 
 pub struct ShotEffectsPlugin;
@@ -165,6 +175,8 @@ fn predict_own_tracer(
     // does — the two must agree about what is not a target, or the tracer stops against a bonnet
     // the server shot straight through.
     props: Query<Solid, Drawn>,
+    // Where our own tracer comes out, when we are driving something that has a gun on it.
+    muzzles: Muzzles,
     level: Level,
     assets: Option<Res<ShotAssets>>,
     mut commands: Commands,
@@ -194,18 +206,21 @@ fn predict_own_tracer(
     let Some(fired) = shooting::fire(&level, state, &action.0, targets) else {
         return;
     };
-    spawn_tracer(&mut commands, &assets, fired.origin, fired.point(), true);
+    let end = fired.point();
+    let start = muzzles
+        .of(me.peer)
+        .unwrap_or_else(|| beside_the_eye(fired.origin, end));
+    spawn_tracer(&mut commands, &assets, start, end);
 }
 
 /// Update: draws every shot the server has told us about.
 fn draw_shots(
     mut inbox: Query<&mut MessageReceiver<ShotFired>>,
-    level: Level,
-    // What a bullet hole can be hung on, so it moves when the thing it is on does.
-    surfaces: Query<&GlobalTransform, With<Visibility>>,
+    muzzles: Muzzles,
+    // What a bullet hole is put on, and hung from so that it moves when that thing does.
+    mut decals: Decals,
     mine: Option<Single<&Player, With<Predicted>>>,
     assets: Res<ShotAssets>,
-    mut holes: ResMut<Holes>,
     mut commands: Commands,
 ) {
     let own_peer = mine.map(|player| player.peer);
@@ -215,7 +230,10 @@ fn draw_shots(
             // Our own tracer was drawn the moment we fired — see `predict_own_tracer`. Drawing it
             // again now would put a second line half a round trip behind the first.
             if !own {
-                spawn_tracer(&mut commands, &assets, shot.from, shot.to, false);
+                // From their gun if they are behind one, and from their eye if they are not —
+                // which is the point the server cast the shot from either way.
+                let start = muzzles.of(shot.shooter).unwrap_or(shot.from);
+                spawn_tracer(&mut commands, &assets, start, shot.to);
             }
 
             if shot.hit_player {
@@ -226,27 +244,60 @@ fn draw_shots(
                 }
                 continue;
             }
-            spawn_hole(&mut commands, &assets, &level, &surfaces, &shot, &mut holes);
+            spawn_hole(&mut commands, &assets, &mut decals, &shot);
         }
     }
 }
 
-/// The bright line along the shot's path.
-fn spawn_tracer(commands: &mut Commands, assets: &ShotAssets, from: Vec3, to: Vec3, own: bool) {
-    let direction = (to - from).normalize_or_zero();
-    if direction == Vec3::ZERO {
-        return;
+/// The mounted guns on the map, and who is behind each of them.
+#[derive(SystemParam)]
+struct Muzzles<'w, 's> {
+    guns: Query<'w, 's, (&'static MountedGun, &'static GlobalTransform)>,
+    seats: Query<'w, 's, &'static Driven>,
+}
+
+impl Muzzles<'_, '_> {
+    /// Where `peer`'s tracer comes out, in world space.
+    ///
+    /// `None` for anyone on foot, for the driver of a vehicle with no gun on it, and on a client
+    /// that has no model to hang one from — all three of which fall back to the eye, which is where
+    /// the shot was cast from and so is never wrong, only less interesting.
+    ///
+    /// Asked of each gun rather than by looking a vehicle up from the peer, because a gun knows its
+    /// own chassis and there are at most a handful of them.
+    fn of(&self, peer: u64) -> Option<Vec3> {
+        self.guns
+            .iter()
+            .find(|(gun, _)| self.seats.get(gun.chassis).is_ok_and(|seat| seat.0 == peer))
+            .map(|(gun, placed)| placed.transform_point(gun.muzzle))
     }
-    let start = if own {
-        // Right of the eye and a little below it, so one's own tracer is a line rather than a dot.
-        let right = direction.cross(Vec3::Y).normalize_or_zero();
-        // Never more than a third of the way to the target: at point-blank range a muzzle a fixed
-        // 1.6 m out puts most of the tracer against the camera, where perspective makes it a blob.
-        let ahead = MUZZLE_OFFSET.z.min(from.distance(to) * 0.35);
-        from + right * MUZZLE_OFFSET.x + Vec3::Y * MUZZLE_OFFSET.y + direction * ahead
-    } else {
-        from
-    };
+}
+
+/// What a bullet hole is put on: the world it has to be found in, the things it can be hung from,
+/// and the tally that keeps a firefight from becoming an unbounded pile of quads.
+#[derive(SystemParam)]
+struct Decals<'w, 's> {
+    level: Level<'w, 's>,
+    // Everything a decal can be hung on. A crate and a vehicle are in here; the level's collision
+    // geometry is not, because it carries no `Visibility` for a child to inherit — and it has no
+    // need to, being the one thing that never moves.
+    surfaces: Query<'w, 's, &'static GlobalTransform, With<Visibility>>,
+    holes: ResMut<'w, Holes>,
+}
+
+/// Where one's own tracer starts when there is no gun to start it from: beside the eye.
+fn beside_the_eye(from: Vec3, to: Vec3) -> Vec3 {
+    let direction = (to - from).normalize_or_zero();
+    // Right of the eye and a little below it, so one's own tracer is a line rather than a dot.
+    let right = direction.cross(Vec3::Y).normalize_or_zero();
+    // Never more than a third of the way to the target: at point-blank range a muzzle a fixed
+    // 1.6 m out puts most of the tracer against the camera, where perspective makes it a blob.
+    let ahead = MUZZLE_OFFSET.z.min(from.distance(to) * 0.35);
+    from + right * MUZZLE_OFFSET.x + Vec3::Y * MUZZLE_OFFSET.y + direction * ahead
+}
+
+/// The bright line along the shot's path, from wherever it is drawn as coming out of.
+fn spawn_tracer(commands: &mut Commands, assets: &ShotAssets, start: Vec3, to: Vec3) {
     let length = start.distance(to);
     if length < 0.01 {
         return;
@@ -268,25 +319,30 @@ fn spawn_tracer(commands: &mut Commands, assets: &ShotAssets, from: Vec3, to: Ve
 
 /// The mark left where a shot met the level.
 ///
-/// The normal comes from casting the same ray locally. If that finds nothing — the shot ended in
-/// mid-air at the weapon's range, or the level here differs from the server's — there is no surface
-/// to put a mark on, and none is drawn.
-fn spawn_hole(
-    commands: &mut Commands,
-    assets: &ShotAssets,
-    level: &Level,
-    // Everything a decal can be hung on. A crate and a vehicle are in here; the level's collision
-    // geometry is not, because it carries no `Visibility` for a child to inherit — and it has no
-    // need to, being the one thing that never moves.
-    surfaces: &Query<&GlobalTransform, With<Visibility>>,
-    shot: &ShotFired,
-    holes: &mut Holes,
-) {
+/// The normal comes from casting a ray locally. If that finds nothing — the shot ended in mid-air
+/// at the weapon's range, or the level here differs from the server's — there is no surface to put
+/// a mark on, and none is drawn.
+///
+/// That ray is cast over the last hand's breadth before the endpoint rather than along the whole
+/// flight, and the difference matters. The server's shot ignores the vehicle its shooter is sitting
+/// in; a ray from the eye does not, and it stops against that vehicle's own bodywork — which put
+/// the hole in the right place on the ground and then hung it on the buggy, so it drove off with
+/// it. The neighbourhood of the point the server reported is the question that was actually meant,
+/// and nothing the shot passed through can answer it.
+fn spawn_hole(commands: &mut Commands, assets: &ShotAssets, decals: &mut Decals, shot: &ShotFired) {
     let direction = (shot.to - shot.from).normalize_or_zero();
-    let reach = shot.from.distance(shot.to) + 0.1;
-    let Some((_, normal, surface)) = level.surface_hit(shot.from, direction, reach) else {
+    let probe = shot.to - direction * HOLE_PROBE;
+    let Some((distance, normal, surface)) =
+        decals.level.surface_hit(probe, direction, HOLE_PROBE * 2.0)
+    else {
         return;
     };
+    // And what it found has to be the endpoint itself. It is not when the probe began inside
+    // something — a shot into the ground close beside a vehicle can start within its bodywork —
+    // and then there is no surface here to speak of and nothing honest to hang a mark on.
+    if (distance - HOLE_PROBE).abs() > HOLE_PROBE_SLACK {
+        return;
+    }
     // The normal can point either way along the surface; a decal wants the side it was shot from.
     let facing = if normal.dot(direction) > 0.0 { -normal } else { normal };
     // A hole on the floor faces straight up, which is exactly where `looking_to` cannot use Y as
@@ -314,15 +370,15 @@ fn spawn_hole(
     // Hung on what it hit, when that is something that can move. A hole pinned in world space on a
     // crate somebody then shoves is a mark hanging in the air where the crate used to be — the same
     // objection that keeps decals off players, only slower and so easier to miss.
-    if let Ok(host) = surfaces.get(surface) {
+    if let Ok(host) = decals.surfaces.get(surface) {
         hole.insert((GlobalTransform::from(pose).reparented_to(host), ChildOf(surface)));
     }
     let hole = hole.id();
-    holes.0.push_back(hole);
+    decals.holes.0.push_back(hole);
     // The oldest goes when there are too many. It may already have timed out and been despawned,
     // which `try_despawn` is fine with.
-    while holes.0.len() > MAX_HOLES {
-        if let Some(oldest) = holes.0.pop_front() {
+    while decals.holes.0.len() > MAX_HOLES {
+        if let Some(oldest) = decals.holes.0.pop_front() {
             commands.entity(oldest).try_despawn();
         }
     }
