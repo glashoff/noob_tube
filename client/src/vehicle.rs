@@ -838,17 +838,23 @@ fn barrel_angles(chassis: Quat, direction: Vec3) -> (f32, f32) {
 fn aim_the_gun(
     vehicles: Query<(&Rotation, Option<&Driven>)>,
     aims: Query<(&Player, &Aim)>,
-    own: Option<Single<(&Player, &LocalPlayer)>>,
+    // Two of them, because the look angles and the player are two entities: `LocalPlayer` is on the
+    // camera. Asking for both on one — which is what this was — quietly matches nothing at all.
+    own: Option<Single<&Player, With<Predicted>>>,
+    view: Option<Single<&LocalPlayer>>,
     mut guns: Query<(&MountedGun, &mut Transform)>,
 ) {
-    // For ourselves, the angles the camera is using this frame rather than the replicated `Aim`,
-    // which is written once per tick and so steps at the tick rate. The crosshair moves at frame
-    // rate; a gun that visibly lagged behind it would be the difference between aiming and asking
-    // a turret to catch up.
-    let mine = own.map(|own| {
-        let (who, view) = *own;
-        (who.peer, view.yaw, view.pitch)
-    });
+    // For ourselves, the angles the camera is using *this frame* rather than the predicted `Aim`,
+    // which is written once per tick and so steps at the tick rate. The gun fills a good part of
+    // the screen and the crosshair beside it moves at frame rate; the two visibly disagreeing while
+    // panning is the difference between aiming and asking a turret to catch up.
+    //
+    // Two separate `Single`s because these are two entities: `LocalPlayer` is on the camera and
+    // `Player` is on the body. Asked for as one — which is how this was written — the query matches
+    // nothing at all, and silently: every gun falls through to the branch below.
+    let mine = own
+        .zip(view)
+        .map(|(who, view)| (who.peer, view.yaw, view.pitch));
     for (gun, mut pose) in guns.iter_mut() {
         let Ok((rotation, driven)) = vehicles.get(gun.chassis) else {
             continue;

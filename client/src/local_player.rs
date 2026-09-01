@@ -103,7 +103,11 @@ impl Plugin for LocalPlayerPlugin {
             // this schedule when it rolls back, so this is the replay too.
             .add_systems(
                 FixedUpdate,
-                (simulation::step_players::<With<Predicted>>, count_ticks),
+                (
+                    simulation::step_players::<With<Predicted>>,
+                    simulation::look_around::<With<Predicted>>,
+                    count_ticks,
+                ),
             )
             // After frame interpolation, not merely before transform propagation. Frame
             // interpolation writes the blended `PlayerState` in PostUpdate, and the camera reads

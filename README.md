@@ -1563,6 +1563,18 @@ round — that is what it is for — but 23.3° is where the bottom of the stock
 plane of the beam, so the limit is 0.40 rad rather than a taste. A driver aiming steeper than that
 still gets the traverse; the barrel simply stops following, which is what a real mount does.
 
+The first version of all this looked like it worked and did not, in the way that is hardest to see.
+The gun held one direction in the *world* and corrected for the chassis turning underneath it —
+smoothly, exactly, and to an aim that never changed. `step_players` skips a seated player, because
+a driver's pose comes from the vehicle and two things must not write it; the line that copies the
+look angles into the replicated `Aim` was inside that step. **So a player's aim froze the moment
+they got in.** The gun followed it faithfully, and so did their head on every other screen.
+
+Measuring it the obvious way confirmed the bug instead of finding it. The gun agreed with `Aim` to
+0.04° with the chassis yawed 8.8° underneath — which says the two are consistent, not that either is
+right. Turning your head is now its own system, `look_around`, filtered by nothing: getting into a
+vehicle takes away your legs, not your head.
+
 It still does not fire on its own, and it has no gunner. Making it a second seat that aims
 independently is the thing that would dissolve the camera trade described below, and it is its own
 piece of work.

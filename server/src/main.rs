@@ -81,6 +81,7 @@ fn main() {
                 resolve_shots,
                 (
                     simulation::step_players::<()>,
+                    simulation::look_around::<()>,
                     move_props,
                     vehicle::drive_vehicles::<()>,
                     vehicle::right_flipped_vehicles::<()>,
