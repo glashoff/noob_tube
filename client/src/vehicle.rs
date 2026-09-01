@@ -69,7 +69,10 @@ type Arrived = (With<client::Remote>, Added<VehicleKind>);
 /// A vehicle this client has just been asked to predict, whether or not it will be steering it.
 type NowPredicted = (With<VehicleKind>, Added<Predicted>);
 /// This client's own player, while they are behind a wheel.
-type OwnDriver = (With<Predicted>, With<Driving>);
+///
+/// `pub(crate)` because the camera asks the same question: which vehicle to point at is the same
+/// lookup as which vehicle to steer, and two spellings of it would be two things to keep in step.
+pub(crate) type OwnDriver = (With<Predicted>, With<Driving>);
 /// Any vehicle with somebody in it, this client's own included.
 ///
 /// Narrowing this to *the driver's own* is done by comparing [`Driven`] against the `Player` on

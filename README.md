@@ -1112,7 +1112,8 @@ this completely, because nothing but a system of ours ever moved one.
 entity with a pose and a hitbox, back on their feet the moment they get out — and the walking step
 skips them, which is the whole of "you cannot walk while driving". They are not standing on the
 vehicle and there is no cab to sit in; the camera moves seven metres behind it, because a
-first-person view from inside a windowless box is a black screen.
+first-person view from inside a windowless box is a black screen. Where it goes from there is
+[the view from the driver's seat](#the-view-from-the-drivers-seat), below.
 
 Getting in is **not predicted**, and that is a decision rather than an omission. Whether a seat is
 free is the server's to settle — two people reaching for the same door on the same tick have to be
@@ -1152,6 +1153,53 @@ vehicle ended up, and it ran in `FixedPostUpdate` alongside Avian with no orderi
 on some runs the driver was placed at the vehicle's pose from *before* the step. A tick of a
 vehicle's speed is 20 cm, and it arrived as a correction on every update — the same ambiguity that
 had already been fixed for `record_positions`, in the same schedule, for the same reason.
+
+#### The view from the driver's seat
+
+The camera behind a vehicle answers to two things now.
+
+**The wheel winds it in and out**, between three metres and twenty, seven tenths of a metre a notch.
+Only while driving: on foot the view is from the eyes, and there is nothing to wind. It reads
+`AccumulatedMouseScroll` rather than the raw events, which is also where the one wrinkle is — a
+wheel and a touchpad arrive as the same event in different units, and treating a touchpad's pixels
+as notches would wind the camera to its far end in a single flick.
+
+What the zoom cost was a constant. The camera used to ride a fixed 1.2 m above the driver's eye,
+which is a tenth of the picture at twenty metres and a quarter of it at three; wound all the way in,
+the vehicle slid off the bottom of the screen. It is a **ratio** now — 0.17 of however far back the
+camera is — so winding the wheel changes how far away the vehicle is and nothing else. At the
+default seven metres that is 1.19 m against the old 1.2, so the view nobody asked to change did not.
+
+**V locks the view to the vehicle**, so it turns with the car instead of with the mouse. That is one
+switch over who owns the yaw, and the honest way to build it is to let the winner write it rather
+than to have two angles and pick one: locked, `look` stops applying the mouse's horizontal movement
+and the camera's own placement writes the vehicle's heading into the same field. Pitch stays with
+the mouse either way, so you can still look down at the car or up at the horizon.
+
+Yaw only, and not because it is easier. A camera given the vehicle's whole attitude would put the
+horizon on its side every time the buggy leaned into a corner and would stare at the sky for the
+length of a jump. Mid-barrel-roll there is no heading to take at all — the nose points straight up —
+and there the camera keeps the one it had, which is the only answer that does not spin.
+
+Because the lock writes the same field the mouse does, letting go of it is free: unlocking leaves
+the view exactly where the vehicle last pointed it, and there is nothing to reconcile. Measured
+live, driving a full circle:
+
+| | camera against the vehicle's nose |
+|---|---|
+| unlocked, through a 141 degree turn | drifts to 102.6 degrees off — the mouse owns it |
+| locked, through a full 360 | tracks within 1.7 degrees |
+| locked, standing still | **0.000 degrees** |
+
+The 1.7 is the measurement, not the camera: the heading and the camera angle are two BRP round trips
+apart, about 40 ms, and at 40 degrees a second that is 1.7 degrees of car. Standing still the gap
+closes to nothing, which is what says so. A 400 px mouse sweep moves the view 50.42 degrees
+unlocked — exactly the sensitivity — and 0.00 locked.
+
+Switching *into* the locked view snaps, and deliberately: the player pressed a key and asked for a
+different camera. A spring would be the next refinement, and it is the same piece of work as
+teaching the chase camera to get out of the way of walls — which it still cannot do, and which the
+wheel has made easier to arrange.
 
 #### Getting back on its wheels
 

@@ -9,8 +9,8 @@
 //! they are input, not state, and a rollback must never touch them — being thrown back a fifth of a
 //! second of mouse movement is far worse than the position error it would be fixing.
 
-use bevy::input::mouse::AccumulatedMouseMotion;
-use avian3d::prelude::Position;
+use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
+use avian3d::prelude::{Position, Rotation};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use lightyear::frame_interpolation::prelude::FrameInterpolationSystems;
@@ -19,8 +19,8 @@ use lightyear::prelude::{
     ConfirmedHistory, FrameInterpolate, Interpolated, InterpolationSystems, InterpolationTimeline,
     NetworkTimeline, Predicted, Tick, interpolation_fraction,
 };
-use noob_tube_shared::player::{PlayerInput, PlayerState, ViewBracket};
-use noob_tube_shared::vehicle::Driving;
+use noob_tube_shared::player::{Player, PlayerInput, PlayerState, ViewBracket};
+use noob_tube_shared::vehicle::{Driven, Driving};
 use noob_tube_shared::simulation;
 use noob_tube_shared::types::Authored;
 
@@ -29,6 +29,24 @@ const MOUSE_SENSITIVITY: f32 = 0.0022;
 
 /// Just short of straight up and down, so the view never flips over.
 const PITCH_LIMIT: f32 = core::f32::consts::FRAC_PI_2 - 0.001;
+
+/// Metres of chase distance per notch of the wheel, and the two ends it may be wound to.
+///
+/// The near end keeps the camera behind the bodywork: the chassis reaches 1.9 m back from its
+/// centre, so anything shorter than that plus a margin puts the lens inside the vehicle, looking at
+/// the back of its own boot. The far end is where a buggy stops being the subject of the picture.
+const CHASE_STEP: f32 = 0.7;
+const CHASE_NEAREST: f32 = 3.0;
+const CHASE_FURTHEST: f32 = 20.0;
+
+/// How many pixels of a touchpad's scroll count as one notch of a wheel.
+///
+/// The two arrive as the same event with different units, and treating a touchpad's pixels as
+/// notches would wind the camera to its far end in a single flick.
+const PIXELS_PER_NOTCH: f32 = 20.0;
+
+/// Switches the driving view between following the mouse and following the vehicle.
+const VIEW_KEY: KeyCode = KeyCode::KeyV;
 
 pub struct LocalPlayerPlugin;
 
@@ -52,7 +70,14 @@ impl Plugin for LocalPlayerPlugin {
             .add_systems(Update, smooth_own_frames)
             .add_systems(
                 Update,
-                (note_pointer_over_ui, note_drawn_view, grab_cursor, look, sample_input)
+                (
+                    note_pointer_over_ui,
+                    note_drawn_view,
+                    grab_cursor,
+                    switch_the_view,
+                    look,
+                    sample_input,
+                )
                     .chain()
                     // Before interpolation runs again, on purpose. A player reacts to what is on
                     // the screen, and what is on the screen is the blend interpolation produced
@@ -107,11 +132,27 @@ impl Plugin for LocalPlayerPlugin {
 ///
 /// `Reflect` plus the `#[reflect(Component)]` attribute are what make this readable through the
 /// remote inspector; without them the component exists but cannot be named or serialised.
-#[derive(Component, Reflect, Default)]
+#[derive(Component, Reflect)]
 #[reflect(Component)]
 pub struct LocalPlayer {
     pub yaw: f32,
     pub pitch: f32,
+    /// How far behind the vehicle the camera sits, in metres. Only read while driving, and only
+    /// changed there — see [`look`], which is also why scrolling on foot leaves it alone rather
+    /// than quietly rearranging a view nobody is looking through.
+    pub chase: f32,
+    /// Whether the driving view turns with the vehicle rather than with the mouse.
+    ///
+    /// Kept here beside the angles it competes with, because that is what it is: a switch over
+    /// which of two things owns [`yaw`](Self::yaw) while driving. Remembered across getting in and
+    /// out, so a driver who prefers one view does not have to ask for it every time.
+    pub locked: bool,
+}
+
+impl Default for LocalPlayer {
+    fn default() -> Self {
+        Self { yaw: 0.0, pitch: 0.0, chase: CHASE_DISTANCE, locked: false }
+    }
 }
 
 /// Input gathered this frame, consumed by the fixed-timestep movement step and by the system that
@@ -258,14 +299,44 @@ fn grab_cursor(
 /// precision — several hours of continuous spinning.
 fn look(
     motion: Res<AccumulatedMouseMotion>,
+    scroll: Res<AccumulatedMouseScroll>,
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
+    driving: Option<Single<&Driving, With<Predicted>>>,
     mut player: Single<&mut LocalPlayer>,
 ) {
     if cursor.grab_mode == CursorGrabMode::None {
         return;
     }
-    player.yaw -= motion.delta.x * MOUSE_SENSITIVITY;
+    let driving = driving.is_some();
+    // Yaw belongs to the mouse, except while the driving view is locked to the vehicle — there the
+    // vehicle owns it and [`place_camera`] writes it. Refusing the movement here rather than
+    // overwriting it later is what keeps the angle this frame *reports* as its aim the same one it
+    // is drawing; the two are read a schedule apart.
+    if !(driving && player.locked) {
+        player.yaw -= motion.delta.x * MOUSE_SENSITIVITY;
+    }
     player.pitch = (player.pitch - motion.delta.y * MOUSE_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    if driving {
+        // Wheel up pulls the camera in, which is the direction every map and every other game
+        // scrolls. Only while driving: on foot the view is from the eyes and there is nothing to
+        // wind in or out.
+        let notches = match scroll.unit {
+            MouseScrollUnit::Line => scroll.delta.y,
+            MouseScrollUnit::Pixel => scroll.delta.y / PIXELS_PER_NOTCH,
+        };
+        player.chase = (player.chase - notches * CHASE_STEP).clamp(CHASE_NEAREST, CHASE_FURTHEST);
+    }
+}
+
+/// Update: switches the driving view between following the mouse and following the vehicle.
+///
+/// Deliberately not gated on the cursor being grabbed, unlike [`look`]. The grab is there because
+/// relative mouse movement stops arriving without it; a key press arrives either way, and a view
+/// that could not be switched back after pressing Escape would be a trap.
+fn switch_the_view(keys: Res<ButtonInput<KeyCode>>, mut player: Single<&mut LocalPlayer>) {
+    if keys.just_pressed(VIEW_KEY) {
+        player.locked = !player.locked;
+    }
 }
 
 /// Update: collects this frame's intent into [`CurrentInput`].
@@ -459,12 +530,21 @@ fn count_ticks(mut ticks: ResMut<MovementTicks>) {
 /// Where this client's own player is, and whether they are behind a wheel rather than on foot.
 type OwnPose = (&'static PlayerState, Has<Driving>);
 
-/// How far behind the vehicle the camera sits while driving, and how far above it.
+/// Where the camera starts out behind the vehicle, and how high it rides.
 ///
-/// A vehicle is driven from outside it here. There is no cab to sit in — the chassis is one box —
-/// and a first-person view from inside a box is a black screen.
+/// A vehicle is driven from outside it here. The chassis the simulation uses is one box, and a
+/// first-person view from inside a box is a black screen — the model has a cab, but nothing may
+/// depend on the model being there. The distance is only a starting point now: the wheel winds it
+/// between [`CHASE_NEAREST`] and [`CHASE_FURTHEST`].
+///
+/// The rise is a *ratio* of that distance rather than a height, so that winding the wheel changes
+/// how far away the vehicle is and nothing else. A fixed height does not survive the near end: 1.2
+/// m above the eye is a tenth of the picture at twenty metres and a quarter of it at three, which
+/// tips the camera far enough over that the vehicle slides off the bottom of the screen. As a
+/// ratio, 0.17 keeps it about ten degrees above the driver's eye line at every setting — high
+/// enough to see over the bodywork, low enough not to be looking down on the roof.
 const CHASE_DISTANCE: f32 = 7.0;
-const CHASE_LIFT: f32 = 1.2;
+const CHASE_RISE: f32 = 0.17;
 
 /// How far the drawn view may fall behind the simulation, in metres.
 ///
@@ -563,9 +643,18 @@ fn smooth_the_view(
 /// makes the horizon tilt as you look up while turning.
 fn place_camera(
     predicted: Option<Single<OwnPose, With<Predicted>>>,
-    mut camera: Single<(&LocalPlayer, &mut Transform)>,
+    driver: Option<Single<&Player, crate::vehicle::OwnDriver>>,
+    vehicles: Query<(&Rotation, &Driven)>,
+    mut camera: Single<(&mut LocalPlayer, &mut Transform)>,
 ) {
     let (player, transform) = &mut *camera;
+    // With the view locked, the vehicle owns the yaw. Written here rather than anywhere earlier
+    // because this is where the vehicle's drawn pose is finally settled — an interpolated one is
+    // blended in this same schedule, and reading it a system too early would hang the camera off
+    // last frame's heading.
+    if player.locked && let Some(heading) = driver.and_then(|me| heading_of(&vehicles, me.peer)) {
+        player.yaw = heading;
+    }
     let look = Quat::from_euler(EulerRot::YXZ, player.yaw, player.pitch, 0.0);
     transform.rotation = look;
     let Some(predicted) = predicted else {
@@ -574,14 +663,31 @@ fn place_camera(
     let (state, driving) = *predicted;
     transform.translation = if driving {
         // Behind and above, along the direction being looked in rather than the way the vehicle
-        // points — so the driver can look around while going straight, which is most of why anyone
-        // wants a third-person view in the first place.
+        // points. Unlocked that is the mouse, so a driver can look around while going straight,
+        // which is most of why anyone wants a third-person view in the first place; locked it is
+        // the vehicle, and the two go through the same line because by then they are the same
+        // number.
         //
         // It does not yet get out of the way of walls: driving backwards into one puts the camera
-        // inside it. A chase camera earns its keep by casting a ray and pulling in, and that is
-        // its own piece of work.
-        state.eye_position() + Vec3::Y * CHASE_LIFT - (look * Vec3::NEG_Z) * CHASE_DISTANCE
+        // inside it, and the wheel now makes that easier to arrange. A chase camera earns its keep
+        // by casting a ray and pulling in, and that is its own piece of work.
+        state.eye_position() + (Vec3::Y * CHASE_RISE - look * Vec3::NEG_Z) * player.chase
     } else {
         state.eye_position()
     };
+}
+
+/// Which way a peer's vehicle points, as a yaw.
+///
+/// Yaw alone, and not because it is easier. A camera given the vehicle's whole attitude would put
+/// the horizon on its side every time the buggy leaned into a corner, and would stare at the sky
+/// for the length of a jump. What a driver wants is to be behind the car and level with the world.
+///
+/// `None` when the nose points straight up or down — mid-barrel-roll — where there is no heading to
+/// take. The camera keeps the one it had, which is the only answer that does not spin.
+fn heading_of(vehicles: &Query<(&Rotation, &Driven)>, peer: u64) -> Option<f32> {
+    let (rotation, _) = vehicles.iter().find(|(_, driven)| driven.0 == peer)?;
+    let nose = rotation.0 * Vec3::NEG_Z;
+    let flat = Vec2::new(nose.x, nose.z);
+    (flat.length_squared() > 1e-6).then(|| f32::atan2(-flat.x, -flat.y))
 }
