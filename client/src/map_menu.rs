@@ -612,6 +612,18 @@ fn rebuild(
     }
 }
 
+/// The three text nodes a page is written into, kept apart so Bevy can hand out three mutable
+/// borrows of `Text` at once. Aliases because the disjointness filters are the whole of the type
+/// and spelling them inline says nothing a reader wants to read.
+type TheTitle<'w, 's> = Single<'w, 's, &'static mut Text, (With<DialogTitle>, Without<DialogFoot>)>;
+type TheFooter<'w, 's> = Single<'w, 's, &'static mut Text, (With<DialogFoot>, Without<DialogTitle>)>;
+type RowTexts<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Text, &'static mut TextColor),
+    (Without<DialogTitle>, Without<DialogFoot>),
+>;
+
 /// Update: writes the selection, the values and the server's answer onto the rows.
 ///
 /// Every frame the menu is up, rather than on change: the rows it paints may have been spawned by
@@ -619,11 +631,11 @@ fn rebuild(
 fn paint(
     menu: Res<MapMenu>,
     dialog: Option<Single<&mut Visibility, With<Dialog>>>,
-    title: Option<Single<&mut Text, (With<DialogTitle>, Without<DialogFoot>)>>,
-    foot: Option<Single<&mut Text, (With<DialogFoot>, Without<DialogTitle>)>>,
+    title: Option<TheTitle>,
+    foot: Option<TheFooter>,
     mut list: Query<&mut ScrollPosition, With<RowList>>,
     mut rows: Query<(&MenuRow, &Children, &mut BackgroundColor)>,
-    mut texts: Query<(&mut Text, &mut TextColor), (Without<DialogTitle>, Without<DialogFoot>)>,
+    mut texts: RowTexts,
 ) {
     if let Some(dialog) = dialog {
         *dialog.into_inner() =
