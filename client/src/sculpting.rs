@@ -50,7 +50,8 @@ impl Plugin for SculptingPlugin {
                     // and `hold_the_trigger` then takes it away again before the world sees it.
                     .after(crate::local_player::sample_input),
             )
-            .add_systems(Update, draw_the_brush.after(aim_the_brush));
+            .add_systems(Update, draw_the_brush.after(aim_the_brush))
+            .add_systems(Update, name_the_slots.after(turn_it_on));
     }
 }
 
@@ -90,8 +91,14 @@ pub struct Chisel {
     pub on: bool,
     pub tool: Tool,
     pub radius: f32,
-    /// Metres per stroke for lift, and the share of the way for the others.
-    pub strength: f32,
+    /// Metres a stroke raises, or lowers with the right button held.
+    ///
+    /// Its own number rather than one strength shared with smoothing, because they are set for
+    /// different reasons and in different units — half a metre a stroke is a considered choice
+    /// about how fast a hill grows, and it should survive a trip through the smoothing brush.
+    pub lift: f32,
+    /// How much of the way a smoothing stroke goes, from 0 to 1.
+    pub smooth: f32,
     /// The height flatten levels to, picked off the ground with the right button.
     pub height: f32,
     /// Where the brush is, and whether it is on anything at all.
@@ -110,7 +117,8 @@ impl Default for Chisel {
             on: false,
             tool: Tool::default(),
             radius: 8.0,
-            strength: 1.0,
+            lift: 0.5,
+            smooth: 0.5,
             height: 0.0,
             at: None,
             anchor: None,
@@ -156,8 +164,16 @@ fn turn_it_on(
         let held = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
         let factor = if notches > 0.0 { RADIUS_STEP } else { 1.0 / RADIUS_STEP };
         if held {
+            // Whichever number the tool in hand actually uses, so shift and the wheel mean "more
+            // of this" rather than "more of a number the brush may or may not be reading".
             let factor = if notches > 0.0 { STRENGTH_STEP } else { 1.0 / STRENGTH_STEP };
-            chisel.strength = (chisel.strength * factor).clamp(0.05, MAX_LIFT);
+            match chisel.tool {
+                Tool::Lift => chisel.lift = (chisel.lift * factor).clamp(0.01, MAX_LIFT),
+                Tool::Smooth => chisel.smooth = (chisel.smooth * factor).clamp(0.02, 1.0),
+                // Flatten levels to a height picked off the ground, and a ramp runs between two
+                // ends that were clicked. Neither has a strength to turn up.
+                Tool::Flatten | Tool::Ramp => {}
+            }
         } else {
             chisel.radius = (chisel.radius * factor).clamp(MIN_RADIUS, MAX_RADIUS);
         }
@@ -267,9 +283,9 @@ fn work_the_brush(
         Tool::Flatten => Brush::Flatten { height: chisel.height },
         Tool::Lift => {
             let sign = if lowering { -1.0 } else { 1.0 };
-            Brush::Lift { metres: (chisel.strength * sign).clamp(-MAX_LIFT, MAX_LIFT) }
+            Brush::Lift { metres: (chisel.lift * sign).clamp(-MAX_LIFT, MAX_LIFT) }
         }
-        Tool::Smooth => Brush::Smooth { amount: chisel.strength.clamp(0.0, 1.0) },
+        Tool::Smooth => Brush::Smooth { amount: chisel.smooth.clamp(0.0, 1.0) },
         Tool::Ramp => return,
     };
     let stroke = Stroke { at: Vec2::new(at.x, at.z), radius: chisel.radius, brush };
@@ -337,11 +353,42 @@ pub fn readout(chisel: &Chisel) -> String {
     let tool = chisel.tool.name();
     let extra = match chisel.tool {
         Tool::Flatten => format!("to {:.1} m", chisel.height),
-        Tool::Lift => format!("{:.2} m a stroke", chisel.strength),
-        Tool::Smooth => format!("{:.0}%", chisel.strength.clamp(0.0, 1.0) * 100.0),
+        Tool::Lift => format!("{:.2} m a stroke", chisel.lift),
+        Tool::Smooth => format!("{:.0}%", chisel.smooth.clamp(0.0, 1.0) * 100.0),
         Tool::Ramp => {
             if chisel.anchor.is_some() { "click the far end".into() } else { "click one end".into() }
         }
     };
     format!("sculpt: {tool}, {:.1} m brush, {extra}", chisel.radius)
+}
+
+/// Update: says what the number keys are bound to, for the bar that shows them.
+///
+/// Here rather than in [`hotbar`](crate::hotbar) because this is the file that *reads* the digits:
+/// a label and the key that produces it are one fact, and two files holding it is how a bar comes
+/// to promise a key that does nothing.
+///
+/// Rebuilt every frame rather than edited, so a mode that ends takes its bindings with it.
+pub fn name_the_slots(
+    chisel: Res<Chisel>,
+    menu: Res<crate::map_menu::MapMenu>,
+    mut hotbar: ResMut<crate::hotbar::Hotbar>,
+) {
+    hotbar.slots.clear();
+    // The menu owns the keyboard while it is up, so nothing here is bound; a bar showing tools
+    // under keys that are typing a map name would be showing the wrong thing.
+    if !chisel.on || menu.open {
+        return;
+    }
+    for tool in [Tool::Flatten, Tool::Lift, Tool::Smooth, Tool::Ramp] {
+        let note = match tool {
+            Tool::Flatten => format!("to {:.1} m", chisel.height),
+            Tool::Lift => format!("{:.2} m", chisel.lift),
+            Tool::Smooth => format!("{:.0}%", chisel.smooth.clamp(0.0, 1.0) * 100.0),
+            Tool::Ramp => {
+                if chisel.anchor.is_some() { "far end".into() } else { "two clicks".into() }
+            }
+        };
+        hotbar.add(tool.name(), note, tool == chisel.tool);
+    }
 }

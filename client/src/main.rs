@@ -6,6 +6,7 @@ mod corrections;
 mod crosshair;
 mod debug_draw;
 mod harness;
+mod hotbar;
 mod hud;
 mod local_player;
 mod map_menu;
@@ -60,7 +61,7 @@ fn main() {
         ))
         // Adds nothing unless `NOOB_TUBE_BOT` is set — the plugin decides that itself, so the
         // condition lives beside the reason for it rather than here.
-        .add_plugins((bot::BotPlugin, map_menu::MapMenuPlugin, sculpting::SculptingPlugin))
+        .add_plugins((bot::BotPlugin, map_menu::MapMenuPlugin, sculpting::SculptingPlugin, hotbar::HotbarPlugin))
         .add_plugins(client::ClientPlugins {
             tick_duration: net.tick_duration(),
         })
