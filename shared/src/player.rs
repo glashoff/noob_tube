@@ -40,6 +40,16 @@ pub struct PlayerInput {
     /// two are suppressed by different rules — a driver whose gun is stowed or cannot bear is not
     /// firing, and is exactly the driver most likely to be upside down.
     pub righting: bool,
+    /// Held rather than tapped, and latched by the client rather than found here.
+    ///
+    /// Flight is a mode, and a mode found from an *edge* would need last tick's input to find it —
+    /// which a replayed tick does not have and which a dropped packet would lose. So the client
+    /// holds the toggle and says on every tick which mode it is in, and this step simply obeys.
+    /// That is the same shape [`crouch`](Self::crouch) already has, and it is what makes flight
+    /// survive a rollback: replaying the tick replays the mode.
+    pub flying: bool,
+    /// How fast, as an index into [`FLY_SPEEDS`]. See [`fly_speed`].
+    pub fly_notch: u8,
     /// Horizontal look angle in radians. Movement is relative to it.
     pub yaw: f32,
     /// Vertical look angle in radians. Does not affect movement, but travels with the input so the
@@ -181,6 +191,11 @@ impl PlayerState {
             self.fire_cooldown = self.fire_cooldown.saturating_sub(1);
         }
 
+        if input.flying {
+            self.fly(input, level, dt);
+            return;
+        }
+
         self.update_stance(input, level);
 
         let speed = if self.crouching {
@@ -254,6 +269,38 @@ impl PlayerState {
         if let Some(rest) = footing.filter(|_| self.on_ground) {
             self.position.y = rest + SKIN;
         }
+    }
+
+    /// Advances one tick of flight.
+    ///
+    /// **No forces at all**, which is the whole of it: the velocity *is* the intent, so there is no
+    /// gravity to fall under, no acceleration to ramp through and nothing left over when the keys
+    /// are let go. A flying player stops where they stop, which is what makes it possible to hold a
+    /// position over a hillside and work on it.
+    ///
+    /// Still solid. Nothing here removes the capsule from the world — the sweep is the same one
+    /// walking uses, so terrain and crates still stop a flyer. That is a deliberate choice against
+    /// noclip: flight is for looking at ground from above, and ground you can pass through is
+    /// ground you cannot judge the shape of.
+    fn fly(&mut self, input: &PlayerInput, level: &Level, dt: f32) {
+        // Never crouched in the air: the stance exists to fit under things by shrinking the
+        // capsule, and a flyer goes over them instead. The key is the descent instead.
+        self.crouching = false;
+        self.on_ground = false;
+
+        let local = input.local_direction();
+        let (sin, cos) = input.yaw.sin_cos();
+        let wish = Vec3::new(
+            local.x * cos - local.y * sin,
+            f32::from(input.jump) - f32::from(input.crouch),
+            -local.y * cos - local.x * sin,
+        );
+        // Normalised whole, not per axis, so up-and-forward is the same speed as forward — the
+        // same reason `local_direction` normalises the diagonals.
+        self.velocity = wish.normalize_or_zero() * fly_speed(input.fly_notch);
+
+        let wanted = self.velocity * dt;
+        self.position += level.sweep_capsule(self.position, wanted, self.crouching);
     }
 
     /// Crouching starts the moment the key is held; standing back up has to wait for headroom.
@@ -409,6 +456,88 @@ mod tests {
 
     fn default_input() -> PlayerInput {
         PlayerInput::default()
+    }
+
+    /// Flight is a hover, and the whole point of it: nothing falls, nothing drifts, and letting go
+    /// of the keys leaves a builder exactly where they were looking from.
+    ///
+    /// Ten seconds, because gravity is the kind of thing that shows up as a millimetre a tick.
+    #[test]
+    fn flying_holds_its_height_with_nothing_pressed() {
+        let mut app = floor_app();
+        let start = PlayerState { position: Vec3::new(0.0, 20.0, 0.0), ..default() };
+        let input = PlayerInput { flying: true, ..default_input() };
+        let state = run(&mut app, start, input, 640);
+        assert_eq!(state.position, start.position, "a hovering player moved");
+        assert_eq!(state.velocity, Vec3::ZERO, "a hovering player kept a velocity");
+        assert!(!state.on_ground, "a player twenty metres up was on the ground");
+    }
+
+    /// Up and down are the jump and crouch keys, at the same speed as everything else.
+    #[test]
+    fn the_jump_and_crouch_keys_are_the_lift() {
+        let mut app = floor_app();
+        let start = PlayerState { position: Vec3::new(0.0, 20.0, 0.0), ..default() };
+        let speed = fly_speed(FLY_NOTCH);
+
+        let up = PlayerInput { flying: true, fly_notch: FLY_NOTCH, jump: true, ..default_input() };
+        let state = run(&mut app, start, up, 64);
+        assert!((state.position.y - (20.0 + speed)).abs() < 0.05, "{:?}", state.position);
+
+        let down = PlayerInput { flying: true, fly_notch: FLY_NOTCH, crouch: true, ..default_input() };
+        let state = run(&mut app, start, down, 64);
+        assert!((state.position.y - (20.0 - speed)).abs() < 0.05, "{:?}", state.position);
+
+        // And a crouch key held in the air is a descent, not a stance: the capsule stays its full
+        // height, because there is nothing overhead to fit under.
+        assert!(!state.crouching, "a descending player crouched");
+    }
+
+    /// One speed in every direction, and the notch is what sets it.
+    ///
+    /// Climbing while going forward has to cover the same ground as either alone, for the reason
+    /// the diagonals are normalised: a builder should not learn to fly at 45° because it is faster.
+    #[test]
+    fn a_notch_is_one_speed_whichever_way_it_is_pointed() {
+        let mut app = floor_app();
+        let start = PlayerState { position: Vec3::new(0.0, 40.0, 0.0), ..default() };
+        for notch in 0..FLY_SPEEDS.len() as u8 {
+            let expected = fly_speed(notch);
+            for input in [
+                PlayerInput { forward: true, ..default_input() },
+                PlayerInput { jump: true, ..default_input() },
+                PlayerInput { forward: true, right: true, jump: true, ..default_input() },
+            ] {
+                let input = PlayerInput { flying: true, fly_notch: notch, ..input };
+                let state = run(&mut app, start, input, 64);
+                let travelled = state.position.distance(start.position);
+                assert!(
+                    (travelled - expected).abs() < expected * 0.02,
+                    "notch {notch} went {travelled} m in a second, not {expected}",
+                );
+            }
+        }
+    }
+
+    /// Flight is not noclip. The ground still stops a flyer, which is what makes a hillside
+    /// something to land on rather than something to sink through.
+    #[test]
+    fn the_ground_still_stops_a_flyer() {
+        let mut app = floor_app();
+        let start = PlayerState { position: Vec3::new(0.0, 4.0, 0.0), ..default() };
+        let down = PlayerInput { flying: true, crouch: true, fly_notch: 6, ..default_input() };
+        let state = run(&mut app, start, down, 64);
+        assert!(state.position.y > -SKIN, "a flyer sank through the floor: {:?}", state.position);
+    }
+
+    /// Letting go of the mode gives the world back, and it gives back the fall with it.
+    #[test]
+    fn leaving_flight_leaves_a_player_where_gravity_can_reach_them() {
+        let mut app = floor_app();
+        let start = PlayerState { position: Vec3::new(0.0, 20.0, 0.0), ..default() };
+        let state = run(&mut app, start, PlayerInput { flying: true, ..default_input() }, 64);
+        let state = run(&mut app, state, default_input(), 64);
+        assert!(state.position.y < 15.0, "a player who stopped flying stayed up: {:?}", state.position);
     }
 
     /// Walks forward for two seconds up a slope of `degrees` and reports where that left the

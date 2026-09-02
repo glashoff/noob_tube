@@ -19,6 +19,7 @@ use lightyear::prelude::{
     ConfirmedHistory, FrameInterpolate, Interpolated, InterpolationSystems, InterpolationTimeline,
     NetworkTimeline, Predicted, Tick, interpolation_fraction,
 };
+use noob_tube_shared::movement::FLY_SPEEDS;
 use noob_tube_shared::player::{Player, PlayerInput, PlayerState, ViewBracket};
 use noob_tube_shared::vehicle::{Driven, Driving};
 use noob_tube_shared::terrain::Ground;
@@ -90,6 +91,7 @@ impl Plugin for LocalPlayerPlugin {
                     note_drawn_view,
                     grab_cursor,
                     draw_or_stow_the_weapon,
+                    fly,
                     look,
                     sample_input,
                     hold_your_fire,
@@ -181,11 +183,24 @@ pub struct LocalPlayer {
     ///
     /// Only means anything while driving. On foot the weapon is always to hand.
     pub armed: bool,
+    /// Whether the player is flying. Latched here and sent on every tick — see
+    /// [`PlayerInput::flying`], which explains why a mode travels as a held state rather than as
+    /// the edge that started it.
+    pub flying: bool,
+    /// How fast, as an index into [`FLY_SPEEDS`](noob_tube_shared::movement::FLY_SPEEDS).
+    pub fly_notch: u8,
 }
 
 impl Default for LocalPlayer {
     fn default() -> Self {
-        Self { yaw: 0.0, pitch: 0.0, chase: CHASE_DISTANCE, armed: false }
+        Self {
+            yaw: 0.0,
+            pitch: 0.0,
+            chase: CHASE_DISTANCE,
+            armed: false,
+            flying: false,
+            fly_notch: noob_tube_shared::movement::FLY_NOTCH,
+        }
     }
 }
 
@@ -282,6 +297,45 @@ fn grab_cursor(window: Single<(&Window, &mut CursorOptions), With<PrimaryWindow>
         cursor.grab_mode = CursorGrabMode::None;
         cursor.visible = true;
     }
+}
+
+/// Update: F turns flight on, and the wheel says how fast.
+///
+/// The wheel and not a pair of keys, for the reason the brush's radius uses it: a speed is
+/// something one hand adjusts while the other is busy, and the notches are already discrete. Which
+/// makes three things that want the wheel, so it is worth saying who gets it and when — the brush
+/// while sculpting, the chase camera while driving, and this only when neither is true. A speed
+/// that changed while a brush was being sized would be a speed nobody asked for.
+fn fly(
+    keys: Res<ButtonInput<KeyCode>>,
+    scroll: Res<AccumulatedMouseScroll>,
+    chisel: Res<crate::sculpting::Chisel>,
+    // Optional for the same reason `sample_input`'s is: a headless client has no cursor to grab.
+    cursor: Option<Single<&CursorOptions, With<PrimaryWindow>>>,
+    driving: Option<Single<&Driving, With<Predicted>>>,
+    mut player: Single<&mut LocalPlayer>,
+) {
+    // Only with the pointer taken. Ungrabbed, the keyboard belongs to the menu, and F is a letter
+    // somebody is typing into a map name.
+    if !cursor.is_some_and(|cursor| cursor.grab_mode != CursorGrabMode::None) {
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyF) {
+        player.flying = !player.flying;
+    }
+    if !player.flying || chisel.on || driving.is_some() {
+        return;
+    }
+    let notches = match scroll.unit {
+        MouseScrollUnit::Line => scroll.delta.y,
+        MouseScrollUnit::Pixel => scroll.delta.y / PIXELS_PER_NOTCH,
+    };
+    if notches == 0.0 {
+        return;
+    }
+    let last = (FLY_SPEEDS.len() - 1) as i32;
+    let wanted = player.fly_notch as i32 + notches.signum() as i32;
+    player.fly_notch = wanted.clamp(0, last) as u8;
 }
 
 /// Update: turns mouse motion into the player's look angles.
@@ -408,6 +462,8 @@ pub(crate) fn sample_input(
         // their roof is asking for is not a shot. See `vehicle::right_flipped_vehicles`.
         righting: firing,
         interact: keys.pressed(KeyCode::KeyE),
+        flying: player.flying,
+        fly_notch: player.fly_notch,
         yaw: player.yaw,
         pitch: player.pitch,
     };

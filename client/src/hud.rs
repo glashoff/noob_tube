@@ -51,10 +51,19 @@ pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())
-            .add_systems(Startup, (spawn_readout, spawn_frame_rate, spawn_chisel_line))
+            .add_systems(
+                Startup,
+                (spawn_readout, spawn_frame_rate, spawn_chisel_line, spawn_flight_line),
+            )
             .add_systems(
                 Update,
-                (update_readout, update_frame_rate, toggle_readout, update_chisel_line),
+                (
+                    update_readout,
+                    update_frame_rate,
+                    toggle_readout,
+                    update_chisel_line,
+                    update_flight_line,
+                ),
             );
     }
 }
@@ -278,5 +287,55 @@ fn update_chisel_line(
     *visible = if chisel.on { Visibility::Visible } else { Visibility::Hidden };
     if chisel.on {
         text.0 = crate::sculpting::readout(&chisel);
+    }
+}
+
+/// The line that says a player is flying, and how fast.
+#[derive(Component)]
+struct FlightLine;
+
+/// Startup: puts it above the brush line, if there is a screen.
+///
+/// A line of its own for the same reason the brush has one: it is a mode the player is in, and
+/// the readout below it is instrumentation about the link. It also carries the two keys, because
+/// a mode whose controls are only in a commit message is a mode nobody finds.
+fn spawn_flight_line(window: Option<Single<Entity, With<Window>>>, mut commands: Commands) {
+    if window.is_none() {
+        return;
+    }
+    commands.spawn((
+        Name::from("Flight readout"),
+        FlightLine,
+        Text::default(),
+        TextFont { font_size: bevy::text::FontSize::Px(FONT_SIZE), ..default() },
+        TextColor(Color::srgb(0.55, 0.85, 0.95)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(MARGIN),
+            bottom: Val::Px(MARGIN * 5.8),
+            padding: UiRect::axes(Val::Px(PADDING * 1.4), Val::Px(PADDING)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+        Pickable::IGNORE,
+        Visibility::Hidden,
+    ));
+}
+
+/// Update: shows it while a player is flying, and hides it the rest of the time.
+fn update_flight_line(
+    player: Option<Single<&crate::local_player::LocalPlayer>>,
+    line: Option<Single<(&mut Text, &mut Visibility), With<FlightLine>>>,
+) {
+    let (Some(player), Some(line)) = (player, line) else {
+        return;
+    };
+    let (mut text, mut visible) = line.into_inner();
+    *visible = if player.flying { Visibility::Visible } else { Visibility::Hidden };
+    if player.flying {
+        text.0 = format!(
+            "flying {:.1} m/s   wheel to change, space up, ctrl down, F to land",
+            noob_tube_shared::movement::fly_speed(player.fly_notch),
+        );
     }
 }
