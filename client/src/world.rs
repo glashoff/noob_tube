@@ -264,18 +264,17 @@ fn dress_the_ground(
     old: Query<Entity, With<GroundTile>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<crate::ground_material::GroundMaterial>>,
 ) {
     for tile in old.iter() {
         commands.entity(tile).despawn();
     }
 
     let terrain = &ground.0;
-    let material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.30, 0.33, 0.30),
-        perceptual_roughness: 0.95,
-        ..default()
-    });
+    // The map's own rules, not this file's idea of them. A new map brings its own look and this
+    // runs again when one arrives, so the material is written under one handle rather than added:
+    // the tiles that are about to be spawned point at it either way.
+    let material = crate::ground_material::dress(&mut materials, &terrain.layers);
     let (wide, deep) = terrain.grid.tiles();
     for tz in 0..deep {
         for tx in 0..wide {

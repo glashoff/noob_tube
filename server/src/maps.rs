@@ -132,7 +132,13 @@ fn read(dir: &Path, name: &str) -> Result<Terrain, MapFault> {
         warn!("cannot read the heights of {name}: {error}");
         MapFault::NoSuchMap
     })?;
-    Terrain::decode(manifest.grid, manifest.water_y, &blob)
+    let mut terrain = Terrain::decode(manifest.grid, manifest.water_y, &blob)?;
+    // Same rule the baseline uses: no layers written is a map from before there were rules, and
+    // the default look is a better answer than a black one.
+    if !manifest.layers.is_empty() {
+        terrain.layers = manifest.layers;
+    }
+    Ok(terrain)
 }
 
 /// Writes one, manifest first and heights second.

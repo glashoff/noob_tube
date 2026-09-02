@@ -26,6 +26,12 @@
 /assets/models/*
 !/assets/models/warthog.glb
 
+# Shaders are the one thing under assets/ that is not an asset. They are this project's own source
+# code, written here, and they live in this directory only because that is where Bevy's asset server
+# looks — which is also what lets one be edited and reloaded without a rebuild. No licensing
+# question, so no per-file decision: the whole directory is in.
+!/assets/shaders/
+
 # Byte-code from running the Python helpers in tools/
 __pycache__/
 

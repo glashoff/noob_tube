@@ -524,6 +524,8 @@ pub struct Terrain {
     pub water_y: Option<f32>,
     /// `nx * nz` samples, row-major, x fastest.
     pub heights: Vec<u16>,
+    /// What the ground looks like, as rules rather than as pixels. See [`Layer`].
+    pub layers: Vec<Layer>,
 }
 
 impl Terrain {
@@ -536,7 +538,12 @@ impl Terrain {
         max_y: f32,
     ) -> Result<Self, MapFault> {
         let grid = Grid::new(extent_x, extent_z, spacing, min_y, max_y)?;
-        Ok(Self { heights: vec![grid.midpoint(); grid.samples()], grid, water_y: None })
+        Ok(Self {
+            heights: vec![grid.midpoint(); grid.samples()],
+            grid,
+            water_y: None,
+            layers: default_layers(),
+        })
     }
 
     /// The height at one sample, in metres.
@@ -596,7 +603,7 @@ impl Terrain {
             .chunks_exact(2)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
-        Ok(Self { grid, water_y, heights })
+        Ok(Self { grid, water_y, heights, layers: default_layers() })
     }
 
 }
@@ -715,7 +722,7 @@ impl Terrain {
             version: VERSION,
             grid: self.grid,
             water_y: self.water_y,
-            layers: Vec::new(),
+            layers: self.layers.clone(),
             markers: Vec::new(),
         }
     }
@@ -757,6 +764,10 @@ pub struct TerrainBaseline {
     /// belong to it: the pair is "the ground, and what is still on its way to it".
     #[serde(default)]
     pub pending: Vec<crate::sculpt::TerrainEdit>,
+    /// The map's own look. Empty means "whatever this build calls default", which is what an older
+    /// server sends and what a map written before there were rules holds.
+    #[serde(default)]
+    pub layers: Vec<Layer>,
 }
 
 impl TerrainBaseline {
@@ -767,6 +778,7 @@ impl TerrainBaseline {
             water_y: terrain.water_y,
             heights: terrain.encode(),
             pending: pending.to_vec(),
+            layers: terrain.layers.clone(),
         }
     }
 
@@ -776,7 +788,14 @@ impl TerrainBaseline {
     /// read off disk guard one read off the wire as well. That matters more here, not less: this
     /// arrives from another machine.
     pub fn adopt(&self) -> Result<Terrain, MapFault> {
-        Terrain::decode(self.grid, self.water_y, &self.heights)
+        let mut terrain = Terrain::decode(self.grid, self.water_y, &self.heights)?;
+        // An empty list is "whatever this build calls default" rather than "a map with no look":
+        // there is no way to author a map with nothing on it, and a black world is a worse answer
+        // to an old server than the default one.
+        if !self.layers.is_empty() {
+            terrain.layers = self.layers.clone();
+        }
+        Ok(terrain)
     }
 }
 
@@ -810,16 +829,161 @@ impl Manifest {
     }
 }
 
-/// One texture layer and how big it tiles.
+/// One surface the ground can wear, and the rule that decides where it appears.
 ///
-/// Which layer appears at a point is a *rule* — a slope range, a height range — evaluated per pixel
-/// in the fragment shader. There is no splat map anywhere in this design, and the rule parameters
-/// arrive with step eleven; this is the part of a layer that is a name and a number.
+/// **There is no splat map.** Which surface shows at a point is a function of that point's slope
+/// and its height, evaluated per pixel in the fragment shader — terrain.md's *Surface appearance is
+/// derived* argument in full. Nothing is painted, so there is no second grid on disk or on the
+/// wire, no paint brush, no per-layer weight bookkeeping, and no "regenerate the texturing" action
+/// that destroys somebody's afternoon. What it costs is stated there too: a map can never have a
+/// patch of moss the ground's own shape does not explain.
+///
+/// The rule travels with the map rather than living in the client, so a map can look like itself.
+/// The *evaluation* is duplicated between here and WGSL — terrain.md §10 — and the numbers are not:
+/// they are uploaded from these fields into a uniform, so the two copies cannot disagree about the
+/// bands, only about the arithmetic between them, which is what
+/// [`the_shader_and_the_cpu_agree`](tests::the_shader_and_the_cpu_agree) is arranged to pin.
+///
+/// `texture` and `tile_scale` are the plan's own fields and are carried unused: there are no ground
+/// textures in the repository yet, so a layer is a colour and a roughness for now. Nothing about
+/// the rule changes when they arrive — a texture is sampled *instead of* the flat colour, at the
+/// weight this already computes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
+    /// What to call it, and what the texture will be named when there is one.
     pub texture: String,
+    /// Metres per texture repeat. Unused until there is a texture; kept so a map written now does
+    /// not need a migration when there is.
+    #[serde(default = "one")]
     pub tile_scale: f32,
+    /// Linear RGB.
+    pub colour: [f32; 3],
+    pub roughness: f32,
+    /// Which slopes, in **degrees from flat**: 0 is level ground, 90 is a wall.
+    ///
+    /// Degrees in the file and in the code both, and converted to a cosine nowhere — the shader
+    /// takes the angle too. Readability is the whole reason the manifest is JSON, and `35` is a
+    /// slope where `0.819` is a number somebody has to work out.
+    pub slope: Band,
+    /// Which heights, in metres of world y.
+    pub height: Band,
 }
+
+fn one() -> f32 {
+    1.0
+}
+
+/// A range with a soft edge: full weight inside, fading to nothing across `blend` at each end.
+///
+/// The fade is **centred on the edge** — half of it inside the band and half outside — and linear
+/// rather than smooth. Both of those are what make two layers that share an edge sum to exactly one
+/// across the whole crossing, so the ground never darkens or washes out in the seam between them.
+/// A fade that hung entirely outside the band would leave both layers at full weight at the edge
+/// itself, and a smoothstep at each end does not sum to one either.
+/// [`two_bands_sharing_an_edge_sum_to_one`](tests::two_bands_sharing_an_edge_sum_to_one) is the
+/// property, and it is the reason for both choices.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Band {
+    pub from: f32,
+    pub to: f32,
+    /// How wide the fade is at each end. Zero is a hard edge.
+    pub blend: f32,
+}
+
+impl Band {
+    /// Everything, with no edges to fade.
+    pub const ANY: Band = Band { from: -1.0e9, to: 1.0e9, blend: 0.0 };
+
+    /// How much of this band a value is inside, from 0 to 1.
+    pub fn weight(self, x: f32) -> f32 {
+        let blend = self.blend.max(1.0e-4);
+        let rising = ((x - self.from) / blend + 0.5).clamp(0.0, 1.0);
+        let falling = ((self.to - x) / blend + 0.5).clamp(0.0, 1.0);
+        rising.min(falling)
+    }
+}
+
+impl Layer {
+    /// How much of this layer shows on a surface at this angle and this height.
+    ///
+    /// The CPU half of the derivation. Nothing in the game reads it yet — footstep sounds and
+    /// impact decals are what terrain.md §10 says will — but it is what the shader is tested
+    /// against, and a rule with no way to ask it from Rust is a rule nobody can test.
+    pub fn weight(&self, slope_degrees: f32, y: f32) -> f32 {
+        self.slope.weight(slope_degrees) * self.height.weight(y)
+    }
+}
+
+/// How steep a surface is, in degrees from flat, given the y of its unit normal.
+pub fn slope_degrees(normal_y: f32) -> f32 {
+    normal_y.clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+/// Which layer shows most strongly at a point, if any does.
+///
+/// The question the CPU side of terrain.md §10 actually wants answered — *what am I standing on* —
+/// rather than the weights, which are the shader's business.
+pub fn surface_of(layers: &[Layer], normal_y: f32, y: f32) -> Option<usize> {
+    let slope = slope_degrees(normal_y);
+    layers
+        .iter()
+        .enumerate()
+        .map(|(index, layer)| (index, layer.weight(slope, y)))
+        .filter(|(_, weight)| *weight > 0.0)
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(index, _)| index)
+}
+
+/// How many layers a map may have, which is what the shader's uniform is sized for.
+pub const MAX_LAYERS: usize = 4;
+
+/// The look a map gets when it does not describe one.
+///
+/// Four layers, which is the cap, and they are chosen so that every one of them *wins somewhere* on
+/// an ordinary map — a layer that never shows is a rule nobody can check by looking. Grass on the
+/// flat, dirt where it starts to fall away, rock where it is too steep to hold anything, and snow
+/// on the tops. The bands overlap by their blends so the sums stay at one across every seam.
+///
+/// No shore layer, and that is not an oversight: a shore is a rule about the *water level*, and
+/// this map has no water yet. A sand band around y = 0 would put a beach across the whole of the
+/// flat ground everybody spawns on.
+pub fn default_layers() -> Vec<Layer> {
+    vec![
+        Layer {
+            texture: "grass".into(),
+            tile_scale: 4.0,
+            colour: [0.15, 0.26, 0.11],
+            roughness: 0.95,
+            slope: Band { from: -1.0e9, to: 20.0, blend: 10.0 },
+            height: Band { from: -1.0e9, to: 22.0, blend: 8.0 },
+        },
+        Layer {
+            texture: "dirt".into(),
+            tile_scale: 3.0,
+            colour: [0.24, 0.19, 0.13],
+            roughness: 0.92,
+            slope: Band { from: 20.0, to: 34.0, blend: 10.0 },
+            height: Band::ANY,
+        },
+        Layer {
+            texture: "rock".into(),
+            tile_scale: 6.0,
+            colour: [0.29, 0.28, 0.27],
+            roughness: 0.8,
+            slope: Band { from: 34.0, to: 1.0e9, blend: 10.0 },
+            height: Band::ANY,
+        },
+        Layer {
+            texture: "snow".into(),
+            tile_scale: 5.0,
+            colour: [0.80, 0.83, 0.88],
+            roughness: 0.55,
+            slope: Band { from: -1.0e9, to: 38.0, blend: 14.0 },
+            height: Band { from: 24.0, to: 1.0e9, blend: 7.0 },
+        },
+    ]
+}
+
 
 /// Something placed on the map: where it goes, not what it is.
 ///
@@ -1351,13 +1515,86 @@ mod tests {
         assert_eq!(Terrain::decode(grid, None, &[]), Err(MapFault::TooManySamples));
     }
 
+    /// Every default layer wins somewhere on the map everybody starts on.
+    ///
+    /// A rule set is only legible if you can see all of it, and a layer that never comes out on top
+    /// is a rule nobody can check by looking — it would be indistinguishable from a typo in its own
+    /// band. This walks the built-in map and asks which layer wins at each sample.
+    #[test]
+    fn every_default_layer_shows_somewhere_on_the_default_map() {
+        let terrain = default_terrain();
+        let layers = default_layers();
+        let mut seen = vec![0usize; layers.len()];
+        let grid = terrain.grid;
+        // Every fourth sample in each direction: 16k probes rather than 263k, and there is nothing
+        // on the map four metres wide.
+        for iz in (1..grid.nz - 1).step_by(4) {
+            for ix in (1..grid.nx - 1).step_by(4) {
+                let here = grid.world_of(ix, iz);
+                let y = terrain.height_over(here.x, here.y);
+                // The normal the drawn mesh uses: central differences over the two neighbours.
+                let east = terrain.height_at(ix + 1, iz);
+                let west = terrain.height_at(ix - 1, iz);
+                let north = terrain.height_at(ix, iz - 1);
+                let south = terrain.height_at(ix, iz + 1);
+                let normal = Vec3::new(west - east, 2.0 * grid.spacing, south - north).normalize();
+                if let Some(index) = surface_of(&layers, normal.y, y) {
+                    seen[index] += 1;
+                }
+            }
+        }
+        for (index, count) in seen.iter().enumerate() {
+            assert!(
+                *count > 0,
+                "the layer {:?} never shows on the built-in map",
+                layers[index].texture,
+            );
+        }
+    }
+
+    /// The rules cover everything, so no pixel falls through them.
+    ///
+    /// The shader paints a point outside every band bright magenta on purpose — a gap should look
+    /// like a gap rather than like unlit ground. This is what says the default set has none, over
+    /// every slope a surface can have and every height the map's own range allows.
+    #[test]
+    fn the_default_rules_leave_no_gap() {
+        let layers = default_layers();
+        let mut slope = 0.0;
+        while slope <= 90.0 {
+            let mut y = DEFAULT_MIN_Y;
+            while y <= DEFAULT_MAX_Y {
+                let total: f32 = layers.iter().map(|layer| layer.weight(slope, y)).sum();
+                assert!(total > 1.0e-3, "no layer covers a {slope:.0}° surface at y = {y:.0}");
+                y += 1.0;
+            }
+            slope += 0.5;
+        }
+    }
+
+    /// A band's edges are linear and meet at one, so two layers sharing an edge never dip.
+    ///
+    /// The reason the fade is linear rather than a smoothstep: adjacent bands then sum to exactly
+    /// one across their overlap, and the ground does not darken in the seam between them.
+    #[test]
+    fn two_bands_sharing_an_edge_sum_to_one() {
+        let low = Band { from: -100.0, to: 30.0, blend: 10.0 };
+        let high = Band { from: 30.0, to: 100.0, blend: 10.0 };
+        let mut x = 15.0;
+        while x <= 45.0 {
+            let total = low.weight(x) + high.weight(x);
+            assert!((total - 1.0).abs() < 1.0e-5, "at {x} the two bands sum to {total}");
+            x += 0.25;
+        }
+    }
+
     /// The manifest is the half that changes, so it has to survive a round trip through text.
     #[test]
     fn the_manifest_survives_json() {
         let mut terrain = Terrain::new(64.0, 64.0, 1.0, -64.0, 64.0).expect("a map");
         terrain.water_y = Some(-3.5);
         let mut manifest = terrain.manifest();
-        manifest.layers.push(Layer { texture: "grass.png".into(), tile_scale: 4.0 });
+        manifest.layers = default_layers();
         manifest.markers.push(Marker {
             kind: "crate".into(),
             x: 1.5,

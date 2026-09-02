@@ -2702,11 +2702,59 @@ the wheel set its strength**, whichever number the tool in hand actually reads �
 and the line above the readout say what it is set to. A setting nobody can find is a setting that is
 not there, which is how this one was found: by being asked where it was.
 
+#### The ground's look is a rule, not a picture
+
+Step 11 of the plan, pulled forward, because the rule needs only what the map already has: the
+height of a point and the slope of its surface.
+
+**There is no splat map**, and the case against one is the plan's in full. The usual way to texture
+terrain is a second grid, RGBA, one byte per layer weight, painted by hand and stored beside the
+heights. Every argument for that is an argument about *painting*, and nobody paints here — so a
+whole layer of the system never gets built: no second grid on disk or on the wire, no packing scheme
+to make it affordable, no paint brush, no per-layer bookkeeping, and no "regenerate the texturing"
+action that destroys somebody's afternoon. What it costs, on the record: a map can never have a
+patch of moss its own shape does not explain.
+
+Four layers, each a colour, a roughness and two bands — which slopes it covers, in **degrees from
+flat**, and which heights, in metres. Degrees in the file and in the code both, because `35` is a
+slope where `0.819` is a number somebody has to work out. The default set is grass on the flat, dirt
+where it starts to fall away, rock where it is too steep to hold anything, and snow on the tops;
+there is a test that every one of them **wins somewhere** on the built-in map, because a layer that
+never shows is a rule nobody can check by looking, indistinguishable from a typo in its own band.
+
+The band's fade is **linear and centred on the edge**, and both halves of that are load-bearing: two
+layers that share an edge then sum to exactly one across the whole crossing, so the ground never
+darkens in the seam between them. A fade hanging entirely outside the band leaves both layers at
+full weight where they meet — measured at 1.025 and visible — and a smoothstep does not sum to one
+either. There is a test for the property rather than for the formula.
+
+**The numbers cross into WGSL once.** §10 says the classification has to exist twice: on the CPU for
+footsteps and decals, and in the shader, because the server has no renderer and cannot evaluate a
+fragment stage. What it does *not* have to do is exist twice as data — the bands are uploaded from
+the same `Layer` values the Rust reads, so the two copies can only disagree about the arithmetic
+between them, never about where a layer starts.
+
+No textures yet, and so no triplanar and no tile break: with nothing to project there is no
+projection to stretch. What breaks the flatness instead is two octaves of value noise in **world**
+space, which is where triplanar was trying to get to anyway — noise that was never in UV space
+cannot stretch on a slope. A texture, when there is one, is sampled *instead of* the flat colour at
+the weight the rule already computes; nothing about the rule changes.
+
+Two things cost an afternoon between them and neither shows up until the game is running. `from` is
+a **reserved word in WGSL**, so a band's parameters could not be named after the Rust fields they
+carry. And the material bind group is `@group(#{MATERIAL_BIND_GROUP})`, not `@group(2)` — Bevy 0.19
+moved it to 3, and the hard-coded number compiles cleanly and then fails at pipeline build with
+"not available in the pipeline layout". Both were found by running a windowed client and reading its
+log, which is the only place either of them exists.
+
+Measured: 59 fps at ground level against 61 before, and 54 looking down at half the map from a
+hundred metres up.
+
 #### Still to come
 
-Steps 8 to 11 of the plan: placement; undo; water; and texturing derived from slope and height
-rather than painted. The rendering step is
-half done — the shape is visible, and `ExtendedMaterial` with layers chosen by slope is not.
+Steps 8 to 10 of the plan: placement; undo; and water. Step 11's rule set is done and its textures
+are not — a layer is a colour until there are ground textures to name, and triplanar and tile break
+are questions about textures.
 
 ## Risks
 
