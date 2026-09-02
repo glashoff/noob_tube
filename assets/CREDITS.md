@@ -141,3 +141,32 @@ front of you, not by adding a line.
 
 The higher-resolution version (8.4 MB against 4.4 MB) is the same geometry to the vertex and differs
 only in texture size.
+
+---
+
+## Ground textures — `assets/textures/`
+
+| | |
+|---|---|
+| Source | **ambientCG** by Lennart Demes — https://ambientcg.com |
+| Packs | `Grass001`, `Ground048`, `Rock020`, each `1K-PNG` |
+| Licence | **CC0 1.0 Universal** — https://creativecommons.org/publicdomain/zero/1.0/ |
+| Changes | None. The colour map of each pack, under ambientCG's own file name; the other maps of each pack were not taken. |
+
+The original page for any pack is `https://ambientcg.com/view?id=<pack>` — for the first of them,
+<https://ambientcg.com/view?id=Grass001>.
+
+CC0 is a public domain dedication rather than a licence with conditions: the material may be used,
+modified, redistributed and sold, for any purpose, without permission or attribution. This entry
+exists because saying where something came from is decent practice, not because CC0 asks for it. It
+is also why these three files are let through `.gitignore` where the mounted gun above is not — the
+question the `ND` raises does not arise here at all.
+
+**These are the three `webgame` uses on its own hills map**, at the same 4 m tile scale, so that the
+ground of the two games reads as the same place. Which of them shows at a point is decided by slope
+alone — see `default_layers` in `shared/src/terrain.rs`.
+
+**Colour maps only.** Each pack also ships normal, roughness, displacement and ambient-occlusion
+maps; the normal map alone is six megabytes, and there is nothing to hang one on until the ground
+mesh carries tangents. Roughness is a constant per layer for now. Both are additions rather than
+corrections when they come.

@@ -939,47 +939,45 @@ pub const MAX_LAYERS: usize = 4;
 
 /// The look a map gets when it does not describe one.
 ///
-/// Four layers, which is the cap, and they are chosen so that every one of them *wins somewhere* on
-/// an ordinary map — a layer that never shows is a rule nobody can check by looking. Grass on the
-/// flat, dirt where it starts to fall away, rock where it is too steep to hold anything, and snow
-/// on the tops. The bands overlap by their blends so the sums stay at one across every seam.
+/// The three `webgame` puts on its own hills map, by name and at its tile scale, because the two
+/// games are meant to feel like the same place: **Grass001** on the flat, **Ground048** where it
+/// starts to fall away, **Rock020** where it is too steep to hold anything. All three are ambientCG
+/// packs under CC0 — see `assets/CREDITS.md`.
 ///
-/// No shore layer, and that is not an oversight: a shore is a rule about the *water level*, and
-/// this map has no water yet. A sand band around y = 0 would put a beach across the whole of the
-/// flat ground everybody spawns on.
+/// Selected on **slope alone**. Height is what a shore rule and a snow line are made of, and this
+/// map has neither: there is no water yet, so a sand band round y = 0 would put a beach across the
+/// flat ground everybody spawns on, and there is no snow texture to put on a summit. A rule that
+/// cannot be seen is a rule that cannot be checked, so it waits for the thing that makes it
+/// visible. The bands cross at their blends, so the weights sum to one through every seam.
+///
+/// A layer's `colour` is what it *averages* to, and it is not decoration either: it is what the
+/// ground is painted with before its texture has loaded, and what a headless build sees. Taken
+/// from each pack rather than invented, so the two never disagree by much.
 pub fn default_layers() -> Vec<Layer> {
     vec![
         Layer {
-            texture: "grass".into(),
+            texture: "Grass001_1K-PNG".into(),
             tile_scale: 4.0,
-            colour: [0.15, 0.26, 0.11],
+            colour: [0.42, 0.45, 0.30],
             roughness: 0.95,
-            slope: Band { from: -1.0e9, to: 20.0, blend: 10.0 },
-            height: Band { from: -1.0e9, to: 22.0, blend: 8.0 },
+            slope: Band { from: -1.0e9, to: 22.0, blend: 12.0 },
+            height: Band::ANY,
         },
         Layer {
-            texture: "dirt".into(),
-            tile_scale: 3.0,
-            colour: [0.24, 0.19, 0.13],
+            texture: "Ground048_1K-PNG".into(),
+            tile_scale: 4.0,
+            colour: [0.50, 0.44, 0.34],
             roughness: 0.92,
-            slope: Band { from: 20.0, to: 34.0, blend: 10.0 },
+            slope: Band { from: 22.0, to: 36.0, blend: 12.0 },
             height: Band::ANY,
         },
         Layer {
-            texture: "rock".into(),
-            tile_scale: 6.0,
-            colour: [0.29, 0.28, 0.27],
+            texture: "Rock020_1K-PNG".into(),
+            tile_scale: 4.0,
+            colour: [0.48, 0.46, 0.44],
             roughness: 0.8,
-            slope: Band { from: 34.0, to: 1.0e9, blend: 10.0 },
+            slope: Band { from: 36.0, to: 1.0e9, blend: 12.0 },
             height: Band::ANY,
-        },
-        Layer {
-            texture: "snow".into(),
-            tile_scale: 5.0,
-            colour: [0.80, 0.83, 0.88],
-            roughness: 0.55,
-            slope: Band { from: -1.0e9, to: 38.0, blend: 14.0 },
-            height: Band { from: 24.0, to: 1.0e9, blend: 7.0 },
         },
     ]
 }

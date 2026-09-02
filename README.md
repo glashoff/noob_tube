@@ -2734,11 +2734,37 @@ fragment stage. What it does *not* have to do is exist twice as data — the ban
 the same `Layer` values the Rust reads, so the two copies can only disagree about the arithmetic
 between them, never about where a layer starts.
 
-No textures yet, and so no triplanar and no tile break: with nothing to project there is no
-projection to stretch. What breaks the flatness instead is two octaves of value noise in **world**
-space, which is where triplanar was trying to get to anyway — noise that was never in UV space
-cannot stretch on a slope. A texture, when there is one, is sampled *instead of* the flat colour at
-the weight the rule already computes; nothing about the rule changes.
+The textures are **the three `webgame` uses on its own hills map** — ambientCG's `Grass001`,
+`Ground048` and `Rock020`, at the same 4 m tile scale — so the ground of the two games reads as the
+same place. All three are CC0, which is why they may live in the repository where the mounted gun
+may not; see `assets/CREDITS.md`.
+
+**Triplanar, and not as an option.** A height field has no UVs and could not use them if it had: a
+texture projected flat on to a 60° ravine wall arrives stretched by a factor of two. So each layer
+is sampled on all three world planes and blended by the surface normal. What makes that affordable
+is that the weights collapse — on flat ground the Y plane carries all of it and the other two
+branches are skipped — and `textureSampleGrad` throughout, because a `textureSample` inside a branch
+is not allowed to work out its own mip level. The derivatives are taken up front, in uniform control
+flow, where they still mean something.
+
+**Bevy does not build mipmaps for a PNG**, and that is not a small thing here: a 4 m texture tiled
+across five hundred metres without them does not look soft in the distance, it *boils*. Every frame
+the camera moves, each far pixel lands on a different texel of a 1024² image and the ground crawls.
+Thirty lines build the chain at load time, averaging in **linear** light rather than in sRGB —
+a box filter over encoded bytes is the classic way to get mipmaps visibly darker than their own
+image, and the error compounds per level until the horizon is a different colour from the ground
+underfoot. Anisotropy on top, because ground is the one thing in this game seen almost edge-on for
+most of the screen, which is exactly the case a plain mip chain over-blurs.
+
+Measured, and the direction is worth reporting: textures without mipmaps cost **50 fps**; with the
+mip chain the same view is back to **61** — mipmaps are not only what stops the shimmer, they are
+what stops a distant pixel missing the texture cache on every sample. Near the ground: 60 fps and
+the grass reads as blades.
+
+The world-space value noise stays, with a different job. It no longer has to give the eye something
+at close range — the texture does that — but a 4 m repeat reads as a grid across a hillside, and a
+slow brightness change at 42 m is what breaks it. That is the plan's "tile break", arrived at from
+the other side.
 
 Two things cost an afternoon between them and neither shows up until the game is running. `from` is
 a **reserved word in WGSL**, so a band's parameters could not be named after the Rust fields they

@@ -264,8 +264,9 @@ fn dress_the_ground(
     old: Query<Entity, With<GroundTile>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<crate::ground_material::GroundMaterial>>,
+    mut dressing: Dressing,
 ) {
+    let Dressing { materials, assets, ours } = &mut dressing;
     for tile in old.iter() {
         commands.entity(tile).despawn();
     }
@@ -274,7 +275,7 @@ fn dress_the_ground(
     // The map's own rules, not this file's idea of them. A new map brings its own look and this
     // runs again when one arrives, so the material is written under one handle rather than added:
     // the tiles that are about to be spawned point at it either way.
-    let material = crate::ground_material::dress(&mut materials, &terrain.layers);
+    let material = crate::ground_material::dress(materials, assets, ours, &terrain.layers);
     let (wide, deep) = terrain.grid.tiles();
     for tz in 0..deep {
         for tx in 0..wide {
@@ -289,6 +290,15 @@ fn dress_the_ground(
             ));
         }
     }
+}
+
+/// What it takes to put a material on the ground: the store to write it into, the server to load
+/// its textures from, and the list of handles the mipmap pass works on.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Dressing<'w> {
+    materials: ResMut<'w, Assets<crate::ground_material::GroundMaterial>>,
+    assets: Res<'w, AssetServer>,
+    ours: ResMut<'w, crate::ground_material::GroundTextures>,
 }
 
 /// One drawn piece of ground: which tile it is, so a stroke can find it, and a marker so the next
