@@ -2547,10 +2547,64 @@ Verified against two processes: made a map, switched everybody to it, restarted 
 it in the list, loaded it, and saved over it. A 128×64 m map at 2 m spacing arrives as 65×33
 samples and one drawn tile where the built-in map has sixty-four.
 
+#### Sculpting
+
+**F4** puts a brush in your hand. `1` flattens, `2` raises (right button lowers), `3` smooths, `4`
+lays a ramp between two clicks; the wheel sets the brush size, shift and the wheel its strength. You
+keep walking and driving while you do it, because ground you are shaping is ground you have to stand
+on to judge.
+
+**A stroke travels as an instruction, not as a result.** Forty bytes saying where the brush was, how
+wide and what it was doing; every machine recomputes the same samples. That is the principle
+`simulation.rs` already rests on, one level up — send the input, not the outcome — and it only works
+if every machine lands on exactly the same numbers, so two rules hold in the brush code:
+
+- **No transcendental functions.** `+ - * /`, `round`, `min`/`max` and comparisons, all of which
+  IEEE-754 specifies exactly. Falloff is a polynomial in the *squared* distance and never takes a
+  square root, because `sqrt`, `powf` and friends go through `libm`, which is not required to be
+  correctly rounded. `mul_add` is out too: it is a *different* result from `a * b + c`, deliberately.
+  A test reads the source and fails if either file grows one, comments excluded — the paragraph
+  explaining why `mul_add` is forbidden used to trip the check that forbids it.
+- **The lattice is the checkpoint.** Every stroke rounds to the map's own `u16` quantisation as it
+  writes, so a hundred strokes cannot accumulate apart the way a hundred `f32` additions would. That
+  is what the quantisation is *for*; halving the storage is a side effect.
+
+**A stroke lands late, and that is the point.** `Level` reads Avian's *current* spatial state, and
+there is no seam in it where a rollback replay could be handed historical terrain — so an edit
+applied inside the rollback window would have every replayed tick, including the ones from before
+the edit, walked on the new ground. The server therefore stamps each accepted stroke with
+`commit_tick + max_predicted_ticks` and both sides apply it there. No rollback window can straddle
+an edit by construction rather than by luck. It costs the sculptor the wait, and at this build's
+settings that is 100 ticks — **a second and a half**, which is a long time to watch a hillside not
+move. Lowering `max_predicted_ticks` shortens it directly.
+
+The server refuses a stroke that is not one, and charges a token bucket over *touched samples* on an
+upper bound worked out before anything is written — undercharging would let a client buy a bigger
+stroke than it pays for, and since the commit is broadcast before it is applied, an oversized stroke
+stalls every machine in the game rather than only the sender's. A refusal comes back in words, on
+the same reliable channel as everything else about maps, because a client whose stroke went nowhere
+must be able to tell a refusal from a lost packet.
+
+A stroke dirties tiles, and a dirty tile rebuilds its mesh **and** its collider over the same
+samples — one tiling, `Grid::TILE_CELLS`, shared by both, so the two cannot come to cover different
+ground. The collider is replaced in place rather than respawned, which is what makes the rebuild
+idempotent; it has to be, because a rollback can re-run the frame that triggers it.
+
+One thing was found by playing rather than by reading. Raising the ground under a standing player
+**buried** them: the ground probe reaches 12 cm below the feet, the new surface was above them, so
+they read as airborne inside solid ground and the sweep pushed them out through the bottom of it.
+Measured, they fell past −110 m and kept going. Ground that rises now takes its passengers up with
+it; ground that is lowered leaves them in the air, which is what a hole is for.
+
+Verified against two processes: a stroke reached the server, was stamped, came back to the client,
+raised the ground 6.5 m at the brush and 5.4 m under the player — who rode up with it and then slid
+off the side, because a 6.5 m cone in an 8 m brush is steeper than the slope limit. Then the menu
+said "unsaved", and saving under a name wrote a file with 21 359 distinct heights in it.
+
 #### Still to come
 
-Steps 7 to 11 of the plan: sculpting; placement; undo; water; and texturing derived from slope and
-height rather than painted. The rendering step is
+Steps 8 to 11 of the plan: placement; undo; water; and texturing derived from slope and height
+rather than painted. The rendering step is
 half done — the shape is visible, and `ExtendedMaterial` with layers chosen by slope is not.
 
 ## Risks

@@ -7,8 +7,9 @@
 //! ground at all — see [`adopt_the_map`].
 
 use bevy::prelude::*;
-use lightyear::prelude::{MessageReceiver, MessageSystems};
+use lightyear::prelude::{MessageReceiver, MessageSystems, Predicted};
 use noob_tube_shared::level::{self, CRATES, CRATE_HALF_EXTENT, RAMP_HALF_EXTENTS};
+use noob_tube_shared::sculpt::{self, GroundPatched, PendingEdits, TerrainEdit};
 use noob_tube_shared::terrain::{Ground, Terrain, TerrainBaseline};
 use noob_tube_shared::types::Authored;
 
@@ -24,24 +25,37 @@ impl Plugin for WorldPlugin {
             // "Unhandled messages ... Clearing to avoid accumulating messages". And building the
             // collider in `Update` instead would be a tick of physics late, because `FixedMain`
             // runs first inside a frame.
+            .init_resource::<PendingEdits>()
+            .add_message::<GroundPatched>()
             .add_systems(
                 PreUpdate,
-                (adopt_the_map, level::build_the_ground.run_if(resource_exists_and_changed::<Ground>))
+                (
+                    adopt_the_map,
+                    take_strokes,
+                    level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
+                    sculpt::apply_due_edits.run_if(resource_exists::<Ground>),
+                    sculpt::lift_with_the_ground::<With<Predicted>>
+                        .run_if(resource_exists::<Ground>),
+                    level::rebuild_patched_ground.run_if(resource_exists::<Ground>),
+                )
                     .chain()
                     .after(MessageSystems::Receive),
             )
             .add_systems(
                 Update,
                 dress_the_ground.run_if(resource_exists_and_changed::<Ground>),
+            )
+            // The picture of a stroke, after the ground it describes has moved. In `Update` rather
+            // than `PreUpdate` because it is only a picture: the collider goes first, and a frame
+            // of the two disagreeing would be a frame of walking on ground you cannot see.
+            .add_systems(
+                Update,
+                redress_patched_tiles
+                    .after(dress_the_ground)
+                    .run_if(resource_exists::<Ground>),
             );
     }
 }
-
-/// How many cells of height field one drawn tile covers.
-///
-/// 64, which is the number §6 of the plan tiles editing on: one stroke should dirty one tile and
-/// rebuild that tile alone.
-const MESH_TILE: u32 = 64;
 
 /// How many samples the drawn ground skips between vertices.
 ///
@@ -78,10 +92,11 @@ const MESH_STRIDE: u32 = 2;
 /// Normals are read from the *whole* field rather than from the tile, which is what stops a seam
 /// showing: two tiles meeting along an edge share those vertices' positions, and they have to agree
 /// about which way the ground faces there as well.
-fn ground_mesh(terrain: &Terrain, ix0: u32, iz0: u32, cells_x: u32, cells_z: u32) -> Mesh {
+fn ground_mesh(terrain: &Terrain, tx: u32, tz: u32) -> Mesh {
     let grid = terrain.grid;
+    let (ix0, ix1, iz0, iz1) = grid.tile_samples(tx, tz);
     let step = MESH_STRIDE.max(1);
-    let (across, down) = (cells_x / step, cells_z / step);
+    let (across, down) = ((ix1 - ix0) / step, (iz1 - iz0) / step);
     let (wide, deep) = ((across + 1) as usize, (down + 1) as usize);
     let mut positions = Vec::with_capacity(wide * deep);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(wide * deep);
@@ -151,19 +166,80 @@ pub struct LevelRoot;
 /// another machine, and [`TerrainBaseline::adopt`] puts it through the same caps a map read off
 /// disk faces — a grid claiming four million samples is an allocation this client should not make
 /// because somebody asked it to.
-fn adopt_the_map(mut inbox: Query<&mut MessageReceiver<TerrainBaseline>>, mut commands: Commands) {
+fn adopt_the_map(
+    mut inbox: Query<&mut MessageReceiver<TerrainBaseline>>,
+    mut pending: ResMut<PendingEdits>,
+    mut commands: Commands,
+) {
     for mut receiver in inbox.iter_mut() {
         for baseline in receiver.receive() {
             match baseline.adopt() {
                 Ok(terrain) => {
                     info!(
-                        "map received: {}x{} samples at {} m",
-                        terrain.grid.nx, terrain.grid.nz, terrain.grid.spacing,
+                        "map received: {}x{} samples at {} m, {} strokes still on their way",
+                        terrain.grid.nx,
+                        terrain.grid.nz,
+                        terrain.grid.spacing,
+                        baseline.pending.len(),
                     );
                     commands.insert_resource(Ground(terrain));
+                    // Strokes accepted before this client arrived but not yet applied. The ground
+                    // it was just given has not had them, and without them it never would — this
+                    // client would be the only one standing on a map without somebody's hill.
+                    pending.0 = baseline.pending.clone();
                 }
                 Err(fault) => error!("the map the server sent is not one this build reads: {fault}"),
             }
+        }
+    }
+}
+
+/// PreUpdate: takes the strokes the server has accepted and queues them for their tick.
+///
+/// Queued rather than applied, and that is the whole of the scheme: the server said which tick this
+/// lands on, and applying it a moment earlier because it happened to arrive early would put this
+/// client on ground nobody else has yet.
+fn take_strokes(mut inbox: Query<&mut MessageReceiver<TerrainEdit>>, mut pending: ResMut<PendingEdits>) {
+    for mut receiver in inbox.iter_mut() {
+        for edit in receiver.receive() {
+            pending.0.push(edit);
+        }
+    }
+}
+
+/// Update: rebuilds the meshes of the tiles a stroke moved, and only those.
+///
+/// The same tiling the collider uses, from the same function, so the ground you see and the ground
+/// you stand on are rebuilt over exactly the same samples.
+fn redress_patched_tiles(
+    ground: Res<Ground>,
+    mut patched: MessageReader<GroundPatched>,
+    tiles: Query<(&GroundTile, &Mesh3d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let mut dirty: Vec<(u32, u32)> = Vec::new();
+    for GroundPatched(patch) in patched.read() {
+        let (tx0, tx1, tz0, tz1) =
+            ground.0.grid.tiles_over(patch.ix0, patch.ix1, patch.iz0, patch.iz1);
+        for tz in tz0..=tz1 {
+            for tx in tx0..=tx1 {
+                if !dirty.contains(&(tx, tz)) {
+                    dirty.push((tx, tz));
+                }
+            }
+        }
+    }
+    if dirty.is_empty() {
+        return;
+    }
+    for (tile, handle) in tiles.iter() {
+        if !dirty.contains(&(tile.tx, tile.tz)) {
+            continue;
+        }
+        // The mesh asset is replaced through its existing handle, so nothing has to be respawned
+        // and every entity pointing at it follows along.
+        if let Some(mut slot) = meshes.get_mut(&handle.0) {
+            *slot = ground_mesh(&ground.0, tile.tx, tile.tz);
         }
     }
 }
@@ -196,17 +272,14 @@ fn dress_the_ground(
         perceptual_roughness: 0.95,
         ..default()
     });
-    let cells_x = terrain.grid.nx - 1;
-    let cells_z = terrain.grid.nz - 1;
-    for iz in (0..cells_z).step_by(MESH_TILE as usize) {
-        for ix in (0..cells_x).step_by(MESH_TILE as usize) {
-            let wide = MESH_TILE.min(cells_x - ix);
-            let deep = MESH_TILE.min(cells_z - iz);
+    let (wide, deep) = terrain.grid.tiles();
+    for tz in 0..deep {
+        for tx in 0..wide {
             commands.spawn((
-                Name::from(format!("Ground {ix},{iz}")),
+                Name::from(format!("Ground {tx},{tz}")),
                 Authored,
-                GroundTile,
-                Mesh3d(meshes.add(ground_mesh(terrain, ix, iz, wide, deep))),
+                GroundTile { tx, tz },
+                Mesh3d(meshes.add(ground_mesh(terrain, tx, tz))),
                 MeshMaterial3d(material.clone()),
                 Transform::IDENTITY,
                 ChildOf(*root),
@@ -215,9 +288,13 @@ fn dress_the_ground(
     }
 }
 
-/// One drawn piece of ground, so the next map can take the last one's tiles down.
+/// One drawn piece of ground: which tile it is, so a stroke can find it, and a marker so the next
+/// map can take the last one's tiles down.
 #[derive(Component)]
-struct GroundTile;
+struct GroundTile {
+    tx: u32,
+    tz: u32,
+}
 
 /// Builds what the level looks like. What it collides as is
 /// [`level::spawn_level`](noob_tube_shared::level::spawn_level), spawned alongside this.

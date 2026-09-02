@@ -6,6 +6,7 @@
 
 
 mod maps;
+mod sculpting;
 
 use bevy::prelude::*;
 use lightyear::prelude::*;
@@ -24,6 +25,7 @@ use noob_tube_shared::props::{self, Bobbing, Density};
 use noob_tube_shared::vehicle::{self, Controls, Driven, Driving, SEATED_FEET, VehicleKind};
 use noob_tube_shared::lag_compensation::HitboxHistory;
 use noob_tube_shared::shooting::{self, Health, ShotFired};
+use noob_tube_shared::sculpt::{self, GroundPatched, PendingEdits};
 use noob_tube_shared::terrain::{self, Ground, MapList, TerrainBaseline};
 use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin, TerrainChannel};
 use noob_tube_shared::types::Authored;
@@ -75,11 +77,22 @@ fn main() {
         // which is where the reason it cannot be Startup on a client is written down.
         // Map requests first, so a map that changes this frame is the one this frame's ticks run
         // against, and the ground is built from it in the same pass.
+        .init_resource::<PendingEdits>()
+        .init_resource::<sculpting::Budgets>()
+        .add_message::<GroundPatched>()
+        // Map requests first, so a map that changes this frame is the one this frame's ticks run
+        // against, and the ground is built from it in the same pass. Then strokes, which are
+        // checked against whichever map that left in play; then the edits whose tick has come; then
+        // the tiles they moved.
         .add_systems(
             PreUpdate,
             (
                 maps::serve_map_requests,
+                sculpting::serve_strokes,
                 level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
+                sculpt::apply_due_edits.run_if(resource_exists::<Ground>),
+                sculpt::lift_with_the_ground::<()>.run_if(resource_exists::<Ground>),
+                level::rebuild_patched_ground.run_if(resource_exists::<Ground>),
             )
                 .chain()
                 .after(MessageSystems::Receive),
@@ -1058,6 +1071,7 @@ fn send_the_map(
     trigger: On<Add, Connected>,
     peers: Query<&RemoteId>,
     ground: Res<Ground>,
+    pending: Res<PendingEdits>,
     maps: Res<maps::Maps>,
     mut sender: ServerMultiMessageSender,
     server: Single<&Server>,
@@ -1065,7 +1079,7 @@ fn send_the_map(
     let Ok(remote) = peers.get(trigger.entity) else {
         return;
     };
-    let baseline = TerrainBaseline::of(&ground.0);
+    let baseline = TerrainBaseline::of(&ground.0, &pending.0);
     let bytes = baseline.heights.len();
     if let Err(error) =
         sender.send::<_, TerrainChannel>(&baseline, *server, &NetworkTarget::Single(remote.0))

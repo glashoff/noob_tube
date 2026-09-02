@@ -13,6 +13,7 @@ pub mod physics;
 pub mod player;
 pub mod props;
 pub mod protocol;
+pub mod sculpt;
 pub mod shooting;
 pub mod simulation;
 pub mod terrain;

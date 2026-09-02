@@ -19,6 +19,7 @@ use crate::player::{Aim, Player, PlayerInput, PlayerState};
 use crate::props::{Density, Prop};
 use crate::vehicle::{Controls, Driven, Driving, VehicleKind};
 use crate::shooting::{Health, ShotFired};
+use crate::sculpt::{Stroke, TerrainEdit};
 use crate::terrain::{MapList, MapRequest, TerrainBaseline};
 use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
@@ -132,6 +133,14 @@ impl Plugin for ProtocolPlugin {
         app.register_message::<MapRequest>()
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<MapList>()
+            .add_direction(NetworkDirection::ServerToClient);
+        // Sculpting, both ways and deliberately as two types. A client sends what it wants done;
+        // the server sends back what it decided, with the tick everybody applies it on. A single
+        // type carrying a tick the client fills in with nothing would be a type somebody has to
+        // remember to overwrite.
+        app.register_message::<Stroke>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<TerrainEdit>()
             .add_direction(NetworkDirection::ServerToClient);
 
         // Physics bodies, last: this registers `Position`, `Rotation`, `LinearVelocity` and

@@ -11,6 +11,7 @@ mod local_player;
 mod map_menu;
 mod props;
 mod remote_players;
+mod sculpting;
 mod shot_effects;
 mod vehicle;
 mod world;
@@ -59,7 +60,7 @@ fn main() {
         ))
         // Adds nothing unless `NOOB_TUBE_BOT` is set — the plugin decides that itself, so the
         // condition lives beside the reason for it rather than here.
-        .add_plugins((bot::BotPlugin, map_menu::MapMenuPlugin))
+        .add_plugins((bot::BotPlugin, map_menu::MapMenuPlugin, sculpting::SculptingPlugin))
         .add_plugins(client::ClientPlugins {
             tick_duration: net.tick_duration(),
         })

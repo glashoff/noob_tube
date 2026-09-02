@@ -73,7 +73,7 @@ impl Maps {
     }
 
     /// What goes back to a client after anything happens.
-    fn report(&self, trouble: Option<MapFault>) -> MapList {
+    pub fn report(&self, trouble: Option<MapFault>) -> MapList {
         MapList {
             maps: self.names.clone(),
             current: self.current.clone(),
@@ -173,6 +173,7 @@ type Switching<'w, 's> = (
 pub fn serve_map_requests(
     mut inbox: Query<(&RemoteId, &mut MessageReceiver<MapRequest>)>,
     mut maps: ResMut<Maps>,
+    mut pending: ResMut<noob_tube_shared::sculpt::PendingEdits>,
     mut world: Switching,
     mut sender: ServerMultiMessageSender,
     server: Single<&Server>,
@@ -189,6 +190,9 @@ pub fn serve_map_requests(
         let trouble = act(&mut maps, &mut world, peer, request).err();
         if trouble.is_none() && switched {
             place_everything(&mut world);
+            // Strokes still waiting for their tick belong to the map that has gone. Applying them
+            // to the new one would carve somebody's hillside into ground that never had a hill.
+            pending.0.clear();
         }
 
         let report = maps.report(trouble);
@@ -201,7 +205,7 @@ pub fn serve_map_requests(
         // right behind the list — so a client cannot apply the new map's name to the old map's
         // ground.
         if trouble.is_none() && switched {
-            let baseline = TerrainBaseline::of(&world.0.0);
+            let baseline = TerrainBaseline::of(&world.0.0, &[]);
             if let Err(error) =
                 sender.send::<_, TerrainChannel>(&baseline, *server, &NetworkTarget::All)
             {

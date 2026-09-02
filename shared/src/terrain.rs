@@ -121,19 +121,19 @@ const RAVINES: [Ravine; 2] = [
 /// `sin` and `hypot` go through `libm`, which is not required to be correctly rounded and may
 /// differ in the last ulp between platforms. Client and server both generate this map until step
 /// five sends it, so they have to agree on it exactly.
-fn smoothstep(t: f32) -> f32 {
+pub(crate) fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
 /// How much of a feature applies at a squared distance from it: 1 at the middle, 0 at the rim, and
 /// flat at both ends.
-fn falloff(distance_squared: f32, radius: f32) -> f32 {
+pub(crate) fn falloff(distance_squared: f32, radius: f32) -> f32 {
     let t = distance_squared / (radius * radius);
     if t >= 1.0 { 0.0 } else { smoothstep(1.0 - t) }
 }
 
 /// The squared distance from a point to a segment. No square root anywhere in it.
-fn to_segment_squared(point: Vec2, from: Vec2, to: Vec2) -> f32 {
+pub(crate) fn to_segment_squared(point: Vec2, from: Vec2, to: Vec2) -> f32 {
     let along = to - from;
     let length_squared = along.length_squared();
     let t = if length_squared <= 0.0 {
@@ -209,6 +209,10 @@ pub enum MapFault {
     NameTaken,
     /// Asking for maps faster than [`CREATE_INTERVAL`].
     TooFast,
+    /// A stroke with a number in it that is not one, or one past a cap.
+    Stroke,
+    /// Sculpting faster than [`SAMPLES_PER_SECOND`](crate::sculpt::SAMPLES_PER_SECOND) allows.
+    TooMuchGround,
 }
 
 impl core::fmt::Display for MapFault {
@@ -233,6 +237,8 @@ impl core::fmt::Display for MapFault {
             Self::TooFast => {
                 write!(f, "wait {} s between new maps", CREATE_INTERVAL.as_secs())
             }
+            Self::Stroke => write!(f, "that is not a brush stroke this map will take"),
+            Self::TooMuchGround => write!(f, "sculpting faster than the server will take it"),
         }
     }
 }
@@ -586,6 +592,68 @@ impl Terrain {
         Ok(Self { grid, water_y, heights })
     }
 
+}
+
+impl Grid {
+    /// How many cells of height field one tile covers, in both the collider and the picture.
+    ///
+    /// The same number for both, and that is the whole point of it being here rather than in the
+    /// client: a stroke dirties tiles, and a dirty tile rebuilds its mesh *and* its collider. Two
+    /// tilings would mean a stroke rebuilding a different set of each, and the two drifting apart
+    /// in what they cover.
+    ///
+    /// 64 also gives frustum culling something to work with. It does not give it much on a map
+    /// this size — from ground level most of a 512 m map is visible — but it is the unit editing
+    /// wants, which is the stronger reason.
+    pub const TILE_CELLS: u32 = 64;
+
+    /// How many tiles across and down. Always at least one, and the last of each row is short
+    /// whenever the map is not a whole number of tiles.
+    pub fn tiles(&self) -> (u32, u32) {
+        let along = |n: u32| (n - 1).div_ceil(Self::TILE_CELLS).max(1);
+        (along(self.nx), along(self.nz))
+    }
+
+    /// The samples one tile owns, inclusive at both ends.
+    ///
+    /// Neighbouring tiles **share** their boundary samples, and that is not an off-by-one: a tile
+    /// of `n` cells needs `n + 1` grid points, and a tiling that gave each tile its own edge would
+    /// leave a one-cell strip of nothing between every pair of them.
+    pub fn tile_samples(&self, tx: u32, tz: u32) -> (u32, u32, u32, u32) {
+        let ix0 = tx * Self::TILE_CELLS;
+        let iz0 = tz * Self::TILE_CELLS;
+        (
+            ix0,
+            (ix0 + Self::TILE_CELLS).min(self.nx - 1),
+            iz0,
+            (iz0 + Self::TILE_CELLS).min(self.nz - 1),
+        )
+    }
+
+    /// Which tiles a patch of samples falls in, inclusive.
+    pub fn tiles_over(&self, ix0: u32, ix1: u32, iz0: u32, iz1: u32) -> (u32, u32, u32, u32) {
+        let (wide, deep) = self.tiles();
+        // A sample on a boundary belongs to both tiles that share it, so the low end is rounded
+        // down by one cell before dividing. Rebuilding one tile too many is invisible; rebuilding
+        // one too few leaves a seam standing where the ground has moved.
+        let low = |i: u32| i.saturating_sub(1) / Self::TILE_CELLS;
+        let high = |i: u32, count: u32| (i / Self::TILE_CELLS).min(count - 1);
+        (low(ix0), high(ix1, wide), low(iz0), high(iz1, deep))
+    }
+}
+
+impl Terrain {
+    /// One tile of the ground as a collider, and where to put it.
+    ///
+    /// The same construction as the whole-map collider below, over a window of the samples — and it
+    /// has the same two traps, which is why there is one place that builds a height field and both
+    /// callers go through it.
+    pub fn tile_collider(&self, tx: u32, tz: u32) -> (Collider, Vec3) {
+        let grid = self.grid;
+        let (ix0, ix1, iz0, iz1) = grid.tile_samples(tx, tz);
+        self.height_field(ix0, ix1, iz0, iz1)
+    }
+
     /// The shape the ground is, and where to put it.
     ///
     /// Avian takes a nested `Vec<Vec<Scalar>>` and derives the grid dimensions from the structure,
@@ -607,22 +675,30 @@ impl Terrain {
     /// span and letting parry multiply. One less place for a factor to be applied twice.
     pub fn collider(&self) -> (Collider, Vec3) {
         let grid = self.grid;
+        self.height_field(0, grid.nx - 1, 0, grid.nz - 1)
+    }
+
+    /// A height field over one window of the samples, inclusive at both ends, and where its body
+    /// belongs.
+    ///
+    /// The one place a height field is built, which is what keeps both traps above settled in one
+    /// place rather than in every caller that wants a piece of the ground.
+    fn height_field(&self, ix0: u32, ix1: u32, iz0: u32, iz1: u32) -> (Collider, Vec3) {
+        let grid = self.grid;
+        let (nx, nz) = ((ix1 - ix0 + 1) as usize, (iz1 - iz0 + 1) as usize);
         // parry's `Array2` is column-major — `flat_index(i, j) = i + j * nrows` — and its accessors
         // read `i` as z and `j` as x. So the data has to run z-fastest, with `nrows` counting the
         // samples along z.
-        let mut data = vec![0.0f32; grid.samples()];
-        for ix in 0..grid.nx {
-            for iz in 0..grid.nz {
-                data[iz as usize + ix as usize * grid.nz as usize] = self.height_at(ix, iz);
+        let mut data = vec![0.0f32; nx * nz];
+        for ix in 0..nx {
+            for iz in 0..nz {
+                data[iz + ix * nz] = self.height_at(ix0 + ix as u32, iz0 + iz as u32);
             }
         }
-        let heights = Array2::new(grid.nz as usize, grid.nx as usize, data);
-        let centre = Vec3::new(
-            grid.origin_x + grid.extent_x() / 2.0,
-            0.0,
-            grid.origin_z + grid.extent_z() / 2.0,
-        );
-        let scale = Vec3::new(grid.extent_x(), 1.0, grid.extent_z());
+        let heights = Array2::new(nz, nx, data);
+        let (low, high) = (grid.world_of(ix0, iz0), grid.world_of(ix1, iz1));
+        let centre = Vec3::new((low.x + high.x) / 2.0, 0.0, (low.y + high.y) / 2.0);
+        let scale = Vec3::new(high.x - low.x, 1.0, high.y - low.y);
         (Collider::from(SharedShape::heightfield(heights, scale)), centre)
     }
 
@@ -666,12 +742,25 @@ pub struct TerrainBaseline {
     pub grid: Grid,
     pub water_y: Option<f32>,
     pub heights: Vec<u8>,
+    /// Strokes that have been accepted but whose tick has not come.
+    ///
+    /// Without these a client that joins in the half-second between a stroke being broadcast and
+    /// being applied would get ground that has not had it yet and would never hear about it —
+    /// standing, from then on, on a map nobody else has. They travel with the baseline because they
+    /// belong to it: the pair is "the ground, and what is still on its way to it".
+    #[serde(default)]
+    pub pending: Vec<crate::sculpt::TerrainEdit>,
 }
 
 impl TerrainBaseline {
     /// What the server sends.
-    pub fn of(terrain: &Terrain) -> Self {
-        Self { grid: terrain.grid, water_y: terrain.water_y, heights: terrain.encode() }
+    pub fn of(terrain: &Terrain, pending: &[crate::sculpt::TerrainEdit]) -> Self {
+        Self {
+            grid: terrain.grid,
+            water_y: terrain.water_y,
+            heights: terrain.encode(),
+            pending: pending.to_vec(),
+        }
     }
 
     /// What the client makes of it, and the place a hostile or broken baseline is refused.
@@ -925,7 +1014,7 @@ mod tests {
     #[test]
     fn a_baseline_is_the_map_it_came_from() {
         let sent = default_terrain();
-        let arrived = TerrainBaseline::of(&sent).adopt().expect("a map this build reads");
+        let arrived = TerrainBaseline::of(&sent, &[]).adopt().expect("a map this build reads");
         assert_eq!(arrived, sent, "the map changed on the way over");
     }
 
@@ -936,15 +1025,15 @@ mod tests {
     /// because somebody asked it to.
     #[test]
     fn a_baseline_that_does_not_add_up_is_refused() {
-        let mut short = TerrainBaseline::of(&default_terrain());
+        let mut short = TerrainBaseline::of(&default_terrain(), &[]);
         short.heights.truncate(short.heights.len() - 2);
         assert!(matches!(short.adopt(), Err(MapFault::BlobSize { .. })), "a short map was adopted");
 
-        let mut vast = TerrainBaseline::of(&default_terrain());
+        let mut vast = TerrainBaseline::of(&default_terrain(), &[]);
         vast.grid.nx = MAX_SAMPLES_PER_AXIS + 1;
         assert!(matches!(vast.adopt(), Err(MapFault::TooLongAnAxis)), "an oversized map was adopted");
 
-        let mut fine = TerrainBaseline::of(&default_terrain());
+        let mut fine = TerrainBaseline::of(&default_terrain(), &[]);
         fine.grid.spacing = MIN_SPACING / 2.0;
         assert!(matches!(fine.adopt(), Err(MapFault::Spacing)), "a map below the spacing cap was adopted");
     }
@@ -1042,15 +1131,38 @@ mod tests {
         assert!(walls > limit + 10.0, "the ravines only reach {walls:.1}°, which is walkable");
     }
 
+    /// Nothing both machines run may reach for a function `libm` computes rather than the CPU.
+    ///
+    /// Read off the source, because the rule is about what is *written* and no runtime check can
+    /// see it. Both files, and the second matters more than the first: the map generator has to
+    /// agree between two machines that each build it once, and a brush has to agree between two
+    /// machines applying a hundred strokes.
+    ///
+    /// Everything before `#[cfg(test)]` is scanned rather than a named span. The first version of
+    /// this searched from `fn default_terrain` to the next occurrence of that same string, a
+    /// boundary that held by accident and would have moved silently the day somebody wrote that
+    /// name a third time.
     #[test]
     fn nothing_that_both_sides_run_reaches_for_a_transcendental() {
-        let source = include_str!("terrain.rs");
-        let shipped = source.split("#[cfg(test)]").next().expect("a file");
-        assert!(shipped.contains("fn default_terrain"), "the split lost the generator");
-        for forbidden in
-            [".sqrt()", ".powf(", ".powi(", ".sin(", ".cos(", ".exp(", ".hypot(", "mul_add"]
-        {
-            assert!(!shipped.contains(forbidden), "something outside the tests uses {forbidden}");
+        for (file, source, landmark) in [
+            ("terrain.rs", include_str!("terrain.rs"), "fn default_terrain"),
+            ("sculpt.rs", include_str!("sculpt.rs"), "fn sculpt"),
+        ] {
+            let shipped = source.split("#[cfg(test)]").next().expect("a file");
+            assert!(shipped.contains(landmark), "the split lost {landmark} in {file}");
+            // Comments are dropped first, or the paragraph explaining why `mul_add` is forbidden
+            // trips the check that forbids it — which is a delightful way to fail and a useless
+            // one. This is a search for *calls*.
+            let shipped: String = shipped
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for forbidden in
+                [".sqrt()", ".powf(", ".powi(", ".sin(", ".cos(", ".exp(", ".hypot(", "mul_add"]
+            {
+                assert!(!shipped.contains(forbidden), "{file} uses {forbidden} outside its tests");
+            }
         }
     }
 

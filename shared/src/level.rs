@@ -9,10 +9,11 @@
 //! deliberate — real levels use simplified collision geometry, and the two will diverge in shape
 //! long before they diverge in intent.
 
-use avian3d::prelude::Collider;
+use avian3d::prelude::{Collider, Position};
 use bevy::prelude::*;
 
 use crate::physics::{level_geometry, level_geometry_facing};
+use crate::sculpt::GroundPatched;
 use crate::terrain::Ground;
 
 /// Half-extents of one crate. They are cubes, 2 m on a side.
@@ -81,12 +82,17 @@ pub fn spawn_point(index: usize) -> Vec3 {
     Vec3::new(index as f32 * 2.0, 0.0, 0.0)
 }
 
-/// The ground's collider, so that a map arriving can take the place of the map before it.
+/// One tile of the ground's collider, and which tile it is.
 ///
-/// One entity today. When the field is tiled for editing it becomes one per tile, and the marker is
-/// what lets a stroke rebuild the tiles it touched and leave the rest alone.
+/// Tiled rather than one shape, and the reason is sculpting: a stroke dirties a handful of samples,
+/// and rebuilding a 513² height field for each of them would cost the whole map per brush tick. The
+/// tiling is the map's own — [`Grid::TILE_CELLS`](crate::terrain::Grid::TILE_CELLS) — so a stroke
+/// rebuilds the same tiles here and in the picture.
 #[derive(Component)]
-pub struct GroundCollider;
+pub struct GroundCollider {
+    pub tx: u32,
+    pub tz: u32,
+}
 
 /// PreUpdate: builds the ground the current map describes, and takes down whatever was there.
 ///
@@ -109,8 +115,51 @@ pub fn build_the_ground(
     for previous in old.iter() {
         commands.entity(previous).despawn();
     }
-    let (collider, at) = ground.0.collider();
-    commands.spawn((GroundCollider, level_geometry(collider, at)));
+    let (wide, deep) = ground.0.grid.tiles();
+    for tz in 0..deep {
+        for tx in 0..wide {
+            let (collider, at) = ground.0.tile_collider(tx, tz);
+            commands.spawn((GroundCollider { tx, tz }, level_geometry(collider, at)));
+        }
+    }
+}
+
+/// PreUpdate: rebuilds the tiles a stroke moved, and only those.
+///
+/// The collider is replaced in place rather than the entity respawned, which is what makes this
+/// idempotent — and it has to be, because a rollback can re-run the frame that triggers it. Running
+/// it twice on the same patch writes the same shape twice.
+///
+/// A tile is a *window* of the samples and neighbouring tiles share their edges, so a patch that
+/// ends exactly on a boundary dirties the tile on each side of it. Rebuilding one tile too many is
+/// invisible; one too few leaves a seam of old ground standing.
+pub fn rebuild_patched_ground(
+    ground: Res<Ground>,
+    mut patched: MessageReader<GroundPatched>,
+    tiles: Query<(Entity, &GroundCollider)>,
+    mut commands: Commands,
+) {
+    let mut dirty: Vec<(u32, u32)> = Vec::new();
+    for GroundPatched(patch) in patched.read() {
+        let (tx0, tx1, tz0, tz1) =
+            ground.0.grid.tiles_over(patch.ix0, patch.ix1, patch.iz0, patch.iz1);
+        for tz in tz0..=tz1 {
+            for tx in tx0..=tx1 {
+                if !dirty.contains(&(tx, tz)) {
+                    dirty.push((tx, tz));
+                }
+            }
+        }
+    }
+    if dirty.is_empty() {
+        return;
+    }
+    for (entity, tile) in tiles.iter() {
+        if dirty.contains(&(tile.tx, tile.tz)) {
+            let (collider, at) = ground.0.tile_collider(tile.tx, tile.tz);
+            commands.entity(entity).insert((collider, Position(at)));
+        }
+    }
 }
 
 /// Startup: builds everything that is built rather than grown — the ramp and the crates.
@@ -242,7 +291,49 @@ mod tests {
             .query_filtered::<Entity, With<GroundCollider>>()
             .iter(app.world())
             .count();
-        assert_eq!(grounds, 1, "{grounds} grounds after building it twice");
+        let (wide, deep) = crate::terrain::default_terrain().grid.tiles();
+        let want = (wide * deep) as usize;
+        assert_eq!(grounds, want, "{grounds} ground tiles after building {want} of them twice");
+    }
+
+    /// A stroke has to reach the ground a player stands on, not only the numbers behind it.
+    ///
+    /// The tile that changed has its `Collider` replaced in place, and whether Avian notices a
+    /// swapped component is exactly the kind of thing to find out by asking rather than by reading.
+    /// So: sculpt the field, rebuild the tiles the patch touched, and cast the ray the movement
+    /// code casts.
+    ///
+    /// It rebuilds twice, because a rollback can re-run the frame that triggers this and the
+    /// second run must leave the same shape rather than a second one.
+    #[test]
+    fn a_stroke_moves_the_ground_a_player_stands_on() {
+        use bevy::ecs::system::RunSystemOnce;
+        use crate::sculpt::{Brush, Stroke};
+
+        let mut app = played_level();
+        app.add_message::<GroundPatched>();
+        let before = ground_at(&mut app, 0.0, 0.0).expect("ground at the origin");
+
+        let stroke = Stroke { at: Vec2::ZERO, radius: 12.0, brush: Brush::Lift { metres: 5.0 } };
+        let patch = {
+            let mut ground = app.world_mut().resource_mut::<Ground>();
+            ground.0.sculpt(&stroke).expect("the stroke wrote something")
+        };
+        for _ in 0..2 {
+            app.world_mut().write_message(GroundPatched(patch));
+            app.world_mut().run_system_once(rebuild_patched_ground).expect("the rebuild");
+            app.update();
+        }
+
+        let after = ground_at(&mut app, 0.0, 0.0).expect("ground at the origin");
+        assert!(
+            (after - before - 5.0).abs() < 0.05,
+            "the ground went from {before:.2} to {after:.2}, which is not five metres",
+        );
+        // And the ground well outside the brush did not move with it.
+        let away = ground_at(&mut app, 100.0, 100.0).expect("ground away from the stroke");
+        let untouched = crate::terrain::default_terrain().height_over(100.0, 100.0);
+        assert!((away - untouched).abs() < 0.05, "ground 140 m away moved to {away:.2}");
     }
 
     /// A hillside of the real map is ground a player stands on, and it faces the way it looks.

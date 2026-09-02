@@ -51,8 +51,11 @@ pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())
-            .add_systems(Startup, (spawn_readout, spawn_frame_rate))
-            .add_systems(Update, (update_readout, update_frame_rate, toggle_readout));
+            .add_systems(Startup, (spawn_readout, spawn_frame_rate, spawn_chisel_line))
+            .add_systems(
+                Update,
+                (update_readout, update_frame_rate, toggle_readout, update_chisel_line),
+            );
     }
 }
 
@@ -227,5 +230,53 @@ fn toggle_readout(
     }
     for mut visibility in readouts.iter_mut() {
         visibility.toggle_visible_hidden();
+    }
+}
+
+
+/// The line that says what the brush is set to.
+#[derive(Component)]
+struct ChiselLine;
+
+/// Startup: puts it above the view readout, if there is a screen.
+///
+/// Its own line rather than a word appended to the readout below it, because the two answer
+/// different questions and only one of them is ever interesting at a time: the readout is
+/// instrumentation about the link, and this is the tool in your hand.
+fn spawn_chisel_line(window: Option<Single<Entity, With<Window>>>, mut commands: Commands) {
+    if window.is_none() {
+        return;
+    }
+    commands.spawn((
+        Name::from("Chisel readout"),
+        ChiselLine,
+        Text::default(),
+        TextFont { font_size: bevy::text::FontSize::Px(FONT_SIZE), ..default() },
+        TextColor(Color::srgb(0.95, 0.85, 0.45)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(MARGIN),
+            bottom: Val::Px(MARGIN * 3.4),
+            padding: UiRect::axes(Val::Px(PADDING * 1.4), Val::Px(PADDING)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+        Pickable::IGNORE,
+        Visibility::Hidden,
+    ));
+}
+
+/// Update: shows it while there is a brush, and hides it the rest of the time.
+fn update_chisel_line(
+    chisel: Res<crate::sculpting::Chisel>,
+    line: Option<Single<(&mut Text, &mut Visibility), With<ChiselLine>>>,
+) {
+    let Some(line) = line else {
+        return;
+    };
+    let (mut text, mut visible) = line.into_inner();
+    *visible = if chisel.on { Visibility::Visible } else { Visibility::Hidden };
+    if chisel.on {
+        text.0 = crate::sculpting::readout(&chisel);
     }
 }
