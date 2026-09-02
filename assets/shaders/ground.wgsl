@@ -1,10 +1,14 @@
 // The ground's look, derived rather than painted.
 //
-// Which surface shows at a pixel is a function of that pixel's slope and its height — terrain.md's
-// "Surface appearance is derived, and there is no splat map". The *bands* are not written here:
-// they are uploaded from `Layer` in `shared/src/terrain.rs`, so this file and the Rust that goes
-// with it cannot disagree about where a layer starts. Only the arithmetic between them lives twice,
-// which is what terrain.md §10 says has to.
+// Which surface shows at a pixel is a function of that pixel's slope, its height, and how far it
+// sits below the ground around it — terrain.md's "Surface appearance is derived, and there is no
+// splat map". The third of those cannot be read off the point itself, so it rides in on the mesh:
+// `ground_mesh` writes it into the second uv set, where the standard vertex shader carries it
+// through for free.
+//
+// The *bands* are not written here: they are uploaded from `Layer` in `shared/src/terrain.rs`, so
+// this file and the Rust that goes with it cannot disagree about where a layer starts. Only the
+// arithmetic between them lives twice, which is what terrain.md §10 says has to.
 //
 // **Triplanar, and not as an option.** A height field has no UVs and could not use them if it had:
 // a texture projected flat on to a 60° ravine wall arrives stretched by a factor of two. So every
@@ -30,12 +34,13 @@ struct GroundRules {
     slope: array<vec4<f32>, 4>,
     // Height band in metres of world y: from, to, blend, w = metres one texture tile spans.
     height: array<vec4<f32>, 4>,
+    // Hollow band in metres below the surroundings: from, to, blend. w unused.
+    dip: array<vec4<f32>, 4>,
     // How many of the four rows are real.
     count: u32,
-    // How strong the large-scale shading is, and how many metres across its two scales are.
-    detail: f32,
-    coarse_metres: f32,
-    fine_metres: f32,
+    // How strongly the second, large-scale sample of each texture modulates the first.
+    tile_break: f32,
+    _pad: vec2<f32>,
 }
 
 // The group is a shader def rather than a number: Bevy moved the material bind group to 3 in this
@@ -74,7 +79,34 @@ fn band(x: f32, low: f32, high: f32, blend: f32) -> f32 {
     let width = max(blend, 1.0e-4);
     let rising = clamp((x - low) / width + 0.5, 0.0, 1.0);
     let falling = clamp((high - x) / width + 0.5, 0.0, 1.0);
-    return min(rising, falling);
+    return min(rising * rising * (3.0 - 2.0 * rising), falling * falling * (3.0 - 2.0 * falling));
+}
+
+/// How much larger the tile break's second sample is than the first.
+///
+/// Deliberately not a whole multiple: at 7.3 the two repeats never line up again inside any view,
+/// so the pattern the break exists to hide cannot come back at its own scale.
+const BREAK_SCALE: f32 = 7.3;
+
+/// One texture on one plane, with the large-scale modulation multiplied in.
+///
+/// Centred on one rather than a straight multiply. `a * b` would square the texture's variance and
+/// turn the albedo to mud; `a * mix(1, 2b, strength)` leaves the average where it was and only
+/// moves it about.
+fn planar(
+    tex: texture_2d<f32>,
+    samp: sampler,
+    uv: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+) -> vec3<f32> {
+    let a = textureSampleGrad(tex, samp, uv, ddx, ddy).rgb;
+    if rules.tile_break <= 0.0 {
+        return a;
+    }
+    let k = 1.0 / BREAK_SCALE;
+    let b = textureSampleGrad(tex, samp, uv * k, ddx * k, ddy * k).rgb;
+    return a * mix(vec3<f32>(1.0), b * 2.0, rules.tile_break);
 }
 
 /// One layer, sampled on whichever world planes the surface faces.
@@ -95,35 +127,15 @@ fn triplanar(
     let k = 1.0 / max(tile_metres, 0.01);
     var total = vec3<f32>(0.0);
     if weights.y > NEGLIGIBLE {
-        total += weights.y
-            * textureSampleGrad(tex, samp, world.xz * k, dx.xz * k, dy.xz * k).rgb;
+        total += weights.y * planar(tex, samp, world.xz * k, dx.xz * k, dy.xz * k);
     }
     if weights.x > NEGLIGIBLE {
-        total += weights.x
-            * textureSampleGrad(tex, samp, world.zy * k, dx.zy * k, dy.zy * k).rgb;
+        total += weights.x * planar(tex, samp, world.zy * k, dx.zy * k, dy.zy * k);
     }
     if weights.z > NEGLIGIBLE {
-        total += weights.z
-            * textureSampleGrad(tex, samp, world.xy * k, dx.xy * k, dy.xy * k).rgb;
+        total += weights.z * planar(tex, samp, world.xy * k, dx.xy * k, dy.xy * k);
     }
     return total;
-}
-
-/// A hash with no pattern the eye can find at the scales this is used at.
-fn hash(cell: vec2<f32>) -> f32 {
-    return fract(sin(dot(cell, vec2<f32>(127.1, 311.7))) * 43758.5453);
-}
-
-/// Value noise: the four corners of a cell, blended with a smoothstep.
-fn noise(at: vec2<f32>) -> f32 {
-    let cell = floor(at);
-    let f = fract(at);
-    let w = f * f * (3.0 - 2.0 * f);
-    let a = hash(cell);
-    let b = hash(cell + vec2<f32>(1.0, 0.0));
-    let c = hash(cell + vec2<f32>(0.0, 1.0));
-    let d = hash(cell + vec2<f32>(1.0, 1.0));
-    return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
 }
 
 @fragment
@@ -146,11 +158,18 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let facing = pow(abs(normal), vec3<f32>(SHARPNESS));
     let planes = facing / max(facing.x + facing.y + facing.z, 1.0e-6);
 
+    // Metres this point sits below the ground around it, interpolated across the triangle from the
+    // three corners `ground_mesh` measured it at.
+    let dip = in.uv_b.x;
+
     var weight = vec4<f32>(0.0);
     for (var i = 0u; i < rules.count; i = i + 1u) {
         let s = rules.slope[i];
         let h = rules.height[i];
-        weight[i] = band(slope, s.x, s.y, s.z) * band(world.y, h.x, h.y, h.z);
+        let d = rules.dip[i];
+        weight[i] = band(slope, s.x, s.y, s.z)
+            * band(world.y, h.x, h.y, h.z)
+            * band(dip, d.x, d.y, d.z);
     }
     let total = weight.x + weight.y + weight.z + weight.w;
 
@@ -200,14 +219,6 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         colour = vec3<f32>(0.5, 0.0, 0.5);
         roughness = 1.0;
     }
-
-    // Two scales of world-space noise over the whole thing. Its job is no longer to give the eye
-    // something at close range — the texture does that — but to break the *tiling*: a 4 m repeat
-    // reads as a grid across a hillside, and a slow brightness change at 42 m is what stops it.
-    let coarse = noise(world.xz / max(rules.coarse_metres, 0.01));
-    let fine = noise(world.xz / max(rules.fine_metres, 0.01));
-    let shade = 1.0 + rules.detail * (coarse * 0.65 + fine * 0.35 - 0.5) * 2.0;
-    colour *= clamp(shade, 0.0, 2.0);
 
     pbr_input.material.base_color = vec4<f32>(colour, 1.0);
     pbr_input.material.perceptual_roughness = clamp(roughness, 0.05, 1.0);

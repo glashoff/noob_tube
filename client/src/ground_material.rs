@@ -21,21 +21,19 @@ use noob_tube_shared::terrain::{Layer, MAX_LAYERS};
 /// The shader, by the path the asset server knows it under.
 const SHADER: &str = "shaders/ground.wgsl";
 
-/// How much the world-space noise may darken or lighten the ground, either way.
+/// How strongly the tile break modulates the ground, from 0 (off) to 1.
 ///
-/// Not a texture and not pretending to be one. What it buys is the thing a flat colour cannot: a
-/// hillside that still reads as a surface at two hundred metres, and something for the eye to hold
-/// on to at walking pace. A tenth is enough to do that and little enough that a slope's *shading*
-/// still reads as its shape rather than as dirt.
-const DETAIL: f32 = 0.12;
-
-/// The two scales it is mixed at, in metres.
+/// A four-metre texture repeated over five hundred reads as a grid from anywhere far enough away
+/// to see more than a few tiles of it, and no amount of filtering hides a pattern that is really
+/// there. The break is a **second sample of the same texture at a much larger scale**, multiplied
+/// in — so what varies across a hillside is the texture's own structure, at the size of a
+/// landscape feature, rather than a smooth wash laid over the top of it. Synthetic noise stood
+/// here before and could only change the brightness; this changes what the ground is made of,
+/// which is what the eye was missing.
 ///
-/// Far apart on purpose — an octave pair close together reads as one blurry scale. The coarse one
-/// is about the size of a hill's shoulder and the fine one about the size of a vehicle, which is
-/// what puts a change inside every view whatever the range.
-const COARSE_METRES: f32 = 42.0;
-const FINE_METRES: f32 = 3.5;
+/// `webgame`'s `uTileBreak`, and its value: strong enough to break the grid, weak enough that a
+/// slope's shading still reads as its shape.
+const TILE_BREAK: f32 = 0.35;
 
 /// What the ground is drawn with: Bevy's PBR, with the derivation bolted on to its fragment stage.
 pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundLayers>;
@@ -72,18 +70,22 @@ pub struct GroundRules {
     slope: [Vec4; MAX_LAYERS],
     /// Height band in metres of world y: from, to, blend, and `w` = metres one texture tile spans.
     height: [Vec4; MAX_LAYERS],
+    /// Hollow band in metres below the surroundings: from, to, blend. `w` is unused.
+    dip: [Vec4; MAX_LAYERS],
     /// How many of the rows are real. A map with more layers than the cap loses the extras here
     /// rather than in the shader, where the loop bound is this number.
     count: u32,
-    detail: f32,
-    coarse_metres: f32,
-    fine_metres: f32,
+    tile_break: f32,
+    /// Padding to the sixteen bytes a uniform's tail is rounded up to anyway. Named rather than
+    /// implicit, because `ShaderType` and the WGSL struct have to agree on the size and a silent
+    /// pad is a silent chance for them not to.
+    _pad: Vec2,
 }
 
 impl GroundRules {
     /// The uniform a map's layers describe.
     pub fn of(layers: &[Layer]) -> Self {
-        let mut rules = Self { detail: DETAIL, coarse_metres: COARSE_METRES, fine_metres: FINE_METRES, ..default() };
+        let mut rules = Self { tile_break: TILE_BREAK, ..default() };
         for (slot, layer) in layers.iter().take(MAX_LAYERS).enumerate() {
             let [r, g, b] = layer.colour;
             rules.colour[slot] = Vec4::new(r, g, b, layer.roughness);
@@ -92,6 +94,7 @@ impl GroundRules {
                 Vec4::new(layer.slope.from, layer.slope.to, layer.slope.blend, textured);
             rules.height[slot] =
                 Vec4::new(layer.height.from, layer.height.to, layer.height.blend, layer.tile_scale);
+            rules.dip[slot] = Vec4::new(layer.dip.from, layer.dip.to, layer.dip.blend, 0.0);
             rules.count += 1;
         }
         rules
@@ -349,6 +352,9 @@ mod tests {
             assert_eq!(rules.height[slot].y, layer.height.to);
             assert_eq!(rules.height[slot].z, layer.height.blend);
             assert_eq!(rules.height[slot].w, layer.tile_scale, "the tile scale did not cross");
+            assert_eq!(rules.dip[slot].x, layer.dip.from);
+            assert_eq!(rules.dip[slot].y, layer.dip.to);
+            assert_eq!(rules.dip[slot].z, layer.dip.blend);
             assert_eq!(rules.slope[slot].w, 1.0, "a layer with a texture was marked as having none");
         }
     }

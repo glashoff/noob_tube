@@ -576,6 +576,31 @@ impl Terrain {
         south + (north - south) * tz
     }
 
+    /// How far the ground at one sample sits **below** the ground around it, in metres.
+    ///
+    /// Positive in a hollow, zero on a plane, negative on a ridge — the average of four samples a
+    /// span away, minus this one. It is the one input to the look that is not a property of the
+    /// point by itself, and it is what puts dirt where dirt goes.
+    ///
+    /// The span is [`DIP_SPAN_METRES`] and not the neighbouring sample, which matters more than it
+    /// looks: comparing a sample with the ones a metre away measures the *noise* of the height
+    /// field, not the shape of the land, and would scatter dirt over every dimple on an otherwise
+    /// clean hillside. A valley is a wide thing and has to be asked about at its own width.
+    ///
+    /// At the rim the samples clamp, exactly as the normals do, so the edge of the map reads as
+    /// flat ground rather than as a trench.
+    pub fn dip_at(&self, ix: u32, iz: u32) -> f32 {
+        let grid = self.grid;
+        let span = (DIP_SPAN_METRES / grid.spacing).round().max(1.0) as u32;
+        let at = |x: u32, z: u32| self.height_at(x.min(grid.nx - 1), z.min(grid.nz - 1));
+        let around = (at(ix.saturating_sub(span), iz)
+            + at(ix + span, iz)
+            + at(ix, iz.saturating_sub(span))
+            + at(ix, iz + span))
+            / 4.0;
+        around - self.height_at(ix, iz)
+    }
+
     /// The heights as they go on disk and on the wire: little-endian `u16`, row-major, x fastest.
     ///
     /// Little-endian stated rather than assumed. Every machine this runs on is little-endian, so
@@ -867,21 +892,41 @@ pub struct Layer {
     pub slope: Band,
     /// Which heights, in metres of world y.
     pub height: Band,
+    /// How deep a hollow, in **metres below the ground around it** — see [`Terrain::dip_at`].
+    ///
+    /// The third axis, and the one that is not a property of the point alone. Slope and height ask
+    /// what a place *is*; this asks what is above it, which is what decides where anything loose
+    /// ends up. Dirt collects in hollows and gullies for the same reason water does, and no
+    /// combination of the other two says "hollow": a valley floor is flat and can sit at any
+    /// height at all.
+    ///
+    /// Defaulted, so a manifest written before this existed still reads.
+    #[serde(default = "anything")]
+    pub dip: Band,
 }
 
 fn one() -> f32 {
     1.0
 }
 
+fn anything() -> Band {
+    Band::ANY
+}
+
 /// A range with a soft edge: full weight inside, fading to nothing across `blend` at each end.
 ///
-/// The fade is **centred on the edge** — half of it inside the band and half outside — and linear
-/// rather than smooth. Both of those are what make two layers that share an edge sum to exactly one
-/// across the whole crossing, so the ground never darkens or washes out in the seam between them.
-/// A fade that hung entirely outside the band would leave both layers at full weight at the edge
-/// itself, and a smoothstep at each end does not sum to one either.
-/// [`two_bands_sharing_an_edge_sum_to_one`](tests::two_bands_sharing_an_edge_sum_to_one) is the
-/// property, and it is the reason for both choices.
+/// The fade is **centred on the edge** — half of it inside the band and half outside — which is
+/// what makes two layers that share an edge sum to exactly one across the whole crossing, so the
+/// ground never darkens or washes out in the seam between them. A fade hung entirely outside the
+/// band would leave both layers at full weight at the edge itself.
+/// [`two_bands_sharing_an_edge_sum_to_one`](tests::two_bands_sharing_an_edge_sum_to_one) is that
+/// property.
+///
+/// The fade itself is a **smoothstep**, not a ramp. A ramp sums to one just as exactly, but it
+/// arrives at each end of the crossing with a corner in it, and a corner in a weight is a visible
+/// line on the ground — the eye finds the second derivative of a shading gradient far more readily
+/// than the first. Smoothstep is symmetric about its middle, `s(1 - t) = 1 - s(t)`, so the sum
+/// survives it untouched.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Band {
     pub from: f32,
@@ -897,22 +942,30 @@ impl Band {
     /// How much of this band a value is inside, from 0 to 1.
     pub fn weight(self, x: f32) -> f32 {
         let blend = self.blend.max(1.0e-4);
-        let rising = ((x - self.from) / blend + 0.5).clamp(0.0, 1.0);
-        let falling = ((self.to - x) / blend + 0.5).clamp(0.0, 1.0);
+        let rising = smoothstep(((x - self.from) / blend + 0.5).clamp(0.0, 1.0));
+        let falling = smoothstep(((self.to - x) / blend + 0.5).clamp(0.0, 1.0));
         rising.min(falling)
     }
 }
 
 impl Layer {
-    /// How much of this layer shows on a surface at this angle and this height.
+    /// How much of this layer shows on a surface at this angle, this height and this depth of
+    /// hollow.
     ///
     /// The CPU half of the derivation. Nothing in the game reads it yet — footstep sounds and
     /// impact decals are what terrain.md §10 says will — but it is what the shader is tested
     /// against, and a rule with no way to ask it from Rust is a rule nobody can test.
-    pub fn weight(&self, slope_degrees: f32, y: f32) -> f32 {
-        self.slope.weight(slope_degrees) * self.height.weight(y)
+    pub fn weight(&self, slope_degrees: f32, y: f32, dip: f32) -> f32 {
+        self.slope.weight(slope_degrees) * self.height.weight(y) * self.dip.weight(dip)
     }
 }
+
+/// How far out [`Terrain::dip_at`] looks for "the ground around it", in metres.
+///
+/// `webgame`'s `valleySpanM`, and the same twelve metres: wide enough that a hollow has to be a
+/// feature of the landscape rather than a bump in the sampling, narrow enough that a gully still
+/// counts as one.
+pub const DIP_SPAN_METRES: f32 = 12.0;
 
 /// How steep a surface is, in degrees from flat, given the y of its unit normal.
 pub fn slope_degrees(normal_y: f32) -> f32 {
@@ -923,12 +976,12 @@ pub fn slope_degrees(normal_y: f32) -> f32 {
 ///
 /// The question the CPU side of terrain.md §10 actually wants answered — *what am I standing on* —
 /// rather than the weights, which are the shader's business.
-pub fn surface_of(layers: &[Layer], normal_y: f32, y: f32) -> Option<usize> {
+pub fn surface_of(layers: &[Layer], normal_y: f32, y: f32, dip: f32) -> Option<usize> {
     let slope = slope_degrees(normal_y);
     layers
         .iter()
         .enumerate()
-        .map(|(index, layer)| (index, layer.weight(slope, y)))
+        .map(|(index, layer)| (index, layer.weight(slope, y, dip)))
         .filter(|(_, weight)| *weight > 0.0)
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(index, _)| index)
@@ -940,44 +993,66 @@ pub const MAX_LAYERS: usize = 4;
 /// The look a map gets when it does not describe one.
 ///
 /// The three `webgame` puts on its own hills map, by name and at its tile scale, because the two
-/// games are meant to feel like the same place: **Grass001** on the flat, **Ground048** where it
-/// starts to fall away, **Rock020** where it is too steep to hold anything. All three are ambientCG
-/// packs under CC0 — see `assets/CREDITS.md`.
+/// games are meant to feel like the same place: **Grass001** on open ground, **Ground048** in the
+/// hollows it drains into, **Rock020** where it is too steep to hold anything. All three are
+/// ambientCG packs under CC0 — see `assets/CREDITS.md`.
 ///
-/// Selected on **slope alone**. Height is what a shore rule and a snow line are made of, and this
+/// **Two questions, asked in that order, and each one splits the set in half.** Is it steep? Then
+/// rock, and neither of the other two. Otherwise: does it sit below what surrounds it? Then dirt,
+/// else grass. Every pair that shares an edge shares its blend as well, so the weights sum to one
+/// through each crossing rather than merely near it.
+///
+/// The steep edge is 35° with a 16° crossing, which is `webgame`'s `steepDeg` and twice its
+/// `steepBlendDeg` — the same numbers because the same crossing is meant. Grass to 27°, rock from
+/// 43°, and the transition between. **This map is not gentle**: measured over the built-in
+/// terrain, 30% of it lies between 15° and 30°. A middle *slope* band anywhere in that range —
+/// which is what stood here before — paints a fifth of the whole map brown in scattered patches
+/// on ground that is plainly a grassy hillside. The band was doing nothing but marking the
+/// gradient of the hill.
+///
+/// Height carries no rule at all. It is what a shore line and a snow line are made of, and this
 /// map has neither: there is no water yet, so a sand band round y = 0 would put a beach across the
-/// flat ground everybody spawns on, and there is no snow texture to put on a summit. A rule that
-/// cannot be seen is a rule that cannot be checked, so it waits for the thing that makes it
-/// visible. The bands cross at their blends, so the weights sum to one through every seam.
+/// flat ground everybody spawns on, and there is no snow texture for a summit. A rule that cannot
+/// be seen is a rule that cannot be checked, so it waits for the thing that makes it visible.
 ///
 /// A layer's `colour` is what it *averages* to, and it is not decoration either: it is what the
 /// ground is painted with before its texture has loaded, and what a headless build sees. Taken
 /// from each pack rather than invented, so the two never disagree by much.
 pub fn default_layers() -> Vec<Layer> {
+    /// Where grass gives way to rock, and how wide the crossing is.
+    const STEEP: Band = Band { from: 35.0, to: 1.0e9, blend: 16.0 };
+    const NOT_STEEP: Band = Band { from: -1.0e9, to: 35.0, blend: 16.0 };
+    /// How deep a hollow has to be before it is a hollow, over the span `dip_at` measures.
+    const HOLLOW: Band = Band { from: 1.5, to: 1.0e9, blend: 1.5 };
+    const NOT_HOLLOW: Band = Band { from: -1.0e9, to: 1.5, blend: 1.5 };
+
     vec![
         Layer {
             texture: "Grass001_1K-PNG".into(),
             tile_scale: 4.0,
             colour: [0.42, 0.45, 0.30],
             roughness: 0.95,
-            slope: Band { from: -1.0e9, to: 22.0, blend: 12.0 },
+            slope: NOT_STEEP,
             height: Band::ANY,
+            dip: NOT_HOLLOW,
         },
         Layer {
             texture: "Ground048_1K-PNG".into(),
             tile_scale: 4.0,
             colour: [0.50, 0.44, 0.34],
             roughness: 0.92,
-            slope: Band { from: 22.0, to: 36.0, blend: 12.0 },
+            slope: NOT_STEEP,
             height: Band::ANY,
+            dip: HOLLOW,
         },
         Layer {
             texture: "Rock020_1K-PNG".into(),
             tile_scale: 4.0,
             colour: [0.48, 0.46, 0.44],
             roughness: 0.8,
-            slope: Band { from: 36.0, to: 1.0e9, blend: 12.0 },
+            slope: STEEP,
             height: Band::ANY,
+            dip: Band::ANY,
         },
     ]
 }
@@ -1536,7 +1611,7 @@ mod tests {
                 let north = terrain.height_at(ix, iz - 1);
                 let south = terrain.height_at(ix, iz + 1);
                 let normal = Vec3::new(west - east, 2.0 * grid.spacing, south - north).normalize();
-                if let Some(index) = surface_of(&layers, normal.y, y) {
+                if let Some(index) = surface_of(&layers, normal.y, y, terrain.dip_at(ix, iz)) {
                     seen[index] += 1;
                 }
             }
@@ -1550,11 +1625,80 @@ mod tests {
         }
     }
 
+    /// A hollow reads as a hollow, a ridge as a ridge, and a plane as neither.
+    ///
+    /// [`Terrain::dip_at`] is the one input to the look that is not a property of the point, so its
+    /// sign is the whole rule: get it backwards and dirt goes on every hilltop.
+    #[test]
+    fn a_dip_is_measured_against_the_ground_around_it() {
+        let flat = Terrain::new(128.0, 128.0, 1.0, -20.0, 20.0).unwrap();
+        let middle = flat.grid.nx / 2;
+        assert!(flat.dip_at(middle, middle).abs() < 1.0e-3, "level ground is not a hollow");
+
+        // A bowl and a dome of the same size, built from the same shape with the sign flipped.
+        // Fourteen metres across, so that the four samples `dip_at` reaches for at twelve are out
+        // near the rim: a feature much wider than the span it is measured over is, correctly, not
+        // measured as one.
+        for (sign, what) in [(-1.0_f32, "a bowl"), (1.0, "a dome")] {
+            let mut terrain = flat.clone();
+            let grid = terrain.grid;
+            for iz in 0..grid.nz {
+                for ix in 0..grid.nx {
+                    let here = grid.world_of(ix, iz);
+                    let y = sign * 8.0 * falloff(here.length_squared(), 14.0);
+                    let index = grid.index(ix, iz);
+                    terrain.heights[index] = grid.quantise(y);
+                }
+            }
+            let dip = terrain.dip_at(middle, middle);
+            assert!(
+                dip * -sign > 1.0,
+                "the middle of {what} measured a dip of {dip:.2} m",
+            );
+        }
+    }
+
+    /// Dirt only ever lands somewhere that is genuinely lower than what surrounds it.
+    ///
+    /// The rule the middle layer exists for, checked against the map rather than against itself:
+    /// every sample where `Ground048` wins is asked whether it really sits in a hollow. Before this
+    /// the middle layer was a *slope* band, and it covered a fifth of the map — every hillside
+    /// steeper than a gentle one, which is not a place dirt collects and did not look like one.
+    #[test]
+    fn dirt_only_lands_where_the_ground_is_lower_than_its_surroundings() {
+        let terrain = default_terrain();
+        let layers = default_layers();
+        let grid = terrain.grid;
+        let dirt = 1;
+        let mut found = 0;
+        for iz in (1..grid.nz - 1).step_by(4) {
+            for ix in (1..grid.nx - 1).step_by(4) {
+                let here = grid.world_of(ix, iz);
+                let east = terrain.height_at(ix + 1, iz);
+                let west = terrain.height_at(ix - 1, iz);
+                let north = terrain.height_at(ix, iz - 1);
+                let south = terrain.height_at(ix, iz + 1);
+                let normal = Vec3::new(west - east, 2.0 * grid.spacing, south - north).normalize();
+                let dip = terrain.dip_at(ix, iz);
+                let y = terrain.height_over(here.x, here.y);
+                if surface_of(&layers, normal.y, y, dip) == Some(dirt) {
+                    found += 1;
+                    assert!(
+                        dip > 0.0,
+                        "dirt won at {here} on ground {dip:.2} m below its surroundings",
+                    );
+                }
+            }
+        }
+        assert!(found > 0, "the hollow rule never fires on the built-in map");
+    }
+
     /// The rules cover everything, so no pixel falls through them.
     ///
     /// The shader paints a point outside every band bright magenta on purpose — a gap should look
     /// like a gap rather than like unlit ground. This is what says the default set has none, over
-    /// every slope a surface can have and every height the map's own range allows.
+    /// every slope a surface can have, every height the map's own range allows, and every hollow
+    /// and ridge from ten metres of either.
     #[test]
     fn the_default_rules_leave_no_gap() {
         let layers = default_layers();
@@ -1562,18 +1706,27 @@ mod tests {
         while slope <= 90.0 {
             let mut y = DEFAULT_MIN_Y;
             while y <= DEFAULT_MAX_Y {
-                let total: f32 = layers.iter().map(|layer| layer.weight(slope, y)).sum();
-                assert!(total > 1.0e-3, "no layer covers a {slope:.0}° surface at y = {y:.0}");
+                let mut dip = -10.0;
+                while dip <= 10.0 {
+                    let total: f32 = layers.iter().map(|l| l.weight(slope, y, dip)).sum();
+                    assert!(
+                        total > 1.0e-3,
+                        "no layer covers a {slope:.0}° surface at y = {y:.0}, dip {dip:.0} m",
+                    );
+                    dip += 0.5;
+                }
                 y += 1.0;
             }
             slope += 0.5;
         }
     }
 
-    /// A band's edges are linear and meet at one, so two layers sharing an edge never dip.
+    /// Two layers sharing an edge sum to one all the way across it, so the seam never dips.
     ///
-    /// The reason the fade is linear rather than a smoothstep: adjacent bands then sum to exactly
-    /// one across their overlap, and the ground does not darken in the seam between them.
+    /// The property that the centred fade exists for. It survives the fade being a smoothstep
+    /// because a smoothstep is symmetric about its middle — which is worth a test of its own
+    /// rather than a claim, since it is the one thing that would break if the curve were ever
+    /// swapped for one that is not.
     #[test]
     fn two_bands_sharing_an_edge_sum_to_one() {
         let low = Band { from: -100.0, to: 30.0, blend: 10.0 };

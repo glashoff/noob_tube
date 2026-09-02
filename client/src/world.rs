@@ -105,6 +105,7 @@ fn ground_mesh(terrain: &Terrain, tx: u32, tz: u32) -> Mesh {
     let mut positions = Vec::with_capacity(wide * deep);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(wide * deep);
     let mut uvs = Vec::with_capacity(wide * deep);
+    let mut dips = Vec::with_capacity(wide * deep);
 
     for row in 0..=down {
         for column in 0..=across {
@@ -121,6 +122,14 @@ fn ground_mesh(terrain: &Terrain, tx: u32, tz: u32) -> Mesh {
             let normal = Vec3::new(west - east, 2.0 * step as f32 * grid.spacing, south - north);
             normals.push(normal.normalize().into());
             uvs.push([here.x, here.y]);
+            // How far this point sits below the ground around it, which is the third thing the
+            // shader derives the surface from. It rides in the second uv set because that is a
+            // slot the standard vertex shader already carries through to the fragment stage —
+            // adding a channel of my own would mean replacing that shader whole, to hand over one
+            // float. It belongs here rather than in a texture for the same reason the normal does:
+            // it is a function of the height field, so a tile that rebuilds its mesh rebuilds this
+            // in the same pass, and the two can never disagree about the ground they describe.
+            dips.push([terrain.dip_at(ix, iz), 0.0]);
         }
     }
 
@@ -143,6 +152,7 @@ fn ground_mesh(terrain: &Terrain, tx: u32, tz: u32) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, dips)
     .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
