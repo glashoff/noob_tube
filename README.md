@@ -2661,11 +2661,11 @@ started it. An edge would need last tick's input to find, which a replayed tick 
 dropped packet would lose; a held flag replays exactly, so flight survives a rollback like anything
 else on `PlayerInput`.
 
-Speed is a **notch into a table** rather than a float on the wire: 0.5 m/s for setting a ramp end
-down, 64 m/s for crossing the map to look back at it, in seven doubling steps with none wasted on a
-speed nobody would pick. One number for every direction, vertical included — up and forward cost the
-same, which the tests hold for every notch and every diagonal, for the same reason the walking
-diagonals are normalised.
+Speed is **one constant, not a setting**. There was a wheel notch on it for an afternoon and it was
+a second number to watch for a gain nobody wanted: the thing an author adjusts while flying over
+ground they are shaping is the brush, and the wheel is better spent there. One number for every
+direction, vertical included — up and forward cost the same, which the tests hold for every
+diagonal, for the same reason the walking diagonals are normalised.
 
 #### Saying what the number keys do
 
@@ -2680,8 +2680,10 @@ than ten empty boxes promising keys that do nothing.
 
 Building it turned up a smaller thing worth fixing: the lift brush and the smoothing brush shared
 one strength, in two different units. Choosing how fast a hill grows lost that choice the moment the
-smoothing brush was picked up. They are two numbers now, shift and the wheel change whichever one
-the tool in hand actually reads, and each slot shows what it is set to.
+smoothing brush was picked up. They are two numbers now — **the wheel sizes the brush and shift and
+the wheel set its strength**, whichever number the tool in hand actually reads — and both the slot
+and the line above the readout say what it is set to. A setting nobody can find is a setting that is
+not there, which is how this one was found: by being asked where it was.
 
 #### Still to come
 

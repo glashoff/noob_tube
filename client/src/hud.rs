@@ -334,8 +334,8 @@ fn update_flight_line(
     *visible = if player.flying { Visibility::Visible } else { Visibility::Hidden };
     if player.flying {
         text.0 = format!(
-            "flying {:.1} m/s   wheel to change, space up, ctrl down, F to land",
-            noob_tube_shared::movement::fly_speed(player.fly_notch),
+            "flying {:.0} m/s   space up, ctrl down, F to land",
+            noob_tube_shared::movement::FLY_SPEED,
         );
     }
 }

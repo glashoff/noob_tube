@@ -359,7 +359,13 @@ pub fn readout(chisel: &Chisel) -> String {
             if chisel.anchor.is_some() { "click the far end".into() } else { "click one end".into() }
         }
     };
-    format!("sculpt: {tool}, {:.1} m brush, {extra}", chisel.radius)
+    // The two bindings spelled out, because a setting nobody can find is a setting that is not
+    // there. The wheel is free of everything else while a brush is in hand, which is what lets one
+    // wheel carry both.
+    format!(
+        "sculpt: {tool}, {extra}   |   wheel: {:.1} m brush   shift+wheel: strength",
+        chisel.radius,
+    )
 }
 
 /// Update: says what the number keys are bound to, for the bar that shows them.

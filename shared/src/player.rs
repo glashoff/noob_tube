@@ -48,8 +48,6 @@ pub struct PlayerInput {
     /// That is the same shape [`crouch`](Self::crouch) already has, and it is what makes flight
     /// survive a rollback: replaying the tick replays the mode.
     pub flying: bool,
-    /// How fast, as an index into [`FLY_SPEEDS`]. See [`fly_speed`].
-    pub fly_notch: u8,
     /// Horizontal look angle in radians. Movement is relative to it.
     pub yaw: f32,
     /// Vertical look angle in radians. Does not affect movement, but travels with the input so the
@@ -297,7 +295,7 @@ impl PlayerState {
         );
         // Normalised whole, not per axis, so up-and-forward is the same speed as forward — the
         // same reason `local_direction` normalises the diagonals.
-        self.velocity = wish.normalize_or_zero() * fly_speed(input.fly_notch);
+        self.velocity = wish.normalize_or_zero() * FLY_SPEED;
 
         let wanted = self.velocity * dt;
         self.position += level.sweep_capsule(self.position, wanted, self.crouching);
@@ -478,13 +476,13 @@ mod tests {
     fn the_jump_and_crouch_keys_are_the_lift() {
         let mut app = floor_app();
         let start = PlayerState { position: Vec3::new(0.0, 20.0, 0.0), ..default() };
-        let speed = fly_speed(FLY_NOTCH);
+        let speed = FLY_SPEED;
 
-        let up = PlayerInput { flying: true, fly_notch: FLY_NOTCH, jump: true, ..default_input() };
+        let up = PlayerInput { flying: true, jump: true, ..default_input() };
         let state = run(&mut app, start, up, 64);
         assert!((state.position.y - (20.0 + speed)).abs() < 0.05, "{:?}", state.position);
 
-        let down = PlayerInput { flying: true, fly_notch: FLY_NOTCH, crouch: true, ..default_input() };
+        let down = PlayerInput { flying: true, crouch: true, ..default_input() };
         let state = run(&mut app, start, down, 64);
         assert!((state.position.y - (20.0 - speed)).abs() < 0.05, "{:?}", state.position);
 
@@ -493,29 +491,26 @@ mod tests {
         assert!(!state.crouching, "a descending player crouched");
     }
 
-    /// One speed in every direction, and the notch is what sets it.
+    /// One speed, whichever way it is pointed.
     ///
     /// Climbing while going forward has to cover the same ground as either alone, for the reason
     /// the diagonals are normalised: a builder should not learn to fly at 45° because it is faster.
     #[test]
-    fn a_notch_is_one_speed_whichever_way_it_is_pointed() {
+    fn flight_is_one_speed_whichever_way_it_is_pointed() {
         let mut app = floor_app();
         let start = PlayerState { position: Vec3::new(0.0, 40.0, 0.0), ..default() };
-        for notch in 0..FLY_SPEEDS.len() as u8 {
-            let expected = fly_speed(notch);
-            for input in [
-                PlayerInput { forward: true, ..default_input() },
-                PlayerInput { jump: true, ..default_input() },
-                PlayerInput { forward: true, right: true, jump: true, ..default_input() },
-            ] {
-                let input = PlayerInput { flying: true, fly_notch: notch, ..input };
-                let state = run(&mut app, start, input, 64);
-                let travelled = state.position.distance(start.position);
-                assert!(
-                    (travelled - expected).abs() < expected * 0.02,
-                    "notch {notch} went {travelled} m in a second, not {expected}",
-                );
-            }
+        for input in [
+            PlayerInput { forward: true, ..default_input() },
+            PlayerInput { jump: true, ..default_input() },
+            PlayerInput { forward: true, right: true, jump: true, ..default_input() },
+        ] {
+            let input = PlayerInput { flying: true, ..input };
+            let state = run(&mut app, start, input, 64);
+            let travelled = state.position.distance(start.position);
+            assert!(
+                (travelled - FLY_SPEED).abs() < FLY_SPEED * 0.02,
+                "flight went {travelled} m in a second, not {FLY_SPEED}",
+            );
         }
     }
 
@@ -525,7 +520,7 @@ mod tests {
     fn the_ground_still_stops_a_flyer() {
         let mut app = floor_app();
         let start = PlayerState { position: Vec3::new(0.0, 4.0, 0.0), ..default() };
-        let down = PlayerInput { flying: true, crouch: true, fly_notch: 6, ..default_input() };
+        let down = PlayerInput { flying: true, crouch: true, ..default_input() };
         let state = run(&mut app, start, down, 64);
         assert!(state.position.y > -SKIN, "a flyer sank through the floor: {:?}", state.position);
     }

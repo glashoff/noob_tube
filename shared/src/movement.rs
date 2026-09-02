@@ -90,29 +90,17 @@ pub const EYE_HEIGHT: f32 = 1.59;
 pub const CROUCH_EYE_HEIGHT: f32 = 1.10;
 
 
-/// How fast a flying player moves, by notch.
+/// How fast a flying player moves, in every direction including up.
 ///
-/// A table rather than a float on the wire, and rather than a continuous multiplier. Flight is a
-/// building tool: what an author wants is to be able to say "the slow one" and get the same slow
-/// one every time — 0.5 m/s for setting a ramp end down, 64 m/s for crossing the map to look at it
-/// from the other side. Doubling steps mean six notches cover both without a single one being
-/// wasted on a speed nobody would pick.
+/// One number, not a setting. Flight is a way of looking at ground you are shaping, and the thing
+/// an author adjusts while doing that is the brush — a second adjustable speed would be another
+/// number to keep an eye on for a gain nobody asked for. A little above a run, which is fast enough
+/// to get somewhere and slow enough to stop where you meant to.
 ///
 /// One number for every direction, vertical included: the point of flight is that up and forward
-/// cost the same, and an author who has just set the speed for climbing over a ridge does not want
-/// a second number for going along it.
-pub const FLY_SPEEDS: [f32; 7] = [0.5, 1.0, 2.0, 4.0, 8.0, 24.0, 64.0];
-
-/// The notch flight starts on: 4 m/s, a little under a walk, which is the speed at which a hillside
-/// can actually be looked at.
-pub const FLY_NOTCH: u8 = 3;
-
-/// How fast a flying player moves at this notch, clamped rather than checked: the notch travels on
-/// the wire, and a number out of range is a client's business to be wrong about, not a reason to
-/// reject a tick.
-pub fn fly_speed(notch: u8) -> f32 {
-    FLY_SPEEDS[(notch as usize).min(FLY_SPEEDS.len() - 1)]
-}
+/// cost the same, and there is no reason for climbing over a ridge to be a different speed from
+/// going along it.
+pub const FLY_SPEED: f32 = 8.0;
 
 #[cfg(test)]
 mod tests {
