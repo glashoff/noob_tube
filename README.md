@@ -2508,8 +2508,9 @@ bandwidth and alarming log noise, and a bigger map makes it worse rather than be
 #### Maps, and the menu in front of them
 
 Terrain is the first thing here that is *content* rather than constants, so it had to arrive with
-the map management this game did not have — a sculpt you cannot save is a demo. **F2** opens a
-modal menu: what maps there are, which one is being played, load, and a form to make another.
+the map management this game did not have — a sculpt you cannot save is a demo. The menu carries
+it: what maps there are, which one is being played, load, save, and a form to make another. **F2**
+jumps straight to it from the game.
 
 A map is a manifest and a blob, and only one of them is binary. 66k samples as text is some 400 KB
 of digits and a slow parse, and nobody hand-edits a height field; everything *else* about a map is a
@@ -2537,11 +2538,10 @@ range and that is only y = 0 if the author chose a symmetric one. It reads the h
 rather than casting rays: the collider for the new map does not exist yet, being built from the
 resource the switch has just written, one system later.
 
-The menu takes the keyboard while it is up, and every command in it is a function key or a modifier
-combination. That is not decoration — the fields take typing, so any plain letter used as a command
-would be a letter that could not appear in a map name. Commands are read off the *physical* key and
-only text off the logical one, which is how the first version failed: `Tab` and `Backspace` matched
-on `logical_key` did nothing at all, silently, and the typing simply went to the wrong field.
+The menu takes the keyboard while it is up, which is what lets its fields hold letters at all.
+Commands are read off the *physical* key and only text off the logical one, and that distinction is
+how the first version failed: `Tab` and `Backspace` matched on `logical_key` did nothing at all,
+silently, and the typing simply went to the wrong field.
 
 Verified against two processes: made a map, switched everybody to it, restarted the server, found
 it in the list, loaded it, and saved over it. A 128×64 m map at 2 m spacing arrives as 65×33
@@ -2600,6 +2600,67 @@ Verified against two processes: a stroke reached the server, was stamped, came b
 raised the ground 6.5 m at the brush and 5.4 m under the player — who rode up with it and then slid
 off the side, because a 6.5 m cone in an 8 m brush is steeper than the slope limit. Then the menu
 said "unsaved", and saving under a name wrote a file with 21 359 distinct heights in it.
+
+#### The menu is up exactly when the pointer is free
+
+Not a key that opens a panel and another that shuts it. **The menu being on screen and the game not
+having the mouse are one state**, so there is no combination of them to get wrong: alt-tabbing away
+releases the pointer and raises the menu, *Resume* takes the pointer and lowers it, and there is no
+way to be looking at a menu the game is still reading the keyboard past. Click-to-grab went with it,
+and with click-to-grab went the whole apparatus that existed to keep a click on an inspector panel
+from capturing the mouse.
+
+It is a **tree of small dialogs** rather than one page of everything: a root with two entries, and
+each entry that needs details opens a page asking for exactly those — new map, load, save, save as.
+A page knows its parent, so Escape means "back" and means it once per level, and there is a test
+that every page leads home. That is worth a test rather than a glance, because a page whose parent
+were itself would trap a player behind a dialog with the pointer released and the game unreachable.
+
+**Mouse and keyboard run over one model.** A page is a list of rows and a selection; hovering moves
+the selection, clicking activates the row under the pointer, the arrows move it and Enter activates
+it. One code path, so the two cannot come to disagree about what is selected or what a row does —
+and typing goes into the selected row only when that row is a field, which is what lets one page
+hold a form and its buttons without a second idea of focus.
+
+One thing had to be handled that a keyboard menu never needed: the button that takes the pointer
+back is under the same finger as the trigger, and the frame after it grabs, a still-held button is
+indistinguishable from a shot. The click that resumed is swallowed until it is let go.
+
+#### Leaving the ground
+
+**F flies.** Space goes up, Ctrl goes down, and nothing else acts on you at all: the velocity *is*
+the intent, so there is no gravity to fall under, no acceleration to ramp through and nothing left
+over when the keys are let go. A flyer stops where they stop, which is what makes it possible to
+hold a position over a hillside and work on it. It is still solid — the sweep is the one walking
+uses, deliberately not noclip, because ground you can pass through is ground you cannot judge the
+shape of.
+
+The mode travels as a **held input**, the shape `crouch` already has, rather than as the edge that
+started it. An edge would need last tick's input to find, which a replayed tick does not have and a
+dropped packet would lose; a held flag replays exactly, so flight survives a rollback like anything
+else on `PlayerInput`.
+
+Speed is a **notch into a table** rather than a float on the wire: 0.5 m/s for setting a ramp end
+down, 64 m/s for crossing the map to look back at it, in seven doubling steps with none wasted on a
+speed nobody would pick. One number for every direction, vertical included — up and forward cost the
+same, which the tests hold for every notch and every diagonal, for the same reason the walking
+diagonals are normalised.
+
+#### Saying what the number keys do
+
+A row of slots along the bottom, one per digit, the one in hand lit — `webgame`'s hotbar, and every
+other game's, for the reason they all have one: a key with a number on it is only usable if you can
+see what the number means without stopping to remember.
+
+The bar **shows bindings rather than owning them**. It is filled each frame by whoever the digits
+currently belong to, which today is the sculpting module — the same file that *reads* them, so a
+label and the key that produces it are one fact in one place. Nothing bound, nothing drawn, rather
+than ten empty boxes promising keys that do nothing.
+
+Building it turned up a smaller thing worth fixing: the lift brush and the smoothing brush shared
+one strength, in two different units. Choosing how fast a hill grows lost that choice the moment the
+smoothing brush was picked up. They are two numbers now, shift and the wheel change whichever one
+the tool in hand actually reads, and each slot shows what it is set to.
 
 #### Still to come
 

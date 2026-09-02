@@ -460,18 +460,22 @@ fn operate(
     cursor: Option<Single<&mut CursorOptions, With<PrimaryWindow>>>,
     sender: Option<Single<&mut MessageSender<MapRequest>>>,
 ) {
-    // A shortcut into the part of the tree that gets used, from inside the game. A function key
-    // because the fields take typing, and any letter used as a command is a letter that cannot be
-    // typed into a map name.
+    // Two ways in from the game. Escape is the way out of anything, and here it is also the way
+    // back — it gives the pointer up, and a free pointer *is* the menu. F2 is a shortcut into the
+    // part of the tree that gets used, and a function key because the fields take typing: any
+    // letter used as a command is a letter that cannot be typed into a map name.
+    let back = keys.just_pressed(KeyCode::Escape);
     let shortcut = keys.just_pressed(KeyCode::F2);
     if !menu.open {
         // Anything typed while it was shut belongs to the game, not to a map name.
         typed.clear();
-        if shortcut && let Some(cursor) = cursor {
+        if (back || shortcut) && let Some(cursor) = cursor {
             let mut cursor = cursor.into_inner();
             cursor.grab_mode = CursorGrabMode::None;
             cursor.visible = true;
-            menu.go(Page::Map);
+            // Escape opens the root, because that is what backing out of the game means; F2 opens
+            // the page it is a shortcut to.
+            menu.go(if shortcut { Page::Map } else { Page::Main });
         }
         return;
     }
@@ -805,6 +809,118 @@ fn take_the_keyboard(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An app with the menu's own systems and a window to hang a cursor on.
+    ///
+    /// The plugin is not used: it orders itself against systems from the rest of the client, and
+    /// what is under test here is the four systems and the one rule tying them to the pointer.
+    fn menu_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<MapMenu>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_message::<KeyboardInput>()
+            .add_systems(Startup, spawn_dialog)
+            .add_systems(Update, (follow_the_cursor, operate, rebuild, paint).chain());
+        app.world_mut().spawn((PrimaryWindow, CursorOptions::default()));
+        app
+    }
+
+    fn grab_mode(app: &mut App) -> CursorGrabMode {
+        app.world_mut()
+            .query_filtered::<&CursorOptions, With<PrimaryWindow>>()
+            .single(app.world())
+            .expect("the test window has a cursor")
+            .grab_mode
+    }
+
+    fn set_grab(app: &mut App, mode: CursorGrabMode) {
+        let mut cursors = app.world_mut().query_filtered::<&mut CursorOptions, With<PrimaryWindow>>();
+        cursors.single_mut(app.world_mut()).expect("the test window has a cursor").grab_mode = mode;
+    }
+
+    fn on_screen(app: &mut App) -> Visibility {
+        *app.world_mut()
+            .query_filtered::<&Visibility, With<Dialog>>()
+            .single(app.world())
+            .expect("the dialog was never spawned")
+    }
+
+    /// Presses a key both ways it is read: as a button, which is how the game reads it while the
+    /// menu is shut, and as a keyboard event, which is how the menu reads it while it is up. In a
+    /// real client winit produces both from one keypress; here they have to be said twice.
+    fn tap(app: &mut App, key: KeyCode) {
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(key);
+        let window = app
+            .world_mut()
+            .query_filtered::<Entity, With<PrimaryWindow>>()
+            .single(app.world())
+            .expect("the test window exists");
+        app.world_mut().write_message(KeyboardInput {
+            key_code: key,
+            logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
+            state: ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window,
+        });
+        app.update();
+        // No `InputPlugin` here to do it, and a key left pressed would go on being *just* pressed.
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().clear();
+    }
+
+    /// The one rule the whole menu rests on, and the one that cannot be checked by reading: a free
+    /// pointer and a menu on screen are the same state.
+    ///
+    /// Worth an app rather than a unit test on the model, because what would break it is a system
+    /// that does not run — a `Single` that matches nothing, an ordering that paints before the
+    /// cursor is read — and none of that is visible in the functions themselves.
+    #[test]
+    fn the_menu_is_up_exactly_when_the_pointer_is_free() {
+        let mut app = menu_app();
+        app.update();
+        assert!(app.world().resource::<MapMenu>().open, "the menu was not up with a free pointer");
+        assert_eq!(on_screen(&mut app), Visibility::Visible);
+
+        set_grab(&mut app, CursorGrabMode::Locked);
+        app.update();
+        assert!(!app.world().resource::<MapMenu>().open, "the menu stayed up with the pointer taken");
+        assert_eq!(on_screen(&mut app), Visibility::Hidden);
+    }
+
+    /// Escape is the way out of the game and the way out of the menu, and it is the same key both
+    /// ways round. Playing, it gives the pointer back; at the root, it takes it again.
+    #[test]
+    fn escape_goes_both_ways() {
+        let mut app = menu_app();
+        app.update();
+
+        // Into the game, the way Resume does it.
+        set_grab(&mut app, CursorGrabMode::Locked);
+        app.update();
+
+        tap(&mut app, KeyCode::Escape);
+        assert_eq!(grab_mode(&mut app), CursorGrabMode::None, "escape did not give the pointer back");
+        app.update();
+        assert!(app.world().resource::<MapMenu>().open, "the menu did not come back with the pointer");
+        assert_eq!(app.world().resource::<MapMenu>().page, Page::Main, "escape opened a sub-page");
+
+        tap(&mut app, KeyCode::Escape);
+        assert_eq!(grab_mode(&mut app), CursorGrabMode::Locked, "escape at the root did not resume");
+    }
+
+    /// F2 is the shortcut, and it lands where it says it lands.
+    #[test]
+    fn f2_opens_the_map_page_from_the_game() {
+        let mut app = menu_app();
+        app.update();
+        set_grab(&mut app, CursorGrabMode::Locked);
+        app.update();
+
+        tap(&mut app, KeyCode::F2);
+        assert_eq!(grab_mode(&mut app), CursorGrabMode::None);
+        assert_eq!(app.world().resource::<MapMenu>().page, Page::Map);
+    }
 
     /// The form has to start in a state that would be accepted, or the first thing anybody does
     /// with it is read an error message. These are the built-in map's own numbers.
