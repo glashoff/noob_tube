@@ -439,6 +439,9 @@ pub(crate) fn sample_input(
         // The same button as the trigger, and deliberately not the same field: what a driver on
         // their roof is asking for is not a shot. See `vehicle::right_flipped_vehicles`.
         righting: firing,
+        // Its own key, and not the trigger: what this asks for is not a shot and not a lean on the
+        // wheel either. See `vehicle::lift_stuck_vehicles`.
+        recover: keys.pressed(KeyCode::KeyQ),
         interact: keys.pressed(KeyCode::KeyE),
         flying: player.flying,
         yaw: player.yaw,

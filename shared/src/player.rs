@@ -40,6 +40,16 @@ pub struct PlayerInput {
     /// two are suppressed by different rules — a driver whose gun is stowed or cannot bear is not
     /// firing, and is exactly the driver most likely to be upside down.
     pub righting: bool,
+    /// Asking for the vehicle to be picked up and set down again, level and clear of the ground.
+    ///
+    /// The blunt instrument, and a separate button from [`righting`](Self::righting) because it is
+    /// a separate thing to ask for. Righting leans on the vehicle until it comes up, which needs
+    /// room to come up in; this one does not care what the vehicle is wedged against. A driver
+    /// stuck on the wall of a ravine has been asking for the wrong one.
+    ///
+    /// Held like everything else here, and the vehicle's own cooldown is what turns holding it into
+    /// one rescue rather than flight by teleport.
+    pub recover: bool,
     /// Held rather than tapped, and latched by the client rather than found here.
     ///
     /// Flight is a mode, and a mode found from an *edge* would need last tick's input to find it —

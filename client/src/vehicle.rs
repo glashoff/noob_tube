@@ -221,6 +221,7 @@ impl Plugin for VehiclePlugin {
                     hold_the_course,
                     vehicle::drive_vehicles::<With<Predicted>>,
                     vehicle::right_flipped_vehicles::<With<Predicted>>,
+                    vehicle::lift_stuck_vehicles::<With<Predicted>>,
                 )
                     .chain()
                     // For the same reason the walking step waits: a predicted vehicle with no

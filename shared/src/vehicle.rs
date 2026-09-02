@@ -28,6 +28,8 @@ use bevy::ecs::query::QueryFilter;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::terrain::Ground;
+
 use crate::physics::{Layer, WORLD_GRAVITY};
 use crate::player::PlayerInput;
 
@@ -406,6 +408,9 @@ pub struct Controls {
     pub handbrake: bool,
     /// The driver asking to be put back on the wheels. See [`right_flipped_vehicles`].
     pub righting: bool,
+    /// The driver asking to be picked up and set down clear of the ground. See
+    /// [`lift_stuck_vehicles`].
+    pub recover: bool,
     /// Where the driver is asking the front wheels to point, which is where `steer` is heading.
     ///
     /// The intent rather than the state, and the two are different for up to a fifth of a second at
@@ -421,6 +426,7 @@ impl Controls {
         self.throttle = (input.forward as i32 - input.backward as i32) as f32;
         self.handbrake = input.jump;
         self.righting = input.righting;
+        self.recover = input.recover;
         self.wanted_steer = (input.right as i32 - input.left as i32) as f32 * spec.max_steer;
         self.ease(spec, dt);
     }
@@ -482,6 +488,12 @@ pub struct Righting {
     /// Seconds the driver has been asking for this, while past [`FLIPPED_COSINE`]. Reset to zero
     /// the moment either stops being true.
     pub asked_for: f32,
+    /// Seconds left before [`lift_stuck_vehicles`] will pick this vehicle up again.
+    ///
+    /// What makes a held button one rescue instead of a hop every tick. It is a countdown rather
+    /// than the tick it last fired on, because a tick number means nothing to a client replaying
+    /// one — a countdown replays as itself.
+    pub resting: f32,
 }
 
 /// Everything a vehicle needs to exist as a physical body.
@@ -772,6 +784,89 @@ pub fn right_flipped_vehicles<F: QueryFilter + 'static>(
     }
 }
 
+/// Metres of clear air a rescued vehicle is given under it.
+///
+/// Enough that it lands on its wheels from the drop rather than settling out of a shape it was
+/// already caught in, and little enough that the landing is a bump rather than a crash. It is
+/// measured from the ground under the vehicle's own footprint, so a rescue on a slope clears the
+/// high side too.
+const RECOVER_LIFT: f32 = 3.0;
+
+/// Seconds before a rescue can be asked for again.
+///
+/// The button travels held, like everything else on a `PlayerInput`, so without this a driver
+/// leaning on it would be lifted every tick — flight, at sixty-four teleports a second. Long enough
+/// to land and see whether it worked, short enough not to feel like a punishment for pressing it.
+const RECOVER_REST: f32 = 2.0;
+
+/// FixedUpdate: puts a vehicle back on its wheels in the air above wherever it is standing.
+///
+/// [`right_flipped_vehicles`] is the mechanism that keeps its hands on the vehicle, and it needs
+/// two things this one does not: room to roll into, and a body that a torque can still turn. In the
+/// hills it reliably has neither — a buggy on its side halfway down a ravine is braced against the
+/// wall, and leaning on it harder only presses it further in. That is not a tuning problem. It is
+/// the wrong tool, applied at length.
+///
+/// So this is the other one, and it is deliberately blunt: same place on the map, level, clear of
+/// the ground, and not moving. There is **no test for being stuck**, and that is the point — every
+/// way of judging "stuck" is a guess of exactly the kind the torque already makes badly, and a
+/// driver pressing a key has already made the judgement themselves. Yaw is kept, because which way
+/// it was pointing is not what went wrong.
+///
+/// A **teleport**, which everything else in this file goes out of its way not to be. It is worth it
+/// here and nowhere else: the cost of a teleport is a rollback, once, at a moment the driver asked
+/// for and is watching for — against a vehicle that is otherwise out of the round. Both sides act
+/// on the same tick of the same held input, so the prediction and the server usually agree without
+/// anything crossing the wire; when a vehicle is handed to a new client mid-rescue they disagree
+/// once and the server's answer wins, which is the trade [`Righting`] already makes for its hold.
+/// What a rescue reads and writes: what it is, what is being asked of it, its cooldown, and the
+/// whole of its pose and motion — every part of which the rescue replaces outright.
+type Rescued = (
+    &'static VehicleKind,
+    &'static Controls,
+    &'static mut Righting,
+    &'static mut Position,
+    &'static mut Rotation,
+    &'static mut LinearVelocity,
+    &'static mut AngularVelocity,
+);
+
+pub fn lift_stuck_vehicles<F: QueryFilter + 'static>(
+    time: Res<Time<Fixed>>,
+    ground: Res<Ground>,
+    mut vehicles: Query<Rescued, F>,
+) {
+    let dt = time.delta_secs();
+
+    for (kind, controls, mut righting, mut position, mut rotation, mut speed, mut spin) in
+        vehicles.iter_mut()
+    {
+        righting.resting = (righting.resting - dt).max(0.0);
+        if !controls.recover || righting.resting > 0.0 {
+            continue;
+        }
+        let spec = kind.spec();
+        // The highest ground under its own footprint, so a rescue across a slope clears the uphill
+        // corner rather than burying it.
+        let at = position.0;
+        let mut surface = f32::MIN;
+        for (dx, dz) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            let corner = at + Vec3::new(dx * spec.half_extents.x, 0.0, dz * spec.half_extents.z);
+            surface = surface.max(ground.0.height_over(corner.x, corner.z));
+        }
+        position.0.y = surface + spec.ride_height() + RECOVER_LIFT;
+        // Yaw alone: `to_euler` gives the turn about Y that this rotation contains, and rebuilding
+        // from it is what drops the roll and pitch the vehicle was caught in.
+        let (yaw, _, _) = rotation.0.to_euler(EulerRot::YXZ);
+        rotation.0 = Quat::from_rotation_y(yaw);
+        // Nothing it was doing belongs to where it is now. A vehicle dropped in with the speed it
+        // had while wedged shoots off the moment it lands.
+        speed.0 = Vec3::ZERO;
+        spin.0 = Vec3::ZERO;
+        righting.resting = RECOVER_REST;
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -951,8 +1046,11 @@ mod tests {
         app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / HZ,
         )));
-        app.add_systems(FixedUpdate, (drive_vehicles::<()>, right_flipped_vehicles::<()>));
-        // The rescue runs where it runs for real: before the tick, on the message a sculpt writes.
+        app.add_systems(
+            FixedUpdate,
+            (drive_vehicles::<()>, right_flipped_vehicles::<()>, lift_stuck_vehicles::<()>).chain(),
+        );
+        // The lift after a sculpt runs where it runs for real: before the tick, on the message a sculpt writes.
         app.add_message::<crate::sculpt::GroundPatched>();
         app.add_systems(PreUpdate, crate::sculpt::lift_bodies_with_the_ground::<()>);
         app.update();
@@ -997,6 +1095,94 @@ mod tests {
 
     fn speed(app: &App, car: Entity) -> Vec3 {
         app.world().get::<LinearVelocity>(car).expect("a velocity").0
+    }
+
+    /// Wedges a vehicle: on its side, sunk into the ground, and pinned there.
+    ///
+    /// Not a pose a drive produces on purpose, and that is what makes it the right test — the whole
+    /// complaint is about the poses [`right_flipped_vehicles`] cannot get out of.
+    fn wedge(app: &mut App, car: Entity) {
+        let at = pose(app, car);
+        let ground = app.world().resource::<crate::terrain::Ground>().0.clone();
+        let mut entity = app.world_mut().entity_mut(car);
+        entity.insert(Position(Vec3::new(at.x, ground.height_over(at.x, at.z) - 0.5, at.z)));
+        entity.insert(Rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)));
+        entity.insert(LinearVelocity(Vec3::new(0.0, -6.0, 3.0)));
+        entity.insert(AngularVelocity(Vec3::new(1.0, 2.0, 3.0)));
+    }
+
+    fn ask_to_be_rescued(app: &mut App, car: Entity, yes: bool) {
+        app.world_mut().get_mut::<Controls>(car).expect("controls").recover = yes;
+    }
+
+    /// The rescue does the four things it promises, in one tick.
+    ///
+    /// Level, above the ground, still, and where it already was. Each of them is a separate way for
+    /// a driver to be no better off than before pressing the key: put back down on its side, put
+    /// back inside the hill, put down still travelling at the speed that wedged it, or put down
+    /// somewhere else entirely.
+    #[test]
+    fn a_rescued_vehicle_comes_back_level_clear_and_still() {
+        let mut app = map_app();
+        let car = park(&mut app, Vec3::new(60.0, 20.0, -40.0));
+        wedge(&mut app, car);
+        let before = pose(&app, car);
+
+        ask_to_be_rescued(&mut app, car, true);
+        app.update();
+
+        let at = pose(&app, car);
+        let ground = app.world().resource::<crate::terrain::Ground>().0.clone();
+        assert!(
+            (at.x - before.x).abs() < 0.01 && (at.z - before.z).abs() < 0.01,
+            "the rescue moved it from {before} to {at}",
+        );
+        assert!(
+            at.y > ground.height_over(at.x, at.z) + RECOVER_LIFT,
+            "it came back {:.2} m over ground at {:.2} m",
+            at.y,
+            ground.height_over(at.x, at.z),
+        );
+        let up = app.world().get::<Rotation>(car).expect("a rotation").0 * Vec3::Y;
+        assert!(up.y > 0.999, "it came back leaning: its roof points {up}");
+        assert!(speed(&app, car).length() < 0.5, "it came back at {} m/s", speed(&app, car).length());
+    }
+
+    /// Holding the key rescues once, not once a tick.
+    ///
+    /// The reason the cooldown exists: the button travels held, like every other input, so without
+    /// one a driver leaning on it would be re-placed sixty-four times a second and never come down.
+    /// This holds it for a second and asks whether the vehicle was allowed to fall.
+    #[test]
+    fn holding_the_rescue_key_is_one_rescue_and_not_flight() {
+        let mut app = map_app();
+        let car = park(&mut app, Vec3::new(60.0, 20.0, -40.0));
+        wedge(&mut app, car);
+        ask_to_be_rescued(&mut app, car, true);
+
+        app.update();
+        let lifted = pose(&app, car).y;
+        run(&mut app, 1.0);
+        let after = pose(&app, car).y;
+
+        assert!(after < lifted - 0.5, "held down, it hung at {after:.2} m rather than falling");
+    }
+
+    /// Nobody asking, nothing happens.
+    ///
+    /// `Controls::default()` asks for nothing, which is what an empty seat is reset to — so this is
+    /// also what says an abandoned wreck stays where it fell.
+    #[test]
+    fn a_vehicle_nobody_is_asking_about_is_left_where_it_lies() {
+        let mut app = map_app();
+        let car = park(&mut app, Vec3::new(60.0, 20.0, -40.0));
+        wedge(&mut app, car);
+        let before = pose(&app, car);
+
+        app.update();
+
+        let at = pose(&app, car);
+        assert!(at.y < before.y + 1.0, "it was picked up from {before} to {at} with nobody asking");
     }
 
     /// Drives one lap of a shape and reports the worst the chassis ever was *below* the ground.

@@ -124,6 +124,7 @@ fn main() {
                     move_props,
                     vehicle::drive_vehicles::<()>,
                     vehicle::right_flipped_vehicles::<()>,
+                    vehicle::lift_stuck_vehicles::<()>.run_if(resource_exists::<Ground>),
                 ),
             )
                 .chain(),
