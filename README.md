@@ -2750,6 +2750,35 @@ log, which is the only place either of them exists.
 Measured: 59 fps at ground level against 61 before, and 54 looking down at half the map from a
 hundred metres up.
 
+#### Writing down what somebody did
+
+**F9** records; `NOOB_TUBE_RECORD=<path>` starts one at launch; `NOOB_TUBE_REPLAY=<path>` plays it
+back. It exists because the two hardest bugs so far — a buried player, a swallowed vehicle — were
+both reported as *"it keeps happening"*, and the gap between that and a repro was the whole cost of
+fixing them.
+
+One JSON object per line, one line per fixed tick, so `grep`, `jq` and a text editor all work on a
+trace and nothing has to be written to read one. A line carries **the input and the result**: what
+was asked for that tick, and where the player and their vehicle ended up. Both halves, for different
+reasons — the input is what can be replayed, and the result is what says whether the replay
+reproduced anything. Modes are written **only on the ticks they change**, because a mode lasts
+thousands of ticks and the lines where one was switched are exactly the lines worth finding.
+
+The replay feeds each tick through `ScriptedInput`, the same door the harness and the bot go
+through, which is the whole reason that door exists. It will not reproduce a session exactly and the
+docs say so rather than letting somebody discover it: different server, different map state, nobody
+else in the file, and a different network. What it does instead is put the same gesture into a live
+world and **measure the drift** — displacement against displacement, not position against position,
+because the two runs start at different spawn points and two metres of that is a true statement
+about nothing.
+
+One thing the first replay taught, in 38 metres of drift with every key correct: `sample_input`
+takes yaw and pitch from the *player* rather than from the script, deliberately, so that a script
+can steer by writing them and leave the rest of the input alone. A replay that restored only the
+keys therefore walked the entire recording in whatever direction the client happened to be facing.
+With the angles restored the same run holds to 2.4 m over four seconds, and what remains is honest:
+different spawn, different obstacles, a vehicle whose pose is the server's.
+
 #### Still to come
 
 Steps 8 to 10 of the plan: placement; undo; and water. Step 11's rule set is done and its textures

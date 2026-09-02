@@ -32,6 +32,10 @@
 # question, so no per-file decision: the whole directory is in.
 !/assets/shaders/
 
+# Input traces. Written beside the binary by default, one a session, and none of them belongs in
+# the history — a recording is evidence about one afternoon, not a fact about the game.
+/*.jsonl
+
 # Byte-code from running the Python helpers in tools/
 __pycache__/
 

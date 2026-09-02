@@ -12,6 +12,10 @@ avian3d = { workspace = true }
 # are the first thing here to bring their own textures.
 bevy = { workspace = true, features = ["default", "jpeg"] }
 lightyear = { workspace = true }
+# The recording format is JSON lines, so that grep, jq and a text editor all work on a trace and
+# nothing has to be written to read one.
+serde = { workspace = true }
+serde_json = { workspace = true }
 # In-process inspector window. Its egui and bevy_egui versions are tied to this exact release,
 # so it moves in lockstep with Bevy just as bevy_remote does.
 bevy-inspector-egui = { version = "0.37", optional = true }

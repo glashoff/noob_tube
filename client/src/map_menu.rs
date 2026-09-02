@@ -485,11 +485,21 @@ fn spawn_dialog(windows: Query<(), With<PrimaryWindow>>, mut commands: Commands)
 ///
 /// Every request is answered, including the ones that fail, so a menu that asked for something and
 /// heard nothing back would be looking at a lost packet — which this channel does not have.
-fn hear_the_server(mut inbox: Query<&mut MessageReceiver<MapList>>, mut menu: ResMut<MapMenu>) {
+fn hear_the_server(
+    mut inbox: Query<&mut MessageReceiver<MapList>>,
+    mut menu: ResMut<MapMenu>,
+    mut recorder: ResMut<crate::recording::Recorder>,
+) {
     for mut receiver in inbox.iter_mut() {
         for list in receiver.receive() {
             if let Some(trouble) = &list.trouble {
                 warn!("the server refused a map request: {trouble}");
+            }
+            // A map switch changes the ground under everything, so it is exactly the kind of event
+            // a trace has to carry: without it a recording would show a player falling for no
+            // reason anybody reading it could see.
+            if list.current != menu.known.current {
+                recorder.note(format!("map is now {:?}", list.current));
             }
             menu.hear(list);
         }

@@ -53,7 +53,13 @@ impl Plugin for HudPlugin {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())
             .add_systems(
                 Startup,
-                (spawn_readout, spawn_frame_rate, spawn_chisel_line, spawn_flight_line),
+                (
+                    spawn_readout,
+                    spawn_frame_rate,
+                    spawn_chisel_line,
+                    spawn_flight_line,
+                    spawn_recording_line,
+                ),
             )
             .add_systems(
                 Update,
@@ -63,6 +69,7 @@ impl Plugin for HudPlugin {
                     toggle_readout,
                     update_chisel_line,
                     update_flight_line,
+                    update_recording_line,
                 ),
             );
     }
@@ -337,5 +344,52 @@ fn update_flight_line(
             "flying {:.0} m/s   space up, ctrl down, F to land",
             noob_tube_shared::movement::FLY_SPEED,
         );
+    }
+}
+
+/// The line that says a recording is running.
+#[derive(Component)]
+struct RecordingLine;
+
+/// Startup: top right, where nothing else is, if there is a screen.
+///
+/// Away from the other three on purpose. Those are about the moment; this is about the *session*,
+/// and it has to be visible from the corner of an eye for as long as the recording lasts — a
+/// recording nobody notices is either a session lost or a gigabyte nobody asked for.
+fn spawn_recording_line(window: Option<Single<Entity, With<Window>>>, mut commands: Commands) {
+    if window.is_none() {
+        return;
+    }
+    commands.spawn((
+        Name::from("Recording readout"),
+        RecordingLine,
+        Text::default(),
+        TextFont { font_size: bevy::text::FontSize::Px(FONT_SIZE), ..default() },
+        TextColor(Color::srgb(1.0, 0.45, 0.4)),
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(MARGIN),
+            top: Val::Px(MARGIN),
+            padding: UiRect::axes(Val::Px(PADDING * 1.4), Val::Px(PADDING)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+        Pickable::IGNORE,
+        Visibility::Hidden,
+    ));
+}
+
+/// Update: shows it while a recording is open.
+fn update_recording_line(
+    recorder: Res<crate::recording::Recorder>,
+    line: Option<Single<(&mut Text, &mut Visibility), With<RecordingLine>>>,
+) {
+    let Some(line) = line else {
+        return;
+    };
+    let (mut text, mut visible) = line.into_inner();
+    *visible = if recorder.running { Visibility::Visible } else { Visibility::Hidden };
+    if recorder.running {
+        text.0 = format!("REC {:.0} s   F9 stops", recorder.ticks as f32 / 64.0);
     }
 }
