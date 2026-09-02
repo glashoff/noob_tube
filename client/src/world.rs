@@ -8,7 +8,7 @@
 
 use bevy::prelude::*;
 use lightyear::prelude::{MessageReceiver, MessageSystems, Predicted};
-use noob_tube_shared::level::{self, CRATES, CRATE_HALF_EXTENT, RAMP_HALF_EXTENTS};
+use noob_tube_shared::level::{self, CRATE_HALF_EXTENT, RAMP_HALF_EXTENTS};
 use noob_tube_shared::sculpt::{self, GroundPatched, PendingEdits, TerrainEdit};
 use noob_tube_shared::terrain::{Ground, Terrain, TerrainBaseline};
 use noob_tube_shared::types::Authored;
@@ -33,6 +33,8 @@ impl Plugin for WorldPlugin {
                     adopt_the_map,
                     take_strokes,
                     level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
+                    level::build_the_props.run_if(resource_exists_and_changed::<Ground>),
+                    draw_the_props.run_if(resource_exists_and_changed::<Ground>),
                     sculpt::apply_due_edits.run_if(resource_exists::<Ground>),
                     sculpt::lift_with_the_ground::<With<Predicted>>
                         .run_if(resource_exists::<Ground>),
@@ -168,6 +170,15 @@ fn ground_mesh(terrain: &Terrain, tx: u32, tz: u32) -> Mesh {
 #[derive(Component, Reflect)]
 #[reflect(Component)]
 pub struct LevelRoot;
+
+/// What the map's own props hang under, so a map switch knows what to take down.
+///
+/// A component rather than a stored `Entity`, for the same reason [`LevelRoot`] is one: the
+/// drawing runs when the map arrives, which is long after the root was made, and a resource
+/// holding an id is a second place for it to be wrong.
+#[derive(Component, Reflect, Default)]
+#[reflect(Component)]
+pub struct PropsRoot;
 
 /// PreUpdate: takes the map the server sent and makes it this client's ground.
 ///
@@ -324,6 +335,54 @@ struct GroundTile {
 ///
 /// Keeping the two separate is deliberate — real levels use a simplified collision mesh, and
 /// building that split in now means no rework when actual geometry arrives.
+/// PreUpdate: draws the props the map places, and takes down the last map's.
+///
+/// The picture's half of [`level::build_the_props`], registered on the same condition and for the
+/// same reason. The two read the same marker list and the same ground, so the crate you can see
+/// and the crate you collide with cannot drift apart — which is the property the old shared
+/// `CRATES` constant bought, kept while the positions become content.
+fn draw_the_props(
+    ground: Res<Ground>,
+    root: Single<Entity, With<PropsRoot>>,
+    standing: Query<Entity, With<DrawnProp>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    for entity in standing.iter() {
+        commands.entity(entity).despawn();
+    }
+    let crates: Vec<_> =
+        ground.0.markers.iter().filter(|marker| marker.kind == level::CRATE).collect();
+    if crates.is_empty() {
+        return;
+    }
+    // One mesh and one material for the lot: they are the same box in the same colour, and a
+    // handle each would be a copy each.
+    let mesh = meshes.add(Cuboid::new(
+        CRATE_HALF_EXTENT * 2.0,
+        CRATE_HALF_EXTENT * 2.0,
+        CRATE_HALF_EXTENT * 2.0,
+    ));
+    let material = materials.add(Color::srgb(0.55, 0.4, 0.3));
+    for (index, marker) in crates.into_iter().enumerate() {
+        commands.spawn((
+            Name::from(format!("Crate {index}")),
+            DrawnProp,
+            Authored,
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from_translation(marker.where_it_stands(&ground.0))
+                .with_rotation(marker.rotation),
+            ChildOf(*root),
+        ));
+    }
+}
+
+/// One drawn prop, so the next map's rebuild knows which meshes were the last map's.
+#[derive(Component)]
+struct DrawnProp;
+
 fn spawn_ground(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -340,15 +399,14 @@ fn spawn_ground(
             Visibility::default(),
         ))
         .id();
-    let props = commands
-        .spawn((
-            Name::from("Props"),
-            Authored,
-            Transform::IDENTITY,
-            Visibility::default(),
-            ChildOf(level),
-        ))
-        .id();
+    commands.spawn((
+        Name::from("Props"),
+        PropsRoot,
+        Authored,
+        Transform::IDENTITY,
+        Visibility::default(),
+        ChildOf(level),
+    ));
 
     // The ground is not here. It is the map, and the map comes from the server — see
     // `adopt_the_map`, which hangs the tiles under this same root the moment it arrives.
@@ -364,25 +422,6 @@ fn spawn_ground(
         Transform::from_translation(ramp_at).with_rotation(ramp_facing),
         ChildOf(level),
     ));
-
-    // A few boxes to bump into. The positions come from `shared`, which is also what the collision
-    // world is built from, so the visible crate and the one you collide with cannot drift apart.
-    let box_mesh = meshes.add(Cuboid::new(
-        CRATE_HALF_EXTENT * 2.0,
-        CRATE_HALF_EXTENT * 2.0,
-        CRATE_HALF_EXTENT * 2.0,
-    ));
-    let box_material = materials.add(Color::srgb(0.55, 0.4, 0.3));
-    for (i, centre) in CRATES.into_iter().enumerate() {
-        commands.spawn((
-            Name::from(format!("Crate {i}")),
-            Authored,
-            Mesh3d(box_mesh.clone()),
-            MeshMaterial3d(box_material.clone()),
-            Transform::from_translation(centre),
-            ChildOf(props),
-        ));
-    }
 
     commands.spawn((
         Name::from("Sun"),

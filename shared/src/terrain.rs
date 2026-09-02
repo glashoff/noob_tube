@@ -549,6 +549,9 @@ pub struct Terrain {
     pub heights: Vec<u16>,
     /// What the ground looks like, as rules rather than as pixels. See [`Layer`].
     pub layers: Vec<Layer>,
+    /// What has been placed on it. Not part of the ground — see terrain.md §7 — but map content
+    /// all the same, so it travels the same way the look does.
+    pub markers: Vec<Marker>,
 }
 
 impl Terrain {
@@ -566,7 +569,16 @@ impl Terrain {
             grid,
             water_y: None,
             layers: default_layers(),
+            markers: crate::level::default_markers(),
         })
+    }
+
+    /// The markers of one kind, in the order the map lists them.
+    ///
+    /// Order matters and is the file's: it is what makes "the second vehicle start" mean the same
+    /// thing on both sides and across a restart.
+    pub fn markers_of<'a>(&'a self, kind: &'a str) -> impl Iterator<Item = &'a Marker> + 'a {
+        self.markers.iter().filter(move |marker| marker.kind == kind)
     }
 
     /// The height at one sample, in metres.
@@ -651,7 +663,13 @@ impl Terrain {
             .chunks_exact(2)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
-        Ok(Self { grid, water_y, heights, layers: default_layers() })
+        Ok(Self {
+            grid,
+            water_y,
+            heights,
+            layers: default_layers(),
+            markers: crate::level::default_markers(),
+        })
     }
 
 }
@@ -771,7 +789,7 @@ impl Terrain {
             grid: self.grid,
             water_y: self.water_y,
             layers: self.layers.clone(),
-            markers: Vec::new(),
+            markers: self.markers.clone(),
         }
     }
 }
@@ -816,6 +834,10 @@ pub struct TerrainBaseline {
     /// server sends and what a map written before there were rules holds.
     #[serde(default)]
     pub layers: Vec<Layer>,
+    /// What stands on it. Empty means the default set, for the same reason and with one more: a map
+    /// with no player spawn is unplayable, so an empty list is never a state anybody authored.
+    #[serde(default)]
+    pub markers: Vec<Marker>,
 }
 
 impl TerrainBaseline {
@@ -827,6 +849,7 @@ impl TerrainBaseline {
             heights: terrain.encode(),
             pending: pending.to_vec(),
             layers: terrain.layers.clone(),
+            markers: terrain.markers.clone(),
         }
     }
 
@@ -840,6 +863,9 @@ impl TerrainBaseline {
         // An empty list is "whatever this build calls default" rather than "a map with no look":
         // there is no way to author a map with nothing on it, and a black world is a worse answer
         // to an old server than the default one.
+        if !self.markers.is_empty() {
+            terrain.markers = self.markers.clone();
+        }
         if !self.layers.is_empty() {
             terrain.layers = self.layers.clone();
         }
@@ -862,8 +888,12 @@ pub struct Manifest {
     /// Up to four, each naming an ordinary material asset. Empty until step four wants them.
     #[serde(default)]
     pub layers: Vec<Layer>,
-    /// What has been placed on the map. Empty until step eight wants them.
-    #[serde(default)]
+    /// What has been placed on the map.
+    ///
+    /// Through [`marker_file`], which is what gives the file its `yaw` shorthand. The manifest is
+    /// the only thing that goes through it, because the manifest is the only thing that is read by
+    /// people.
+    #[serde(default, with = "marker_file")]
     pub markers: Vec<Marker>,
 }
 
@@ -873,7 +903,16 @@ impl Manifest {
         if self.version > VERSION {
             return Err(MapFault::Version(self.version));
         }
-        self.grid.check()
+        self.grid.check()?;
+        // The markers after the grid, because "is this marker on the map" is a question about a
+        // grid that has already passed its own caps.
+        if self.markers.len() > MAX_MARKERS {
+            return Err(MapFault::TooManyMarkers);
+        }
+        for marker in &self.markers {
+            marker.check(self.grid)?;
+        }
+        Ok(())
     }
 }
 
@@ -1099,12 +1138,6 @@ pub const MAX_MARKER_Y: f32 = 20.0;
 /// past which somebody has built a forest by hand instead of seeding one.
 pub const MAX_MARKERS: usize = 512;
 
-/// The name of the marker kind a player starts on.
-///
-/// Spelled once, because two places in the server ask "is there still somewhere to spawn" and a
-/// map with no answer is unplayable.
-pub const PLAYER_SPAWN: &str = "player";
-
 /// Something placed on the map: where it goes, not what it is.
 ///
 /// A marker is map content — a kind, a place and a facing. It has no collider and no hitbox, it
@@ -1117,8 +1150,14 @@ pub const PLAYER_SPAWN: &str = "player";
 /// underneath it — a spawn buried in a new hill, a vehicle dropped four metres onto a valley floor
 /// that used to be a ridge. An offset moves with the ground, so every marker survives every stroke
 /// with no fix-up pass and no way to forget one.
+///
+/// **The wire form is the plain one.** This derives serde straight through, and the readable
+/// shorthand below is applied by the *manifest* alone — see [`marker_file`]. It has to be that way
+/// round: the shorthand leans on `skip_serializing_if`, which is a JSON-shaped idea. The baseline
+/// travels as postcard, which has no field names and no way to notice that a field was left out;
+/// a `Marker` carrying the file's own serde came off the wire as `DeserializeBadOption` on the
+/// first map a client received.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "MarkerFile", into = "MarkerFile")]
 pub struct Marker {
     /// Which placeable this is, as a palette id rather than an enum of the three that exist today.
     pub kind: String,
@@ -1190,7 +1229,7 @@ const PURE_YAW: f32 = 1.0e-6;
 /// turns every hand-written `yaw: 45` into a quaternion on the first save, and the readability
 /// lasts exactly as long as nobody edits the map.
 #[derive(Clone, Serialize, Deserialize)]
-struct MarkerFile {
+pub struct MarkerFile {
     kind: String,
     x: f32,
     z: f32,
@@ -1207,6 +1246,27 @@ struct MarkerFile {
 
 fn is_zero(y: &f32) -> bool {
     *y == 0.0
+}
+
+/// The manifest's own serialisation of a marker list, and the only place the shorthand lives.
+///
+/// A `with` module rather than the type's own serde, because the two forms answer to two different
+/// readers: a person opening the file, and postcard on the wire. See [`Marker`].
+pub mod marker_file {
+    use super::{Marker, MarkerFile};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(markers: &[Marker], out: S) -> Result<S::Ok, S::Error> {
+        let file: Vec<MarkerFile> = markers.iter().cloned().map(MarkerFile::from).collect();
+        file.serialize(out)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(from: D) -> Result<Vec<Marker>, D::Error> {
+        Vec::<MarkerFile>::deserialize(from)?
+            .into_iter()
+            .map(|one| Marker::try_from(one).map_err(serde::de::Error::custom))
+            .collect()
+    }
 }
 
 impl TryFrom<MarkerFile> for Marker {
@@ -1761,6 +1821,22 @@ mod tests {
         assert_eq!(Terrain::decode(grid, None, &[]), Err(MapFault::TooManySamples));
     }
 
+    /// A marker as the manifest writes it, which is the only place the shorthand lives.
+    ///
+    /// Wrapped rather than serialised directly, because the shorthand belongs to the *field* now:
+    /// `Marker`'s own serde is the plain one the wire needs. See [`marker_file`].
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct AsWritten(#[serde(with = "marker_file")] Vec<Marker>);
+
+    fn to_file(marker: Marker) -> String {
+        serde_json::to_string(&AsWritten(vec![marker])).expect("it writes")
+    }
+
+    fn from_file(text: &str) -> Result<Marker, serde_json::Error> {
+        serde_json::from_str::<AsWritten>(&format!("[{text}]"))
+            .map(|written| written.0.into_iter().next().expect("one marker"))
+    }
+
     /// Whether two quaternions are the same turn.
     ///
     /// By the dot product rather than [`Quat::angle_between`], which goes through `acos` and loses
@@ -1774,8 +1850,7 @@ mod tests {
     /// A yaw written by hand comes back as the rotation it means, in radians.
     #[test]
     fn a_yaw_in_the_file_is_degrees_and_a_quaternion_in_the_game() {
-        let marker: Marker =
-            serde_json::from_str(r#"{"kind":"vehicle","x":14,"z":-8,"yaw":90}"#).expect("it reads");
+        let marker = from_file(r#"{"kind":"vehicle","x":14,"z":-8,"yaw":90}"#).expect("it reads");
         assert_eq!(marker.kind, "vehicle");
         assert_eq!(marker.y, 0.0, "an absent offset is on the ground");
         let forward = marker.rotation * Vec3::NEG_Z;
@@ -1800,12 +1875,12 @@ mod tests {
             y: 0.0,
             rotation: Quat::from_rotation_y(0.75),
         };
-        let text = serde_json::to_string(&marker).expect("it writes");
+        let text = to_file(marker.clone());
         assert!(text.contains("\"yaw\""), "written as {text}");
         assert!(!text.contains("rotation"), "written as {text}");
         assert!(!text.contains("\"y\""), "a zero offset should not be written: {text}");
 
-        let back: Marker = serde_json::from_str(&text).expect("it reads back");
+        let back = from_file(text.trim_matches(['[', ']'])).expect("it reads back");
         assert!(same_turn(back.rotation, marker.rotation), "{back:?}");
     }
 
@@ -1819,11 +1894,11 @@ mod tests {
             y: 0.5,
             rotation: Quat::from_rotation_x(0.3) * Quat::from_rotation_y(0.75),
         };
-        let text = serde_json::to_string(&marker).expect("it writes");
+        let text = to_file(marker.clone());
         assert!(text.contains("rotation"), "written as {text}");
         assert!(!text.contains("yaw"), "written as {text}");
 
-        let back: Marker = serde_json::from_str(&text).expect("it reads back");
+        let back = from_file(text.trim_matches(['[', ']'])).expect("it reads back");
         assert!(same_turn(back.rotation, marker.rotation), "{back:?}");
         assert_eq!(back.y, 0.5);
     }
@@ -1835,7 +1910,7 @@ mod tests {
     #[test]
     fn a_marker_may_not_give_both_a_yaw_and_a_rotation() {
         let text = r#"{"kind":"crate","x":0,"z":0,"yaw":45,"rotation":[0,0,0,1]}"#;
-        let refused = serde_json::from_str::<Marker>(text).expect_err("it should be refused");
+        let refused = from_file(text).expect_err("it should be refused");
         assert!(
             refused.to_string().contains("never both"),
             "refused with the wrong reason: {refused}",
@@ -1848,9 +1923,8 @@ mod tests {
     /// a crate that is subtly the wrong size rather than a message anybody reads.
     #[test]
     fn a_sloppy_quaternion_is_made_a_rotation() {
-        let marker: Marker =
-            serde_json::from_str(r#"{"kind":"crate","x":0,"z":0,"rotation":[0,0.6,0,0.6]}"#)
-                .expect("it reads");
+        let marker = from_file(r#"{"kind":"crate","x":0,"z":0,"rotation":[0,0.6,0,0.6]}"#)
+            .expect("it reads");
         assert!((marker.rotation.length() - 1.0).abs() < 1.0e-6);
         assert_eq!(marker.check(default_terrain().grid), Ok(()));
     }
@@ -1916,6 +1990,39 @@ mod tests {
             (after.y - terrain.height_over(4.0, 4.0) - 1.5).abs() < 1.0e-4,
             "it should still stand 1.5 m over the ground",
         );
+    }
+
+    /// A baseline survives the format it is actually sent in.
+    ///
+    /// Not JSON, which is what every other round-trip test here uses and what made this necessary.
+    /// Postcard has no field names: a field a serialiser skips is simply absent from the bytes, and
+    /// the decoder — still expecting it — reads the next field's bytes as that one's. JSON forgives
+    /// `skip_serializing_if` because it can see which keys are there; postcard cannot, and the
+    /// symptom is `DeserializeBadOption` on the first map a client is sent, half a second into the
+    /// game and nowhere near the type that caused it.
+    ///
+    /// So the wire form is tested on the wire's own terms. A marker list with both a shorthand
+    /// case and a general one, because the shorthand is exactly what the file wanted and the wire
+    /// cannot have.
+    #[test]
+    fn a_baseline_survives_the_format_it_is_sent_in() {
+        let mut terrain = default_terrain();
+        terrain.markers.push(Marker {
+            kind: "crate".into(),
+            x: 3.0,
+            z: -4.0,
+            y: 1.0,
+            rotation: Quat::from_rotation_x(0.2) * Quat::from_rotation_y(1.0),
+        });
+        let baseline = TerrainBaseline::of(&terrain, &[]);
+
+        let bytes = postcard::to_allocvec(&baseline).expect("it encodes");
+        let back: TerrainBaseline = postcard::from_bytes(&bytes).expect("it decodes");
+        assert_eq!(back.markers, baseline.markers);
+        assert_eq!(back.layers, baseline.layers);
+
+        let adopted = back.adopt().expect("it is a map");
+        assert_eq!(adopted.markers, terrain.markers);
     }
 
     /// Every default layer wins somewhere on the map everybody starts on.

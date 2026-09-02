@@ -90,6 +90,7 @@ fn main() {
                 maps::serve_map_requests,
                 sculpting::serve_strokes,
                 level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
+                level::build_the_props.run_if(resource_exists_and_changed::<Ground>),
                 sculpt::apply_due_edits.run_if(resource_exists::<Ground>),
                 sculpt::lift_with_the_ground::<()>.run_if(resource_exists::<Ground>),
                 sculpt::lift_bodies_with_the_ground::<()>.run_if(resource_exists::<Ground>),
@@ -249,6 +250,7 @@ type Wounded = (
 #[allow(clippy::too_many_arguments)]
 fn resolve_shots(
     level: Level,
+    ground: Res<Ground>,
     net: Res<NetConfig>,
     timeline: Res<LocalTimeline>,
     histories: Query<&HitboxHistory>,
@@ -459,7 +461,7 @@ fn resolve_shots(
         // rolls back to here, which is exactly the correction rollback exists for.
         *health = Health::default();
         *state = PlayerState {
-            position: level::spawn_point(spawn.0),
+            position: level::nth_spawn(&ground.0, spawn.0),
             ..PlayerState::default()
         };
     }
@@ -877,16 +879,19 @@ fn carry_drivers(
 /// the past, so a shot at it has to be tested against the past. The hitbox itself needs no new code
 /// — a vehicle offers its collider and its pose, and `resolve_shots` never asks what kind of thing
 /// it hit.
-fn spawn_vehicles(net: Res<NetConfig>, mut commands: Commands) {
+fn spawn_vehicles(ground: Res<Ground>, net: Res<NetConfig>, mut commands: Commands) {
     let kind = VehicleKind::Buggy;
-    for (index, (ground, yaw)) in level::VEHICLE_STARTS.into_iter().enumerate() {
+    let starts: Vec<_> = ground.0.markers_of(level::VEHICLE).cloned().collect();
+    for (index, marker) in starts.iter().enumerate() {
         // Standing at its own ride height, so it starts resting on its springs rather than dropping
-        // on to them in front of everyone at the start of the round.
-        let at = ground.extend(kind.spec().ride_height()).xzy();
+        // on to them in front of everyone at the start of the round. The ride height is the
+        // vehicle's own and deliberately not the marker's: a marker says where, and how high above
+        // the ground — how tall the thing that lands there is, is the thing's business.
+        let at = marker.where_it_stands(&ground.0) + Vec3::Y * kind.spec().ride_height();
         commands.spawn((
             Name::from(format!("Buggy {index}")),
             Authored,
-            vehicle::vehicle_body(kind, at, Quat::from_rotation_y(yaw)),
+            vehicle::vehicle_body(kind, at, marker.rotation),
             HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
             Replicate::to_clients(NetworkTarget::All),
             // Nobody predicts an empty vehicle: with no input behind it there is nothing to predict
@@ -895,7 +900,7 @@ fn spawn_vehicles(net: Res<NetConfig>, mut commands: Commands) {
             InterpolationTarget::to_clients(NetworkTarget::All),
         ));
     }
-    info!("{} vehicles", level::VEHICLE_STARTS.len());
+    info!("{} vehicles", starts.len());
 }
 
 /// FixedUpdate: advances every prop to where this tick says it should be.
@@ -1009,6 +1014,7 @@ fn on_peer_connected(
     trigger: On<Add, Connected>,
     peers: Query<&RemoteId>,
     players: Query<&Player>,
+    ground: Res<Ground>,
     net: Res<NetConfig>,
     mut commands: Commands,
 ) {
@@ -1023,7 +1029,7 @@ fn on_peer_connected(
     // only — a client has no use for it.
     let spawn = SpawnIndex(players.iter().count());
     let mut state = PlayerState::default();
-    state.position = level::spawn_point(spawn.0);
+    state.position = level::nth_spawn(&ground.0, spawn.0);
 
     commands.spawn((
         Name::from(format!("Player {peer}")),

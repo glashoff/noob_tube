@@ -26,7 +26,7 @@
 use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
 use lightyear::prelude::*;
-use noob_tube_shared::level::{self, VEHICLE_STARTS};
+use noob_tube_shared::level;
 use noob_tube_shared::player::PlayerState;
 use noob_tube_shared::protocol::TerrainChannel;
 use noob_tube_shared::terrain::{
@@ -138,6 +138,11 @@ fn read(dir: &Path, name: &str) -> Result<Terrain, MapFault> {
     if !manifest.layers.is_empty() {
         terrain.layers = manifest.layers;
     }
+    // And the same rule for what stands on it, with one more reason behind it: a map with no
+    // player spawn is unplayable, so an empty list was never a state anybody authored.
+    if !manifest.markers.is_empty() {
+        terrain.markers = manifest.markers;
+    }
     Ok(terrain)
 }
 
@@ -152,7 +157,11 @@ fn write(dir: &Path, name: &str, terrain: &Terrain) -> std::io::Result<()> {
         grid: terrain.grid,
         water_y: terrain.water_y,
         layers: Vec::new(),
-        markers: Vec::new(),
+        // Written out in full, unlike the layers: what stands on a map is the part of it somebody
+        // placed, and a file that says nothing about it would silently take on a later build's
+        // defaults. Layers stay empty because nothing can edit them yet, so "empty" and "the
+        // default set" are still the same statement there.
+        markers: terrain.markers.clone(),
     };
     let text = serde_json::to_string_pretty(&manifest)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -348,22 +357,25 @@ fn act(
 fn place_everything(world: &mut Switching) {
     let ground = world.0.0.clone();
     for (index, mut state) in world.1.iter_mut().enumerate() {
-        let at = level::spawn_point(index);
         *state = PlayerState {
-            position: Vec3::new(at.x, ground.height_over(at.x, at.z), at.z),
+            position: level::nth_spawn(&ground, index),
             ..PlayerState::default()
         };
     }
+    // Collected first: the query below borrows the world, and the markers are read from the same
+    // ground the players were just placed on.
+    let starts: Vec<_> = ground.markers_of(level::VEHICLE).cloned().collect();
     for (index, (kind, mut position, mut rotation, mut velocity, mut spin, mut wheels)) in
         world.2.iter_mut().enumerate()
     {
-        let (at, yaw) = VEHICLE_STARTS[index % VEHICLE_STARTS.len()];
-        position.0 = Vec3::new(
-            at.x,
-            ground.height_over(at.x, at.y) + kind.spec().ride_height(),
-            at.y,
-        );
-        rotation.0 = Quat::from_rotation_y(yaw);
+        // A map with no vehicle start leaves the vehicles where they were rather than stacking
+        // them at the origin: there is nowhere on this map they belong, and the middle of it is
+        // not a better answer than the last place somebody parked.
+        let Some(marker) = starts.get(index % starts.len().max(1)) else {
+            continue;
+        };
+        position.0 = marker.where_it_stands(&ground) + Vec3::Y * kind.spec().ride_height();
+        rotation.0 = marker.rotation;
         velocity.0 = Vec3::ZERO;
         spin.0 = Vec3::ZERO;
         *wheels = Wheels::default();

@@ -14,7 +14,7 @@ use bevy::prelude::*;
 
 use crate::physics::{level_geometry, level_geometry_facing};
 use crate::sculpt::GroundPatched;
-use crate::terrain::Ground;
+use crate::terrain::{Ground, Marker, Terrain};
 
 /// Half-extents of one crate. They are cubes, 2 m on a side.
 pub const CRATE_HALF_EXTENT: f32 = 1.0;
@@ -70,14 +70,93 @@ pub const VEHICLE_STARTS: [(Vec2, f32); 2] = [
     (Vec2::new(-16.0, -4.0), core::f32::consts::FRAC_PI_2),
 ];
 
-/// Where the nth player starts.
+/// The placeables this build knows, which is the palette a map may name kinds from.
 ///
-/// Nothing clever: players stand two metres apart along X, which is enough to tell capsules apart
-/// while there are a handful of them. Real spawn points come with real levels.
+/// A `kind` is a palette id rather than an enum of the three that happen to exist, so adding a
+/// placeable becomes adding an asset rather than a code change (terrain.md §7). Today the palette
+/// is a constant here; when the server has more assets than the client, it is the server's to send.
+pub const PLAYER_SPAWN: &str = "player";
+pub const VEHICLE: &str = "vehicle";
+pub const CRATE: &str = "crate";
+pub const PLACEABLES: [&str; 3] = [PLAYER_SPAWN, VEHICLE, CRATE];
+
+/// How many player spawns the built-in map lays out.
 ///
-/// The index the server passes is a count of existing players, so it climbs as people reconnect —
-/// a client that joins after two others have left starts at x = 6 rather than x = 0. Harmless on an
-/// empty plane, wrong on a real map, and fixed by picking a free spawn point rather than counting.
+/// Eight rather than one per connected client, because a marker list is fixed content and the
+/// player count is not. It is the same two-metre row [`spawn_point`] produced, and no better a
+/// piece of level design — but it is now *editable*, which is the whole point of the change.
+const DEFAULT_SPAWNS: usize = 8;
+
+/// What stands on a map nobody has placed anything on.
+///
+/// The three constants above, as markers. This is the step where they stop being code: a map that
+/// says nothing about what is on it gets this, and a map that says anything at all gets exactly
+/// what it says. Nothing else in the game reads `CRATES` or `VEHICLE_STARTS` any more.
+///
+/// The heights are offsets above the ground, so each is the thing's own resting height rather than
+/// a world y — a crate sits half its own height up, a vehicle and a player sit on the surface and
+/// let their own spawn add whatever they stand on.
+pub fn default_markers() -> Vec<Marker> {
+    let mut markers = Vec::new();
+    for index in 0..DEFAULT_SPAWNS {
+        markers.push(Marker {
+            kind: PLAYER_SPAWN.into(),
+            x: index as f32 * 2.0,
+            z: 0.0,
+            y: 0.0,
+            rotation: Quat::IDENTITY,
+        });
+    }
+    for (at, yaw) in VEHICLE_STARTS {
+        markers.push(Marker {
+            kind: VEHICLE.into(),
+            x: at.x,
+            z: at.y,
+            y: 0.0,
+            rotation: Quat::from_rotation_y(yaw),
+        });
+    }
+    for centre in CRATES {
+        markers.push(Marker {
+            kind: CRATE.into(),
+            x: centre.x,
+            z: centre.z,
+            y: CRATE_HALF_EXTENT,
+            rotation: Quat::IDENTITY,
+        });
+    }
+    markers
+}
+
+/// Where the nth player spawn of a map is, on the ground as it stands.
+///
+/// Reading the map rather than computing a row, which is the whole of what step eight changes here.
+/// What it does **not** change is the choice of index: the server still passes a count of existing
+/// players, so somebody joining after two others have left gets the third marker rather than the
+/// first. That was wrong on a plane and is still wrong on a map — the fix is picking a *free*
+/// spawn, which needs to know where everybody is standing and is a question about spawning rather
+/// than about placement.
+///
+/// Wrapping, because the marker list is finite where the old row was not. Two players on one
+/// marker is a worse outcome than two players two metres apart, and the answer to it is that the
+/// spawns are now editable: a map that needs more says so.
+///
+/// A map with no player spawn at all should not exist — the server refuses a delete that would
+/// make one — but a hand-written file can still be one, and the middle of the map is a better
+/// answer to that than a panic.
+pub fn nth_spawn(terrain: &Terrain, index: usize) -> Vec3 {
+    let spawns: Vec<_> = terrain.markers_of(PLAYER_SPAWN).collect();
+    if spawns.is_empty() {
+        return Vec3::new(0.0, terrain.height_over(0.0, 0.0), 0.0);
+    }
+    spawns[index % spawns.len()].where_it_stands(terrain)
+}
+
+/// The bare position of the nth spawn, without a map to stand it on.
+///
+/// What remains of the old constant, and it exists for one caller: the level tests, which have no
+/// terrain. Everything in the running game goes through [`nth_spawn`].
+#[cfg(test)]
 pub fn spawn_point(index: usize) -> Vec3 {
     Vec3::new(index as f32 * 2.0, 0.0, 0.0)
 }
@@ -162,13 +241,13 @@ pub fn rebuild_patched_ground(
     }
 }
 
-/// Startup: builds everything that is built rather than grown — the ramp and the crates.
+/// Startup: builds the one thing that is level rather than map — the ramp.
 ///
-/// One entity per shape, each a static rigid body on the level layer. Identical on both sides, by
-/// construction: these are constants, and both binaries read the same ones.
+/// A static rigid body on the level layer, identical on both sides by construction: it is a
+/// constant, and both binaries read the same one.
 ///
-/// The ground is deliberately not here. It is the map, which the server owns and sends — see
-/// [`build_the_ground`].
+/// The ground is deliberately not here, and neither are the crates any more. Both are the map,
+/// which the server owns and sends — see [`build_the_ground`] and [`build_the_props`].
 pub fn spawn_level(mut commands: Commands) {
     let (at, facing) = ramp_pose();
     commands.spawn(level_geometry_facing(
@@ -180,15 +259,49 @@ pub fn spawn_level(mut commands: Commands) {
         at,
         facing,
     ));
-    for centre in CRATES {
+}
+
+/// One crate the map placed, so a map switch knows which bodies were the last map's.
+#[derive(Component)]
+pub struct PlacedProp;
+
+/// PreUpdate: builds the solid things the map places, and takes down whatever the last map placed.
+///
+/// Beside [`build_the_ground`] and run on the same condition, because it answers to the same
+/// thing: the marker list arrives with the map, so a client has none of this at startup and both
+/// sides get it from the copy the server sent.
+///
+/// Rebuilt wholesale rather than diffed. The list is a few dozen entries and a map switch is not a
+/// per-tick event; a diff would be a second description of what changed, kept in step with the
+/// first by hand.
+///
+/// It reads the ground under each marker rather than a stored height, which is the point of the
+/// offset being an offset: sculpt under a crate and it comes up with the hill on the next rebuild
+/// rather than hanging in the air.
+pub fn build_the_props(
+    ground: Res<Ground>,
+    standing: Query<Entity, With<PlacedProp>>,
+    mut commands: Commands,
+) {
+    for entity in standing.iter() {
+        commands.entity(entity).despawn();
+    }
+    for marker in &ground.0.markers {
+        if marker.kind != CRATE {
+            continue;
+        }
         // Avian sizes a cuboid by its full side lengths, where rapier takes half-extents.
-        commands.spawn(level_geometry(
-            Collider::cuboid(
-                CRATE_HALF_EXTENT * 2.0,
-                CRATE_HALF_EXTENT * 2.0,
-                CRATE_HALF_EXTENT * 2.0,
+        commands.spawn((
+            level_geometry_facing(
+                Collider::cuboid(
+                    CRATE_HALF_EXTENT * 2.0,
+                    CRATE_HALF_EXTENT * 2.0,
+                    CRATE_HALF_EXTENT * 2.0,
+                ),
+                marker.where_it_stands(&ground.0),
+                marker.rotation,
             ),
-            centre,
+            PlacedProp,
         ));
     }
 }
@@ -216,6 +329,7 @@ mod tests {
         app.insert_resource(crate::terrain::Ground(crate::terrain::default_terrain()));
         app.world_mut().run_system_once(spawn_level).expect("the level spawns");
         app.world_mut().run_system_once(build_the_ground).expect("the ground is built");
+        app.world_mut().run_system_once(build_the_props).expect("the props are built");
         app.update();
         app
     }
@@ -260,8 +374,12 @@ mod tests {
         );
     }
 
-    /// The ramp and the crates are still there and still on top of the ground, which is what says
-    /// the swap did not move the level out from under them.
+    /// The ramp and the crates are still there and still on top of the ground.
+    ///
+    /// The crates come off the map's marker list now rather than out of a constant, so this says
+    /// two things at once: the height field is still under them, and the default markers put them
+    /// exactly where the constant did. The second is what makes the change to markers invisible to
+    /// anybody playing.
     #[test]
     fn the_scenery_still_sits_on_the_ground() {
         let mut app = played_level();
@@ -272,6 +390,51 @@ mod tests {
             let want = centre.y + CRATE_HALF_EXTENT;
             assert!((top - want).abs() < 0.01, "a crate top is at {top:.2}, not {want:.2}");
         }
+    }
+
+    /// The default markers are the three constants, and nothing has moved.
+    ///
+    /// The constants are still here, and this is why: they are what says the map somebody starts on
+    /// today is the map they started on yesterday. When a real map replaces them they go, and this
+    /// test goes with them.
+    #[test]
+    fn the_default_markers_put_everything_where_the_constants_did() {
+        let terrain = crate::terrain::default_terrain();
+        let markers = &terrain.markers;
+        assert_eq!(markers.len(), DEFAULT_SPAWNS + VEHICLE_STARTS.len() + CRATES.len());
+
+        for (marker, (at, yaw)) in terrain.markers_of(VEHICLE).zip(VEHICLE_STARTS) {
+            assert_eq!((marker.x, marker.z), (at.x, at.y));
+            assert!(marker.rotation.dot(Quat::from_rotation_y(yaw)).abs() > 1.0 - 1.0e-6);
+        }
+        for (marker, centre) in terrain.markers_of(CRATE).zip(CRATES) {
+            assert_eq!((marker.x, marker.z), (centre.x, centre.z));
+            // The constant is a world height on a plane at zero; the marker is an offset. On the
+            // built-in map the two agree, and that agreement is the thing worth pinning.
+            assert!(
+                (marker.where_it_stands(&terrain).y - centre.y).abs() < 0.01,
+                "a crate marker stands at {} where the constant says {}",
+                marker.where_it_stands(&terrain).y,
+                centre.y,
+            );
+        }
+        for index in 0..DEFAULT_SPAWNS {
+            let want = spawn_point(index);
+            let got = nth_spawn(&terrain, index);
+            assert!((got.x - want.x).abs() < 0.01 && (got.z - want.z).abs() < 0.01);
+        }
+    }
+
+    /// A map with no player spawn does not panic; it puts people in the middle of it.
+    ///
+    /// A hand-written manifest can be one, and the server refuses a delete that would make one, so
+    /// this is the case nobody reaches on purpose and everybody would rather not crash on.
+    #[test]
+    fn a_map_with_nowhere_to_spawn_still_answers() {
+        let mut terrain = crate::terrain::default_terrain();
+        terrain.markers.retain(|marker| marker.kind != PLAYER_SPAWN);
+        let at = nth_spawn(&terrain, 3);
+        assert_eq!((at.x, at.z), (0.0, 0.0));
     }
 
     /// A map arriving takes the place of the map before it, rather than joining it.

@@ -19,3 +19,9 @@ bevy_remote = { workspace = true, optional = true }
 # Opens a Bevy Remote Protocol endpoint for live inspection. Off by default: the protocol can
 # mutate the world, not just read it, so it must never reach a release build.
 remote = ["dep:bevy_remote"]
+
+[dev-dependencies]
+# The format lightyear puts messages in. One test encodes a baseline with it, because a binary
+# format with no field names is the only thing that can catch a `skip_serializing_if` that JSON
+# would have forgiven — and it did, after the wire had already broken once.
+postcard = { version = "1.1", features = ["use-std"] }
