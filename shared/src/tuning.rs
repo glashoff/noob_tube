@@ -28,6 +28,7 @@
 //! max_predicted_ticks = 100 # how far the client may predict ahead     (client only)
 //! lag_compensation = true   # rewind targets to what the shooter saw      (both)
 //! lag_comp_history_ticks = 35 # how far back the server can rewind       (server only)
+//! edit_delay_ticks = 10       # how late a terrain edit lands            (server only)
 //! ```
 //!
 //! Both binaries read the same file and each takes the fields it needs, so one file describes a
@@ -247,6 +248,30 @@ pub struct NetConfig {
     /// Too short is not silent: the server logs a rewind it could not satisfy rather than quietly
     /// testing against a position the shooter never saw.
     pub lag_comp_history_ticks: u16,
+    /// How many ticks after committing a terrain edit everybody applies it.
+    ///
+    /// The server stamps every accepted stroke with `now + this` and both sides apply it there, so
+    /// the ground moves at one tick for everyone. It is a margin, and it has to cover two different
+    /// things at once:
+    ///
+    /// 1. **The commit has to arrive first.** One trip from the server to the slowest client, plus
+    ///    jitter. Below that, a client is told to apply an edit at a tick it has already passed.
+    /// 2. **No rollback window may straddle it.** `Level` reads Avian's *current* spatial state,
+    ///    with no seam where a replay could be handed historical terrain — so if the edit lands
+    ///    inside the window a client is predicting over, the replayed ticks from before the edit
+    ///    are walked on the ground from after it.
+    ///
+    /// The first version of this used `max_predicted_ticks`, which satisfies (2) by construction
+    /// and costs **1.5 seconds** at the defaults — the ceiling on how far a client may *ever*
+    /// predict, paid on every stroke, when the window a client is actually predicting over is a
+    /// handful of ticks. Ten ticks is 156 ms at 64 Hz, and it is what `webgame` uses for the same
+    /// job at 100 Hz for reason (1) alone.
+    ///
+    /// What (2) then buys is a probability rather than a guarantee: a client whose lead has grown
+    /// past this — a bad link, a long stall — may take one rollback that straddles an edit, and be
+    /// corrected by however far the ground moved under it. Small, rare, and self-correcting, which
+    /// is the trade the alternative was refusing to make at fifteen times the cost.
+    pub edit_delay_ticks: u16,
     /// How much of a vehicle a driver's own client works out for itself. See
     /// [`VehiclePrediction`], which carries the reasoning; this is only where it is read from.
     ///
@@ -281,6 +306,8 @@ impl Default for NetConfig {
             lag_compensation: true,
             // ~550 ms at 64 Hz: past any playable connection, and cheap.
             lag_comp_history_ticks: 35,
+            // 156 ms at 64 Hz. `webgame` uses ten ticks for the same job.
+            edit_delay_ticks: 10,
             // The behaviour everything so far was measured against.
             predict_vehicles: VehiclePrediction::Full,
             port: crate::SERVER_PORT,
@@ -374,6 +401,7 @@ impl NetConfig {
         env_parse("NOOB_TUBE_META_PORT", &mut self.meta_port);
         env_parse("NOOB_TUBE_LAG_COMPENSATION", &mut self.lag_compensation);
         env_parse("NOOB_TUBE_LAG_COMP_HISTORY_TICKS", &mut self.lag_comp_history_ticks);
+        env_parse("NOOB_TUBE_EDIT_DELAY_TICKS", &mut self.edit_delay_ticks);
         env_parse("NOOB_TUBE_PREDICT_VEHICLES", &mut self.predict_vehicles);
     }
 

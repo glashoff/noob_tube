@@ -906,6 +906,11 @@ fn take_the_keyboard(
         input.0 = noob_tube_shared::player::PlayerInput {
             yaw: player.yaw,
             pitch: player.pitch,
+            // Intents are blanked; *modes* are not. Flying is a state the player is in rather than
+            // something they are asking for this tick, and dropping it here meant opening the menu
+            // in mid-air handed you back to gravity. Blanked and still flying is a hover, which is
+            // exactly what a menu over a hillside should be.
+            flying: player.flying,
             ..Default::default()
         };
     }
@@ -1120,6 +1125,30 @@ mod tests {
         menu.go(Page::Map);
         menu.selected = 2;
         assert_eq!(menu.activate(), Some(MapRequest::Save { name: "ridge".into() }));
+    }
+
+    /// Opening the menu blanks what a player is asking for, and not what they are.
+    ///
+    /// The distinction cost a fall out of the sky: flight is a mode, and a mode cleared along with
+    /// the movement keys handed a flying player back to gravity the moment they pressed Escape.
+    #[test]
+    fn the_menu_takes_the_keys_and_leaves_the_mode() {
+        use crate::local_player::{CurrentInput, LocalPlayer, ScriptedInput};
+        use bevy::ecs::system::RunSystemOnce;
+        use noob_tube_shared::player::PlayerInput;
+
+        let mut app = menu_app();
+        app.init_resource::<CurrentInput>().init_resource::<ScriptedInput>();
+        app.world_mut().spawn(LocalPlayer { flying: true, ..default() });
+        app.world_mut().resource_mut::<CurrentInput>().0 =
+            PlayerInput { forward: true, jump: true, flying: true, ..default() };
+        app.update();
+
+        app.world_mut().run_system_once(take_the_keyboard).expect("the keyboard is taken");
+        let input = app.world().resource::<CurrentInput>().0;
+        assert!(!input.forward, "the menu let a movement key through");
+        assert!(!input.jump, "the menu let a movement key through");
+        assert!(input.flying, "opening the menu stopped a player flying");
     }
 
     /// Deleting asks twice, and opens the second question on "keep it".

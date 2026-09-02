@@ -2572,10 +2572,21 @@ if every machine lands on exactly the same numbers, so two rules hold in the bru
 there is no seam in it where a rollback replay could be handed historical terrain — so an edit
 applied inside the rollback window would have every replayed tick, including the ones from before
 the edit, walked on the new ground. The server therefore stamps each accepted stroke with
-`commit_tick + max_predicted_ticks` and both sides apply it there. No rollback window can straddle
-an edit by construction rather than by luck. It costs the sculptor the wait, and at this build's
-settings that is 100 ticks — **a second and a half**, which is a long time to watch a hillside not
-move. Lowering `max_predicted_ticks` shortens it directly.
+`commit_tick + edit_delay_ticks` and both sides apply it there.
+
+**That margin was fifteen times too big for a fortnight.** The rule as written asks for
+`max_predicted_ticks`, which satisfies it by construction — no rollback window can straddle the
+edit, because no client may ever predict that far. But `max_predicted_ticks` is a *ceiling*, the
+worst a bad link may ask for, and it was being paid on every stroke by every link: 100 ticks, **a
+second and a half** of watching a hillside not move. What the margin actually has to cover is the
+commit reaching the slowest client, plus whatever window a client is predicting over *at the time*
+— which at these settings is a handful of ticks. It is a config field now, defaulting to ten ticks
+(156 ms), which is what `webgame` uses for the same job at 100 Hz for the arrival reason alone.
+
+What that gives up is a guarantee in exchange for a probability: a client whose lead has grown past
+ten ticks may take one rollback that straddles an edit and be corrected by however far the ground
+moved under it. Small, rare, self-correcting — and the plan's own text says ignoring the problem
+outright would have been defensible. Paying fifteen times the price for the difference was not.
 
 The server refuses a stroke that is not one, and charges a token bucket over *touched samples* on an
 upper bound worked out before anything is written — undercharging would let a client buy a bigger
@@ -2646,6 +2657,11 @@ hold a form and its buttons without a second idea of focus.
 One thing had to be handled that a keyboard menu never needed: the button that takes the pointer
 back is under the same finger as the trigger, and the frame after it grabs, a still-held button is
 indistinguishable from a shot. The click that resumed is swallowed until it is let go.
+
+The menu blanks what a player is *asking for* and not what they *are*, which is a distinction that
+cost a fall out of the sky before it was made: flight is a mode, and clearing it along with the
+movement keys handed a flying player back to gravity the moment they pressed Escape. Blanked and
+still flying is a hover, which is what a menu opened over a hillside should be.
 
 #### Leaving the ground
 

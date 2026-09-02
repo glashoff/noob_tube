@@ -7,9 +7,9 @@
 //! Nothing here decides anything about the terrain. It sends a [`Stroke`], which the server checks,
 //! charges for and stamps with a tick; the ground moves when that tick comes round, for everybody
 //! at once, through [`apply_due_edits`](noob_tube_shared::sculpt::apply_due_edits). So a sculptor
-//! sees their own stroke land late — `max_predicted_ticks` late, which at this build's settings is
-//! a second and a half. That is deliberate and it is the whole reason a rollback can never straddle
-//! an edit; the ring under the brush is what makes the wait legible, since it shows where the
+//! sees their own stroke land late — `edit_delay_ticks` late, which at this build's settings is
+//! about a sixth of a second. That is deliberate: the commit has to reach everybody before the tick
+//! it names. The ring under the brush is what makes the wait legible, since it shows where the
 //! stroke is going the moment the button goes down.
 
 use bevy::input::mouse::AccumulatedMouseScroll;

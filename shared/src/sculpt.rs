@@ -28,10 +28,13 @@
 //! applied inside the rollback window would have every replayed tick, including the ones from
 //! before the edit, walked on the new ground.
 //!
-//! So the server stamps every edit with `commit_tick + max_predicted_ticks` and both sides apply it
-//! there. No rollback window can straddle an edit by construction rather than by luck, and choosing
-//! the tick deliberately is the same move [`lag_compensation`](crate::lag_compensation) already
-//! makes for shots. The cost is that a sculptor waits that long to see their own stroke.
+//! So the server stamps every edit with `commit_tick + edit_delay_ticks` and both sides apply it
+//! there. Choosing the tick deliberately is the same move
+//! [`lag_compensation`](crate::lag_compensation) already makes for shots, and the cost is that a
+//! sculptor waits that long to see their own stroke — which is why the margin is chosen and not
+//! merely made large. See [`edit_delay_ticks`](crate::tuning::NetConfig::edit_delay_ticks): it was
+//! `max_predicted_ticks` at first, which puts the ceiling on how far a client may *ever* predict
+//! into a wait paid on every stroke, and that was a second and a half.
 
 use bevy::ecs::query::QueryFilter;
 use bevy::prelude::*;

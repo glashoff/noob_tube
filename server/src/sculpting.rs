@@ -77,7 +77,7 @@ pub fn serve_strokes(
     // `now` is read once, so every stroke in a frame lands on the same tick. Two strokes a frame
     // apart on the same spot are already ordered by the queue; giving them different ticks would
     // only add a tick of stutter to the second.
-    let due = timeline.tick().0 + u32::from(net.max_predicted_ticks);
+    let due = timeline.tick().0 + u32::from(net.edit_delay_ticks);
 
     let mut asked: Vec<(PeerId, Stroke)> = Vec::new();
     for (remote, mut receiver) in inbox.iter_mut() {
