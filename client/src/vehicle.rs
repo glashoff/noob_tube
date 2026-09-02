@@ -125,7 +125,16 @@ const GUN_DEPRESSION: f32 = 0.52;
 /// deliberately on the centreline: it is where a shot leaves from and where the camera stands, and
 /// putting *those* off to one side would give the driver a view out of the passenger's ear. This
 /// is only where the body is drawn.
-pub(crate) const DRIVER_SEAT: Vec3 = Vec3::new(-0.516, SEAT_CUSHION - BACKSIDE, -0.039);
+pub(crate) const DRIVER_SEAT: Vec3 =
+    Vec3::new(-0.516, SEAT_CUSHION - BACKSIDE - SEAT_SINK, -0.039);
+
+/// How much further down than the arithmetic says, and the only number here that is not measured.
+///
+/// The derivation below is right about where the skin meets the cushion and still reads as sitting
+/// *on* the seat rather than *in* it — a seat has sides and a person sinks into it, and neither the
+/// cushion's vertices nor the driving clip's pose knows that. So this is a choice, kept separate
+/// from the two measurements so that neither of them has to be quietly wrong to carry it.
+const SEAT_SINK: f32 = 0.10;
 
 /// The seat cushion directly under the driver, in chassis space.
 ///

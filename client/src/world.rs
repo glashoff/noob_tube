@@ -36,6 +36,10 @@ impl Plugin for WorldPlugin {
                     sculpt::apply_due_edits.run_if(resource_exists::<Ground>),
                     sculpt::lift_with_the_ground::<With<Predicted>>
                         .run_if(resource_exists::<Ground>),
+                    // Every vehicle this client places, not only a predicted one: an interpolated
+                    // vehicle's pose is overwritten by the next snapshot either way, and the one
+                    // being driven is exactly the one that must not be left under a hillside.
+                    sculpt::lift_bodies_with_the_ground::<()>.run_if(resource_exists::<Ground>),
                     level::rebuild_patched_ground.run_if(resource_exists::<Ground>),
                 )
                     .chain()

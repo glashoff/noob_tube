@@ -2600,8 +2600,9 @@ samples — one tiling, `Grid::TILE_CELLS`, shared by both, so the two cannot co
 ground. The collider is replaced in place rather than respawned, which is what makes the rebuild
 idempotent; it has to be, because a rollback can re-run the frame that triggers it.
 
-One thing was found by playing rather than by reading. Raising the ground under a standing player
-**buried** them: the ground probe reaches 12 cm below the feet, the new surface was above them, so
+Two things were found by playing rather than by reading, and they are the same thing twice.
+
+Raising the ground under a standing player **buried** them: the ground probe reaches 12 cm below the feet, the new surface was above them, so
 they read as airborne inside solid ground and the sweep pushed them out through the bottom of it.
 Measured, they fell past −110 m and kept going. Ground that rises now takes its passengers up with
 it; ground that is lowered leaves them in the air, which is what a hole is for.

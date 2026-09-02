@@ -36,6 +36,7 @@
 //! `max_predicted_ticks` at first, which puts the ceiling on how far a client may *ever* predict
 //! into a wait paid on every stroke, and that was a second and a half.
 
+use avian3d::prelude::{LinearVelocity, Position};
 use bevy::ecs::query::QueryFilter;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,7 @@ use lightyear::prelude::{LocalTimeline, Tick};
 
 use crate::movement::SKIN;
 use crate::player::PlayerState;
+use crate::vehicle::VehicleKind;
 use crate::terrain::{Grid, Ground, MapFault, Terrain, falloff, to_segment_squared};
 
 /// The widest a single stroke may be, in metres.
@@ -297,6 +299,54 @@ impl Terrain {
         let south = at(ix, iz.saturating_sub(1));
         let north = at(ix, (iz + 1).min(grid.nz - 1));
         (west + east + south + north) * 0.25
+    }
+}
+
+/// PreUpdate: takes whatever was parked on ground that has just risen up with it.
+///
+/// The same rescue as [`lift_with_the_ground`] and for the same reason, over the bodies Avian
+/// simulates rather than the ones the movement step does. A height field has **no underside**: a
+/// chassis that ends a tick below one has nothing to come back from, and a stroke that lifts the
+/// ground six metres puts it there in a single tick. Measured before this existed — a parked buggy
+/// under one brush stroke was 25 m below the surface two seconds later and still going.
+///
+/// Four corners rather than the centre, because a vehicle is four metres long: a hillside raised
+/// under one end leaves the middle clear and buries the nose. They are the corners of the nominal
+/// box in world axes rather than the rotated hull, which is an approximation and an honest one —
+/// this is a rescue from a hole with no bottom, not a resting pose. The suspension puts it down
+/// properly over the next few ticks.
+pub fn lift_bodies_with_the_ground<F: QueryFilter + 'static>(
+    ground: Res<Ground>,
+    mut patched: MessageReader<GroundPatched>,
+    mut bodies: Query<(&VehicleKind, &mut Position, &mut LinearVelocity), F>,
+) {
+    for GroundPatched(patch) in patched.read() {
+        let (low, high) = patch.bounds(&ground.0.grid);
+        for (kind, mut position, mut velocity) in bodies.iter_mut() {
+            let at = position.0;
+            let spec = kind.spec();
+            // Its own footprint, grown by the patch: a stroke that lifted the ground beside a
+            // vehicle still lifts the ground under its front wheel.
+            let reach = spec.half_extents.x.max(spec.half_extents.z);
+            if at.x < low.x - reach
+                || at.x > high.x + reach
+                || at.z < low.y - reach
+                || at.z > high.y + reach
+            {
+                continue;
+            }
+            let mut surface = f32::MIN;
+            for (dx, dz) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                let corner = at + Vec3::new(dx * spec.half_extents.x, 0.0, dz * spec.half_extents.z);
+                surface = surface.max(ground.0.height_over(corner.x, corner.z));
+            }
+            let rest = surface + spec.ride_height();
+            if at.y < rest {
+                position.0.y = rest;
+                // Whatever downward speed it had belonged to resting on the old ground.
+                velocity.0.y = velocity.0.y.max(0.0);
+            }
+        }
     }
 }
 

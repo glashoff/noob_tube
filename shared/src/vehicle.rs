@@ -935,6 +935,30 @@ mod tests {
         app
     }
 
+    /// The world a round is actually played in: the map's own tiled height field.
+    ///
+    /// Not [`floor_app`]'s slab, and the difference is the whole point of it existing. A slab is a
+    /// *solid* — a metre thick, with something on the far side — where a height field is a surface
+    /// with no thickness at all. Anything that ends a tick below it has nothing left to stop it.
+    fn map_app() -> App {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = crate::physics::test_support::bare_app();
+        app.insert_resource(crate::terrain::Ground(crate::terrain::default_terrain()));
+        app.world_mut()
+            .run_system_once(crate::level::build_the_ground)
+            .expect("the ground is built");
+        app.insert_resource(Time::<Fixed>::from_hz(HZ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / HZ,
+        )));
+        app.add_systems(FixedUpdate, (drive_vehicles::<()>, right_flipped_vehicles::<()>));
+        // The rescue runs where it runs for real: before the tick, on the message a sculpt writes.
+        app.add_message::<crate::sculpt::GroundPatched>();
+        app.add_systems(PreUpdate, crate::sculpt::lift_bodies_with_the_ground::<()>);
+        app.update();
+        app
+    }
+
     fn park(app: &mut App, at: Vec3) -> Entity {
         let car = app
             .world_mut()
@@ -973,6 +997,102 @@ mod tests {
 
     fn speed(app: &App, car: Entity) -> Vec3 {
         app.world().get::<LinearVelocity>(car).expect("a velocity").0
+    }
+
+    /// Drives one lap of a shape and reports the worst the chassis ever was *below* the ground.
+    ///
+    /// Sampled every tick rather than at the end, because falling through does not undo itself:
+    /// once the chassis is under a surface with no underside, the only evidence left at the end of
+    /// the run is a number in the hundreds of metres, and by then it says nothing about where it
+    /// happened.
+    fn worst_dip(app: &mut App, car: Entity, seconds: f32, steer: f32) -> (f32, Vec3) {
+        let ground = app.world().resource::<crate::terrain::Ground>().0.clone();
+        let grid = ground.grid;
+        let (half_x, half_z) = (
+            (grid.nx - 1) as f32 * grid.spacing / 2.0,
+            (grid.nz - 1) as f32 * grid.spacing / 2.0,
+        );
+        hands(app, car, 1.0, steer);
+        let (mut worst, mut worst_at) = (0.0f32, Vec3::ZERO);
+        for _ in 0..(seconds * HZ as f32) as usize {
+            app.update();
+            let at = pose(app, car);
+            // Off the rim is a different question — there is no ground out there to be under, and
+            // `height_over` clamps rather than saying so. Driving off the edge of the world is
+            // worth fixing and is not this.
+            if at.x.abs() > half_x - 4.0 || at.z.abs() > half_z - 4.0 {
+                break;
+            }
+            // The floor of the chassis, not its middle: the body reaches half its height below the
+            // origin, so a vehicle resting on the ground already has its centre a metre up.
+            let under = ground.height_over(at.x, at.z) - (at.y - BUGGY.half_extents.y);
+            if under > worst {
+                (worst, worst_at) = (under, at);
+            }
+        }
+        (worst, worst_at)
+    }
+
+    /// A vehicle driven around the real map stays on top of it.
+    ///
+    /// The one claim that matters about ground a vehicle is on, and it was false: the buggy fell
+    /// clean through the map. It is a *height field* now rather than the metre-thick slab the
+    /// speculative-margin note reasoned about, and a surface with no underside gives a body that
+    /// ends one tick below it nothing to come back from.
+    #[test]
+    fn a_vehicle_driven_over_the_map_stays_on_it() {
+        // Twelve headings out of the middle, because falling through happens at a *place* — a
+        // ravine lip, a tile seam — and one straight line finds one place. The map's ravines run
+        // across it, so a fan from the centre crosses several of them at speed.
+        for step in 0..12 {
+            let facing = Quat::from_rotation_y(step as f32 * std::f32::consts::TAU / 12.0);
+            let mut app = map_app();
+            let car = park_facing(&mut app, Vec3::new(0.0, 1.0, 0.0), facing);
+            let (worst, at) = worst_dip(&mut app, car, 20.0, 0.0);
+            assert!(
+                worst < 0.5,
+                "driving out on heading {step} put the chassis {worst:.2} m under the ground, \
+                 at {at:?}",
+            );
+        }
+    }
+
+    /// Ground raised under a parked vehicle carries it, rather than swallowing it.
+    ///
+    /// The sculpting counterpart of the bug that buried a standing *player* and dropped them past
+    /// −110 m. A height field has no underside, so a chassis that ends up below one has nothing to
+    /// come back from — and a stroke that lifts the ground six metres puts it there in one tick.
+    #[test]
+    fn ground_raised_under_a_vehicle_does_not_swallow_it() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = map_app();
+        let car = park(&mut app, Vec3::new(14.0, 1.0, -8.0));
+        run(&mut app, 1.0);
+        let before = pose(&app, car);
+
+        // A cone under the vehicle, the size a held brush makes in a moment.
+        let stroke = crate::sculpt::Stroke {
+            at: Vec2::new(before.x, before.z),
+            radius: 8.0,
+            brush: crate::sculpt::Brush::Lift { metres: 6.0 },
+        };
+        let patch = {
+            let mut ground = app.world_mut().resource_mut::<crate::terrain::Ground>();
+            ground.0.sculpt(&stroke).expect("the stroke touched nothing")
+        };
+        app.world_mut()
+            .run_system_once(crate::level::build_the_ground)
+            .expect("the ground is rebuilt");
+        app.world_mut().write_message(crate::sculpt::GroundPatched(patch));
+        run(&mut app, 2.0);
+
+        let ground = app.world().resource::<crate::terrain::Ground>().0.clone();
+        let at = pose(&app, car);
+        let under = ground.height_over(at.x, at.z) - (at.y - BUGGY.half_extents.y);
+        assert!(
+            under < 0.5,
+            "ground raised under a parked vehicle left it {under:.2} m below the surface, at {at:?}",
+        );
     }
 
     /// Puts a vehicle down at the given attitude and lets it settle.

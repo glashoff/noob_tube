@@ -92,6 +92,7 @@ fn main() {
                 level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
                 sculpt::apply_due_edits.run_if(resource_exists::<Ground>),
                 sculpt::lift_with_the_ground::<()>.run_if(resource_exists::<Ground>),
+                sculpt::lift_bodies_with_the_ground::<()>.run_if(resource_exists::<Ground>),
                 level::rebuild_patched_ground.run_if(resource_exists::<Ground>),
             )
                 .chain()
