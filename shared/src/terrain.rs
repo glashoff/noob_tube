@@ -213,6 +213,16 @@ pub enum MapFault {
     Stroke,
     /// Sculpting faster than [`SAMPLES_PER_SECOND`](crate::sculpt::SAMPLES_PER_SECOND) allows.
     TooMuchGround,
+    /// A marker giving both a `yaw` and a `rotation`.
+    ///
+    /// Refused rather than resolved by precedence. A precedence rule is a thing somebody has to
+    /// remember correctly at two in the morning, and the file that needs it is the one nobody
+    /// looks at again.
+    TwoRotations,
+    /// A marker with a number in it that is not one, or one outside what a map can hold.
+    Marker,
+    /// More markers on one map than [`MAX_MARKERS`].
+    TooManyMarkers,
 }
 
 impl core::fmt::Display for MapFault {
@@ -237,6 +247,11 @@ impl core::fmt::Display for MapFault {
             Self::TooFast => {
                 write!(f, "wait {} s between new maps", CREATE_INTERVAL.as_secs())
             }
+            Self::TwoRotations => {
+                write!(f, "a marker gives either a yaw or a rotation, never both")
+            }
+            Self::Marker => write!(f, "that is not a place on this map a marker can stand"),
+            Self::TooManyMarkers => write!(f, "a map may hold at most {MAX_MARKERS} markers"),
             Self::Stroke => write!(f, "that is not a brush stroke this map will take"),
             Self::TooMuchGround => write!(f, "sculpting faster than the server will take it"),
         }
@@ -474,6 +489,14 @@ impl Grid {
             self.origin_x + ix as f32 * self.spacing,
             self.origin_z + iz as f32 * self.spacing,
         )
+    }
+
+    /// The corners of the map on the ground plane: the first and last sample of each axis.
+    ///
+    /// The footprint a marker has to stand inside, and the rim past which `height_over` clamps
+    /// rather than answers. Named once so that "on the map" means one thing.
+    pub fn bounds(&self) -> (Vec2, Vec2) {
+        (self.world_of(0, 0), self.world_of(self.nx - 1, self.nz - 1))
     }
 
     /// Where in the heights one sample lives. Row-major, x fastest — the order the blob is in.
@@ -1061,24 +1084,171 @@ pub fn default_layers() -> Vec<Layer> {
 }
 
 
+/// How high above the ground a marker may sit, either way.
+///
+/// A relative height needs a cap in *both* directions, which an absolute one would not: a negative
+/// offset is legitimate — a crate half sunk into a slope, a spawn in a dip — and a large one is a
+/// spawn under the map. Twenty metres is taller than anything this game stacks and well inside the
+/// height range of the built-in map.
+pub const MAX_MARKER_Y: f32 = 20.0;
+
+/// How many markers one map may hold.
+///
+/// Not a memory bound — a marker is around thirty bytes and this is a kilobyte and a half. It is
+/// the bound on the marker list staying the readable thing terrain.md §7 says it is, and the point
+/// past which somebody has built a forest by hand instead of seeding one.
+pub const MAX_MARKERS: usize = 512;
+
+/// The name of the marker kind a player starts on.
+///
+/// Spelled once, because two places in the server ask "is there still somewhere to spawn" and a
+/// map with no answer is unplayable.
+pub const PLAYER_SPAWN: &str = "player";
+
 /// Something placed on the map: where it goes, not what it is.
 ///
-/// A marker is not the thing it spawns. The height is relative to the ground, so a marker survives
-/// the terrain under it being sculpted.
+/// A marker is map content — a kind, a place and a facing. It has no collider and no hitbox, it
+/// never enters prediction, and the *entity* it produces at round start is ordinary gameplay state
+/// that knows nothing about it. That separation is what makes a round reset a re-read rather than a
+/// special case.
+///
+/// The height is **relative to the ground**, not a world y, and that is a correctness rule rather
+/// than a saving: terrain is editable, so an absolute height is wrong the moment somebody sculpts
+/// underneath it — a spawn buried in a new hill, a vehicle dropped four metres onto a valley floor
+/// that used to be a ridge. An offset moves with the ground, so every marker survives every stroke
+/// with no fix-up pass and no way to forget one.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "MarkerFile", into = "MarkerFile")]
 pub struct Marker {
+    /// Which placeable this is, as a palette id rather than an enum of the three that exist today.
     pub kind: String,
     pub x: f32,
     pub z: f32,
     /// Metres above the ground beneath, not world y.
-    #[serde(default)]
     pub y: f32,
-    /// A quaternion in the file too, because a yaw cannot say "leaning against that rock".
-    #[serde(default)]
-    pub rotation: Option<[f32; 4]>,
-    /// The convenience an author writing a manifest by hand actually wants.
-    #[serde(default)]
-    pub yaw: Option<f32>,
+    /// A full rotation, because a yaw cannot say "lying the way that hillside does".
+    ///
+    /// Not Euler angles as the representation, and not for gimbal lock: **a quaternion has no
+    /// convention to disagree about.** Three angles need an axis order and a handedness, both sides
+    /// have to pick the same ones, and the failure when they do not is a marker that is subtly
+    /// turned rather than an error anybody sees.
+    pub rotation: Quat,
+}
+
+impl Marker {
+    /// Whether this is a marker a map can hold, given the grid it stands on.
+    ///
+    /// The same check for one read off disk and one off the wire, which is the point of it being
+    /// here: the file is hand-editable and the wire is another machine, and neither is trusted.
+    pub fn check(&self, grid: Grid) -> Result<(), MapFault> {
+        if self.kind.is_empty() || self.kind.len() > 64 {
+            return Err(MapFault::Marker);
+        }
+        if !self.x.is_finite() || !self.z.is_finite() || !self.y.is_finite() {
+            return Err(MapFault::Marker);
+        }
+        let (low, high) = grid.bounds();
+        if self.x < low.x || self.x > high.x || self.z < low.y || self.z > high.y {
+            return Err(MapFault::Marker);
+        }
+        if self.y.abs() > MAX_MARKER_Y {
+            return Err(MapFault::Marker);
+        }
+        // An unnormalised quaternion does not error when it is used, it scales and skews whatever
+        // it is applied to. So the length is checked rather than assumed — and `normalize` is what
+        // fixes a merely sloppy one, in `MarkerFile`'s conversion, before it ever gets here.
+        if !self.rotation.is_finite() || (self.rotation.length() - 1.0).abs() > 1.0e-3 {
+            return Err(MapFault::Marker);
+        }
+        Ok(())
+    }
+
+    /// Where the entity this marker describes actually appears, on the ground as it is now.
+    pub fn where_it_stands(&self, terrain: &Terrain) -> Vec3 {
+        Vec3::new(self.x, terrain.height_over(self.x, self.z) + self.y, self.z)
+    }
+}
+
+/// How near a rotation has to be to a pure yaw before the file writes it as one.
+///
+/// A tolerance rather than an equality, because a rotation that has been through a `Quat` and back
+/// is not bit-identical to the one that went in. Loose enough to catch that, tight enough that
+/// anything an author actually tilted is written in full: at this bound the axis is under a
+/// thousandth of a degree off vertical.
+const PURE_YAW: f32 = 1.0e-6;
+
+/// A marker the way the manifest writes it, which is not quite the way the game holds it.
+///
+/// Two differences, both for the sake of the file being read by people. The rotation may be given
+/// as a `yaw` in **degrees** instead of four numbers, because `[0, 0.383, 0, 0.924]` is not
+/// something anybody can check by looking. And `y` is left out when it is zero, which is the
+/// ordinary case.
+///
+/// The shorthand is safe because it has an exact expansion *and* an exact contraction: a pure yaw
+/// can be recognised on the way out and written back as one. That is what stops it being
+/// write-only — an "accept either" reader paired with an "always write the general form" writer
+/// turns every hand-written `yaw: 45` into a quaternion on the first save, and the readability
+/// lasts exactly as long as nobody edits the map.
+#[derive(Clone, Serialize, Deserialize)]
+struct MarkerFile {
+    kind: String,
+    x: f32,
+    z: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    y: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rotation: Option<[f32; 4]>,
+    /// Degrees, and degrees only here — radians everywhere in code, converted at this boundary and
+    /// nowhere else. `"yaw": 45` is readable where `"yaw": 0.785` is not, and readability is the
+    /// entire reason the shorthand exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    yaw: Option<f32>,
+}
+
+fn is_zero(y: &f32) -> bool {
+    *y == 0.0
+}
+
+impl TryFrom<MarkerFile> for Marker {
+    type Error = MapFault;
+
+    fn try_from(file: MarkerFile) -> Result<Self, MapFault> {
+        let rotation = match (file.rotation, file.yaw) {
+            (Some(_), Some(_)) => return Err(MapFault::TwoRotations),
+            (Some([x, y, z, w]), None) => {
+                // Normalised rather than trusted: a hand-written quaternion is rarely unit length,
+                // and one that is not silently stretches the thing it turns.
+                Quat::from_xyzw(x, y, z, w).normalize()
+            }
+            // The convention `level.rs` already states and uses: a yaw about +Y, applied to the −Z
+            // that is forward everywhere here.
+            (None, Some(degrees)) => Quat::from_rotation_y(degrees.to_radians()),
+            (None, None) => Quat::IDENTITY,
+        };
+        if !rotation.is_finite() {
+            return Err(MapFault::Marker);
+        }
+        Ok(Marker { kind: file.kind, x: file.x, z: file.z, y: file.y, rotation })
+    }
+}
+
+impl From<Marker> for MarkerFile {
+    fn from(marker: Marker) -> Self {
+        let q = marker.rotation;
+        // Canonical, not remembered: whatever the file said before, a rotation that *is* a yaw is
+        // written as one. `to_euler` is exact for a rotation about Y alone, and the branch is what
+        // decides it — a tilted marker keeps all four numbers.
+        let yaw = (q.x.abs() < PURE_YAW && q.z.abs() < PURE_YAW)
+            .then(|| q.to_euler(EulerRot::YXZ).0.to_degrees());
+        Self {
+            kind: marker.kind,
+            x: marker.x,
+            z: marker.z,
+            y: marker.y,
+            rotation: yaw.is_none().then(|| q.to_array()),
+            yaw,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1591,6 +1761,163 @@ mod tests {
         assert_eq!(Terrain::decode(grid, None, &[]), Err(MapFault::TooManySamples));
     }
 
+    /// Whether two quaternions are the same turn.
+    ///
+    /// By the dot product rather than [`Quat::angle_between`], which goes through `acos` and loses
+    /// half its digits next to zero: a round trip correct to a part in ten million reads there as
+    /// three ten-thousandths of a radian of error. `q` and `−q` are the same rotation, hence the
+    /// absolute value.
+    fn same_turn(a: Quat, b: Quat) -> bool {
+        a.dot(b).abs() > 1.0 - 1.0e-6
+    }
+
+    /// A yaw written by hand comes back as the rotation it means, in radians.
+    #[test]
+    fn a_yaw_in_the_file_is_degrees_and_a_quaternion_in_the_game() {
+        let marker: Marker =
+            serde_json::from_str(r#"{"kind":"vehicle","x":14,"z":-8,"yaw":90}"#).expect("it reads");
+        assert_eq!(marker.kind, "vehicle");
+        assert_eq!(marker.y, 0.0, "an absent offset is on the ground");
+        let forward = marker.rotation * Vec3::NEG_Z;
+        assert!(
+            (forward - Vec3::NEG_X).length() < 1.0e-5,
+            "90° should face -X, it faces {forward}",
+        );
+    }
+
+    /// A rotation that is a yaw is written back as a yaw, whatever it arrived as.
+    ///
+    /// The rule that stops the shorthand being write-only. An "accept either form" reader paired
+    /// with an "always write the general form" writer turns every hand-written `yaw: 45` into four
+    /// numbers on the first save, and the file stops being readable exactly when the editor first
+    /// touches it.
+    #[test]
+    fn a_marker_that_is_only_turned_is_written_as_a_yaw() {
+        let marker = Marker {
+            kind: "crate".into(),
+            x: 1.0,
+            z: 2.0,
+            y: 0.0,
+            rotation: Quat::from_rotation_y(0.75),
+        };
+        let text = serde_json::to_string(&marker).expect("it writes");
+        assert!(text.contains("\"yaw\""), "written as {text}");
+        assert!(!text.contains("rotation"), "written as {text}");
+        assert!(!text.contains("\"y\""), "a zero offset should not be written: {text}");
+
+        let back: Marker = serde_json::from_str(&text).expect("it reads back");
+        assert!(same_turn(back.rotation, marker.rotation), "{back:?}");
+    }
+
+    /// A marker that is tilted keeps all four numbers.
+    #[test]
+    fn a_marker_that_is_tilted_is_written_in_full() {
+        let marker = Marker {
+            kind: "crate".into(),
+            x: 0.0,
+            z: 0.0,
+            y: 0.5,
+            rotation: Quat::from_rotation_x(0.3) * Quat::from_rotation_y(0.75),
+        };
+        let text = serde_json::to_string(&marker).expect("it writes");
+        assert!(text.contains("rotation"), "written as {text}");
+        assert!(!text.contains("yaw"), "written as {text}");
+
+        let back: Marker = serde_json::from_str(&text).expect("it reads back");
+        assert!(same_turn(back.rotation, marker.rotation), "{back:?}");
+        assert_eq!(back.y, 0.5);
+    }
+
+    /// Both forms at once is refused rather than resolved.
+    ///
+    /// A precedence rule is a thing somebody has to remember correctly at two in the morning. The
+    /// map that would need it is the one nobody looks at again.
+    #[test]
+    fn a_marker_may_not_give_both_a_yaw_and_a_rotation() {
+        let text = r#"{"kind":"crate","x":0,"z":0,"yaw":45,"rotation":[0,0,0,1]}"#;
+        let refused = serde_json::from_str::<Marker>(text).expect_err("it should be refused");
+        assert!(
+            refused.to_string().contains("never both"),
+            "refused with the wrong reason: {refused}",
+        );
+    }
+
+    /// A quaternion nobody normalised is normalised on the way in.
+    ///
+    /// It does not error when it is used — it scales and skews whatever it is applied to, which is
+    /// a crate that is subtly the wrong size rather than a message anybody reads.
+    #[test]
+    fn a_sloppy_quaternion_is_made_a_rotation() {
+        let marker: Marker =
+            serde_json::from_str(r#"{"kind":"crate","x":0,"z":0,"rotation":[0,0.6,0,0.6]}"#)
+                .expect("it reads");
+        assert!((marker.rotation.length() - 1.0).abs() < 1.0e-6);
+        assert_eq!(marker.check(default_terrain().grid), Ok(()));
+    }
+
+    /// The checks a marker off the wire or off a hand-edited file has to pass.
+    #[test]
+    fn a_marker_has_to_stand_on_the_map() {
+        let grid = default_terrain().grid;
+        let (low, high) = grid.bounds();
+        let good = Marker {
+            kind: "crate".into(),
+            x: 0.0,
+            z: 0.0,
+            y: 0.0,
+            rotation: Quat::IDENTITY,
+        };
+        assert_eq!(good.check(grid), Ok(()));
+
+        let off_the_rim = Marker { x: high.x + 1.0, ..good.clone() };
+        assert_eq!(off_the_rim.check(grid), Err(MapFault::Marker));
+        let under_the_rim = Marker { z: low.y - 1.0, ..good.clone() };
+        assert_eq!(under_the_rim.check(grid), Err(MapFault::Marker));
+        let too_high = Marker { y: MAX_MARKER_Y + 0.1, ..good.clone() };
+        assert_eq!(too_high.check(grid), Err(MapFault::Marker));
+        // Both directions, which an absolute height would not need: a negative offset is a crate
+        // half sunk into a slope, and a large one is a spawn under the map.
+        let too_deep = Marker { y: -MAX_MARKER_Y - 0.1, ..good.clone() };
+        assert_eq!(too_deep.check(grid), Err(MapFault::Marker));
+        let nameless = Marker { kind: String::new(), ..good.clone() };
+        assert_eq!(nameless.check(grid), Err(MapFault::Marker));
+        let bent = Marker { rotation: Quat::from_xyzw(0.0, 2.0, 0.0, 0.0), ..good };
+        assert_eq!(bent.check(grid), Err(MapFault::Marker));
+    }
+
+    /// A marker's height follows the ground rather than the world.
+    ///
+    /// The whole reason `y` is an offset: sculpt under a spawn and it comes up with the hill
+    /// instead of ending inside it.
+    #[test]
+    fn a_marker_rides_the_ground_it_stands_on() {
+        let mut terrain = default_terrain();
+        let marker =
+            Marker { kind: "crate".into(), x: 4.0, z: 4.0, y: 1.5, rotation: Quat::IDENTITY };
+        let before = marker.where_it_stands(&terrain);
+        assert!(
+            (before.y - terrain.height_over(4.0, 4.0) - 1.5).abs() < 1.0e-4,
+            "it should stand 1.5 m over the ground",
+        );
+
+        terrain
+            .sculpt(&crate::sculpt::Stroke {
+                at: Vec2::new(4.0, 4.0),
+                radius: 8.0,
+                brush: crate::sculpt::Brush::Lift { metres: 5.0 },
+            })
+            .expect("the ground moved");
+        let after = marker.where_it_stands(&terrain);
+        assert!(
+            after.y > before.y + 4.0,
+            "the ground rose 5 m and the marker went from {before} to {after}",
+        );
+        assert!(
+            (after.y - terrain.height_over(4.0, 4.0) - 1.5).abs() < 1.0e-4,
+            "it should still stand 1.5 m over the ground",
+        );
+    }
+
     /// Every default layer wins somewhere on the map everybody starts on.
     ///
     /// A rule set is only legible if you can see all of it, and a layer that never comes out on top
@@ -1754,8 +2081,15 @@ mod tests {
             x: 1.5,
             z: -2.0,
             y: 0.0,
-            rotation: None,
-            yaw: Some(1.57),
+            rotation: Quat::from_rotation_y(1.57),
+        });
+        // One that is tilted as well, so the round trip covers both forms the file may take.
+        manifest.markers.push(Marker {
+            kind: "vehicle".into(),
+            x: -4.0,
+            z: 6.0,
+            y: 0.25,
+            rotation: Quat::from_rotation_x(0.2) * Quat::from_rotation_y(1.0),
         });
 
         let text = serde_json::to_string_pretty(&manifest).expect("it serialises");
