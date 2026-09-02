@@ -23,6 +23,14 @@ bevy-inspector-egui = { version = "0.37", optional = true }
 # running game the way the harness does.
 bevy_brp_extras = { version = "0.22.5", optional = true }
 
+[dev-dependencies]
+# Only a test needs to read a PNG on its own: the one that checks the layer colours in
+# `default_layers` still match the textures they were measured from. Bevy already pulls this exact
+# version in, so it costs nothing but a line.
+# PNG alone: the default feature set brings a dozen codecs this has no use for, and with them four
+# hundred lines of lockfile.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [features]
 remote = ["noob_tube_shared/remote", "dep:bevy_brp_extras"]
 inspector = ["dep:bevy-inspector-egui"]

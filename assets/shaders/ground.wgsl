@@ -36,11 +36,10 @@ struct GroundRules {
     height: array<vec4<f32>, 4>,
     // Hollow band in metres below the surroundings: from, to, blend. w unused.
     dip: array<vec4<f32>, 4>,
-    // How many of the four rows are real.
+    // How many of the four rows are real. The struct's tail is rounded up to sixteen bytes by both
+    // WGSL and `ShaderType`, so this needs no padding written after it — and a `vec3` pad would
+    // have added twelve bytes *before* itself to reach its own alignment.
     count: u32,
-    // How strongly the second, large-scale sample of each texture modulates the first.
-    tile_break: f32,
-    _pad: vec2<f32>,
 }
 
 // The group is a shader def rather than a number: Bevy moved the material bind group to 3 in this
@@ -82,31 +81,78 @@ fn band(x: f32, low: f32, high: f32, blend: f32) -> f32 {
     return min(rising * rising * (3.0 - 2.0 * rising), falling * falling * (3.0 - 2.0 * falling));
 }
 
-/// How much larger the tile break's second sample is than the first.
+/// Two independent values per lattice cell, and no `sin` in it.
 ///
-/// Deliberately not a whole multiple: at 7.3 the two repeats never line up again inside any view,
-/// so the pattern the break exists to hide cannot come back at its own scale.
-const BREAK_SCALE: f32 = 7.3;
+/// Dave Hoskins' `hash22`. The obvious `fract(sin(dot(...)))` was good enough for noise measured in
+/// tens of metres, but this is asked about lattice cells that run into the hundreds across the map,
+/// and the argument to `sin` then runs into the hundred-thousands — where single precision has
+/// nothing left and different hardware disagrees. `fract` early keeps every term small.
+fn hash2(at: vec2<f32>) -> vec2<f32> {
+    var p = fract(vec3<f32>(at.x, at.y, at.x) * vec3<f32>(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.xx + p.yz) * p.zy);
+}
 
-/// One texture on one plane, with the large-scale modulation multiplied in.
+/// One texture on one plane, sampled so that it does not repeat.
 ///
-/// Centred on one rather than a straight multiply. `a * b` would square the texture's variance and
-/// turn the albedo to mud; `a * mix(1, 2b, strength)` leaves the average where it was and only
-/// moves it about.
+/// **Stochastic tiling**, after Heitz and Neyret. A texture laid down every four metres repeats,
+/// and from far enough away to see many repeats at once the eye reads the repetition rather than
+/// the material — a long rock wall turns into wallpaper. Nothing multiplied over the top fixes
+/// that: the pattern is repeated *structure*, and a slow change in brightness cannot cancel
+/// structure. Measured on this very texture at the mip a two-hundred-metre wall lands on, a
+/// large-scale modulation left the grid exactly where it was.
+///
+/// So the repetition is removed instead of masked. The plane is covered with a triangular lattice;
+/// each cell shifts the texture by its own random offset, and a point is blended from the three
+/// cells whose corners surround it. The offsets are random, the lattice is not periodic in the
+/// texture's own frame, and the seams between cells fall inside the blend.
+///
+/// The blend is **variance preserving**, and that is not a nicety. Averaging three samples of a
+/// noisy texture flattens it toward its own mean — the flatter the more evenly the three are
+/// weighted — so a plain average would leave soft patches wherever a point sat in the middle of a
+/// triangle. Dividing the deviation by the length of the weight vector puts the contrast back
+/// exactly. `mean` is the layer's average colour, which the uniform already carries.
+///
+/// Three samples where a plain lookup takes one. The tile break it replaces took two and did not
+/// work, so on flat ground this is one extra fetch, and on the wall it was written for it is two.
 fn planar(
     tex: texture_2d<f32>,
     samp: sampler,
     uv: vec2<f32>,
     ddx: vec2<f32>,
     ddy: vec2<f32>,
+    mean: vec3<f32>,
 ) -> vec3<f32> {
-    let a = textureSampleGrad(tex, samp, uv, ddx, ddy).rgb;
-    if rules.tile_break <= 0.0 {
-        return a;
+    // The lattice, skewed so that its cells are equilateral triangles rather than right ones.
+    let scaled = uv * 3.464;
+    let skewed = vec2<f32>(scaled.x - 0.57735027 * scaled.y, 1.15470054 * scaled.y);
+    let cell = floor(skewed);
+    let f = skewed - cell;
+    // Which of the two triangles in this rhombus the point is in, and the barycentric weights of
+    // whichever three corners those are.
+    let z = 1.0 - f.x - f.y;
+    var weights: vec3<f32>;
+    var corners: mat3x2<f32>;
+    if z > 0.0 {
+        weights = vec3<f32>(z, f.y, f.x);
+        corners = mat3x2<f32>(cell, cell + vec2<f32>(0.0, 1.0), cell + vec2<f32>(1.0, 0.0));
+    } else {
+        weights = vec3<f32>(-z, 1.0 - f.y, 1.0 - f.x);
+        corners = mat3x2<f32>(
+            cell + vec2<f32>(1.0, 1.0),
+            cell + vec2<f32>(1.0, 0.0),
+            cell + vec2<f32>(0.0, 1.0),
+        );
     }
-    let k = 1.0 / BREAK_SCALE;
-    let b = textureSampleGrad(tex, samp, uv * k, ddx * k, ddy * k).rgb;
-    return a * mix(vec3<f32>(1.0), b * 2.0, rules.tile_break);
+    // The gradients are the caller's and are the same for all three: the offsets are translations,
+    // so every sample covers the same footprint and wants the same mip level.
+    let a = textureSampleGrad(tex, samp, uv + hash2(corners[0]), ddx, ddy).rgb;
+    let b = textureSampleGrad(tex, samp, uv + hash2(corners[1]), ddx, ddy).rgb;
+    let c = textureSampleGrad(tex, samp, uv + hash2(corners[2]), ddx, ddy).rgb;
+    let mixed = weights.x * a + weights.y * b + weights.z * c;
+    // Clamped at zero: putting the contrast back amplifies the deviation by up to √3, which on the
+    // darkest texels of a dark texture reaches past black.
+    return max(vec3<f32>(0.0), (mixed - mean) / length(weights) + mean);
 }
 
 /// One layer, sampled on whichever world planes the surface faces.
@@ -123,17 +169,18 @@ fn triplanar(
     dy: vec3<f32>,
     weights: vec3<f32>,
     tile_metres: f32,
+    mean: vec3<f32>,
 ) -> vec3<f32> {
     let k = 1.0 / max(tile_metres, 0.01);
     var total = vec3<f32>(0.0);
     if weights.y > NEGLIGIBLE {
-        total += weights.y * planar(tex, samp, world.xz * k, dx.xz * k, dy.xz * k);
+        total += weights.y * planar(tex, samp, world.xz * k, dx.xz * k, dy.xz * k, mean);
     }
     if weights.x > NEGLIGIBLE {
-        total += weights.x * planar(tex, samp, world.zy * k, dx.zy * k, dy.zy * k);
+        total += weights.x * planar(tex, samp, world.zy * k, dx.zy * k, dy.zy * k, mean);
     }
     if weights.z > NEGLIGIBLE {
-        total += weights.z * planar(tex, samp, world.xy * k, dx.xy * k, dy.xy * k);
+        total += weights.z * planar(tex, samp, world.xy * k, dx.xy * k, dy.xy * k, mean);
     }
     return total;
 }
@@ -180,7 +227,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     if weight.x > NEGLIGIBLE {
         var c = rules.colour[0].rgb;
         if rules.slope[0].w > 0.5 {
-            c = triplanar(texture_0, sampler_0, world, dx, dy, planes, rules.height[0].w);
+            c = triplanar(
+                texture_0, sampler_0, world, dx, dy, planes, rules.height[0].w,
+                rules.colour[0].rgb,
+            );
         }
         colour += weight.x * c;
         roughness += weight.x * rules.colour[0].w;
@@ -188,7 +238,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     if weight.y > NEGLIGIBLE {
         var c = rules.colour[1].rgb;
         if rules.slope[1].w > 0.5 {
-            c = triplanar(texture_1, sampler_1, world, dx, dy, planes, rules.height[1].w);
+            c = triplanar(
+                texture_1, sampler_1, world, dx, dy, planes, rules.height[1].w,
+                rules.colour[1].rgb,
+            );
         }
         colour += weight.y * c;
         roughness += weight.y * rules.colour[1].w;
@@ -196,7 +249,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     if weight.z > NEGLIGIBLE {
         var c = rules.colour[2].rgb;
         if rules.slope[2].w > 0.5 {
-            c = triplanar(texture_2, sampler_2, world, dx, dy, planes, rules.height[2].w);
+            c = triplanar(
+                texture_2, sampler_2, world, dx, dy, planes, rules.height[2].w,
+                rules.colour[2].rgb,
+            );
         }
         colour += weight.z * c;
         roughness += weight.z * rules.colour[2].w;
@@ -204,7 +260,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     if weight.w > NEGLIGIBLE {
         var c = rules.colour[3].rgb;
         if rules.slope[3].w > 0.5 {
-            c = triplanar(texture_3, sampler_3, world, dx, dy, planes, rules.height[3].w);
+            c = triplanar(
+                texture_3, sampler_3, world, dx, dy, planes, rules.height[3].w,
+                rules.colour[3].rgb,
+            );
         }
         colour += weight.w * c;
         roughness += weight.w * rules.colour[3].w;

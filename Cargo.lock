@@ -5766,6 +5766,7 @@ dependencies = [
  "bevy",
  "bevy-inspector-egui",
  "bevy_brp_extras",
+ "image",
  "lightyear",
  "noob_tube_shared",
  "serde",

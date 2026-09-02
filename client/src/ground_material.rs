@@ -21,20 +21,6 @@ use noob_tube_shared::terrain::{Layer, MAX_LAYERS};
 /// The shader, by the path the asset server knows it under.
 const SHADER: &str = "shaders/ground.wgsl";
 
-/// How strongly the tile break modulates the ground, from 0 (off) to 1.
-///
-/// A four-metre texture repeated over five hundred reads as a grid from anywhere far enough away
-/// to see more than a few tiles of it, and no amount of filtering hides a pattern that is really
-/// there. The break is a **second sample of the same texture at a much larger scale**, multiplied
-/// in — so what varies across a hillside is the texture's own structure, at the size of a
-/// landscape feature, rather than a smooth wash laid over the top of it. Synthetic noise stood
-/// here before and could only change the brightness; this changes what the ground is made of,
-/// which is what the eye was missing.
-///
-/// `webgame`'s `uTileBreak`, and its value: strong enough to break the grid, weak enough that a
-/// slope's shading still reads as its shape.
-const TILE_BREAK: f32 = 0.35;
-
 /// What the ground is drawn with: Bevy's PBR, with the derivation bolted on to its fragment stage.
 pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundLayers>;
 
@@ -59,7 +45,12 @@ pub struct GroundTextures(pub Vec<Handle<Image>>);
 /// `assets/shaders/ground.wgsl` and nowhere else.
 #[derive(Clone, Copy, Default, ShaderType, Debug, Reflect)]
 pub struct GroundRules {
-    /// `rgb` linear colour, `w` perceptual roughness.
+    /// `rgb` the layer's average linear colour, `w` perceptual roughness.
+    ///
+    /// The average is load-bearing twice over: it is what the ground is painted with before a
+    /// texture has loaded, and it is the mean the stochastic blend restores the contrast around.
+    /// A wrong one shows up as ground that changes brightness when its texture arrives, and as
+    /// washed-out patches in the middle of every lattice triangle.
     colour: [Vec4; MAX_LAYERS],
     /// Slope band in degrees from flat: from, to, blend, and `w` = 1 where a texture is bound.
     ///
@@ -74,18 +65,16 @@ pub struct GroundRules {
     dip: [Vec4; MAX_LAYERS],
     /// How many of the rows are real. A map with more layers than the cap loses the extras here
     /// rather than in the shader, where the loop bound is this number.
+    ///
+    /// Last, and with no padding after it: both `ShaderType` and WGSL round a struct's size up to
+    /// its own alignment, which the `Vec4` arrays already put at sixteen bytes.
     count: u32,
-    tile_break: f32,
-    /// Padding to the sixteen bytes a uniform's tail is rounded up to anyway. Named rather than
-    /// implicit, because `ShaderType` and the WGSL struct have to agree on the size and a silent
-    /// pad is a silent chance for them not to.
-    _pad: Vec2,
 }
 
 impl GroundRules {
     /// The uniform a map's layers describe.
     pub fn of(layers: &[Layer]) -> Self {
-        let mut rules = Self { tile_break: TILE_BREAK, ..default() };
+        let mut rules = Self::default();
         for (slot, layer) in layers.iter().take(MAX_LAYERS).enumerate() {
             let [r, g, b] = layer.colour;
             rules.colour[slot] = Vec4::new(r, g, b, layer.roughness);
@@ -330,6 +319,40 @@ pub fn dress(
 mod tests {
     use super::*;
     use noob_tube_shared::terrain::default_layers;
+
+    /// The colour written for each layer is the colour its texture actually averages to.
+    ///
+    /// [`Layer::colour`] is a measurement, not a preference: the shader restores the contrast of
+    /// its stochastic blend *around* this value, and paints untextured ground *with* it. A wrong
+    /// one is a texture that changes brightness the moment it loads, and washed-out patches in the
+    /// middle of every lattice triangle — neither of which points at a number in a table.
+    ///
+    /// So the number is checked against the file it came from rather than trusted. It reads the
+    /// shipped PNG, converts to linear light exactly as the GPU does for an sRGB texture, and
+    /// averages. Swap a pack for another and this fails, which is the moment to want it to.
+    #[test]
+    fn each_layer_is_the_colour_its_own_texture_averages_to() {
+        for layer in default_layers() {
+            let path = format!("../assets/textures/{}_Color.png", layer.texture);
+            let image = image::open(&path).unwrap_or_else(|e| panic!("{path}: {e}")).to_rgb8();
+            let mut total = [0.0f64; 3];
+            for pixel in image.pixels() {
+                for (sum, channel) in total.iter_mut().zip(pixel.0) {
+                    *sum += f64::from(srgb_to_linear(channel));
+                }
+            }
+            let count = f64::from(image.width()) * f64::from(image.height());
+            for (channel, sum) in total.iter().enumerate() {
+                let measured = sum / count;
+                let written = f64::from(layer.colour[channel]);
+                assert!(
+                    (measured - written).abs() < 0.002,
+                    "{} channel {channel} averages {measured:.4}, but the layer says {written:.4}",
+                    layer.texture,
+                );
+            }
+        }
+    }
 
     /// Every band reaches the uniform in the units the shader reads them in.
     ///

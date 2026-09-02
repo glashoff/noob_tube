@@ -2761,10 +2761,48 @@ mip chain the same view is back to **61** — mipmaps are not only what stops th
 what stops a distant pixel missing the texture cache on every sample. Near the ground: 60 fps and
 the grass reads as blades.
 
-The world-space value noise stays, with a different job. It no longer has to give the eye something
-at close range — the texture does that — but a 4 m repeat reads as a grid across a hillside, and a
-slow brightness change at 42 m is what breaks it. That is the plan's "tile break", arrived at from
-the other side.
+#### The tiling, and what actually removes it
+
+A 4 m texture over a 512 m map repeats, and from far enough away to see many repeats at once the eye
+reads the repetition rather than the material: a long rock wall becomes wallpaper. Two things were
+tried against that before the third worked, and the useful part is *why* the first two do not.
+
+Both were **multiplied over the top** — first two octaves of world-space value noise, then
+`webgame`'s own trick of a second sample of the same texture at 7.3×. Neither touches the problem.
+The grid is repeated *structure*, and no change in brightness can cancel structure. That is not a
+judgement, it is a picture: the same texture was tiled offline across a 200 m wall at the mip level
+that distance lands on, and the modulated version is indistinguishable from the plain one.
+
+Worse, the second one was **darkening the ground by 30%**. `a * mix(1, 2b, 0.35)` is centred on one
+only if `2b` averages one — that is, if the texture averages 0.5. `Rock020` averages **0.078** in
+linear light. Inherited from `webgame` without the arithmetic being checked.
+
+What works is **stochastic tiling** (Heitz & Neyret, 2018), which is what the repetition-free
+terrain in current engines is built on. The plane is covered with a triangular lattice of about a
+metre; each cell shifts the texture by its own random offset, and a point is blended from the three
+cells surrounding it. There is no period left for the eye to find.
+
+The blend has to be **variance preserving** or it trades one artefact for another: averaging three
+samples of a noisy texture pulls it toward its own mean, hardest where the three weigh equally,
+which is the middle of every triangle. Dividing the deviation by the length of the weight vector
+puts the contrast back exactly — measured, σ = 0.0185 both before and after, against 0.0132 for the
+tile break it replaces.
+
+| on a 200 m wall, at the mip that distance implies | mean | σ | grid |
+| --- | --- | --- | --- |
+| plain tiling | 0.0780 | 0.0185 | plainly |
+| tile break at 7.3× | 0.0550 | 0.0132 | unchanged |
+| plus large-scale noise | 0.0495 | 0.0127 | unchanged, with a veil |
+| stochastic | 0.0779 | 0.0185 | **gone** |
+
+The mean it restores the contrast around is the layer's own `colour`, which turned out to be the
+third thing wrong here: every one of those was an sRGB-looking value sitting in a field documented
+as linear, four to seven times too bright, and grass had lost most of its green with it. They are
+measured off the shipped PNGs now, and a test re-measures them rather than trusting the table.
+
+Cost: three samples where the break took two. Measured at **+4.3 ms a frame** (40.7 → 45.0 ms) —
+but with a second client of this game sharing one integrated GPU, so the true figure is smaller and
+cannot be taken cleanly while it is.
 
 Two things cost an afternoon between them and neither shows up until the game is running. `from` is
 a **reserved word in WGSL**, so a band's parameters could not be named after the Rust fields they
@@ -2807,9 +2845,14 @@ different spawn, different obstacles, a vehicle whose pose is the server's.
 
 #### Still to come
 
-Steps 8 to 10 of the plan: placement; undo; and water. Step 11's rule set is done and its textures
-are not — a layer is a colour until there are ground textures to name, and triplanar and tile break
-are questions about textures.
+Steps 8 to 10 of the plan: placement; undo; and water.
+
+Two things the ground could still use. **Normal and roughness maps** per layer, which `webgame`
+samples and this does not: it is the difference between grass that catches a low sun and a
+photograph of grass. The packs carry them; at 1K they are about 18 MB, or 5 MB resampled to 512.
+And a **quality setting** — `webgame` has one for exactly the knobs that turned out to matter here
+(triplanar strength, PBR maps, tile break), and the machine this is developed on is the machine that
+would want it.
 
 ## Risks
 

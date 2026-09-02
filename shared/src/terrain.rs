@@ -1015,9 +1015,12 @@ pub const MAX_LAYERS: usize = 4;
 /// flat ground everybody spawns on, and there is no snow texture for a summit. A rule that cannot
 /// be seen is a rule that cannot be checked, so it waits for the thing that makes it visible.
 ///
-/// A layer's `colour` is what it *averages* to, and it is not decoration either: it is what the
-/// ground is painted with before its texture has loaded, and what a headless build sees. Taken
-/// from each pack rather than invented, so the two never disagree by much.
+/// A layer's `colour` is what its texture *averages* to in **linear** light, and it does three
+/// jobs: it is what the ground is painted with before the texture has loaded, it is what a
+/// headless build sees, and it is the mean the shader's stochastic blend restores the contrast
+/// around. Measured off each `_Color.png` — every one of these was previously an sRGB-looking
+/// value written into a linear field, four to seven times too bright, and grass had lost most of
+/// its green with it.
 pub fn default_layers() -> Vec<Layer> {
     /// Where grass gives way to rock, and how wide the crossing is.
     const STEEP: Band = Band { from: 35.0, to: 1.0e9, blend: 16.0 };
@@ -1030,7 +1033,7 @@ pub fn default_layers() -> Vec<Layer> {
         Layer {
             texture: "Grass001_1K-PNG".into(),
             tile_scale: 4.0,
-            colour: [0.42, 0.45, 0.30],
+            colour: [0.060, 0.109, 0.023],
             roughness: 0.95,
             slope: NOT_STEEP,
             height: Band::ANY,
@@ -1039,7 +1042,7 @@ pub fn default_layers() -> Vec<Layer> {
         Layer {
             texture: "Ground048_1K-PNG".into(),
             tile_scale: 4.0,
-            colour: [0.50, 0.44, 0.34],
+            colour: [0.105, 0.056, 0.038],
             roughness: 0.92,
             slope: NOT_STEEP,
             height: Band::ANY,
@@ -1048,7 +1051,7 @@ pub fn default_layers() -> Vec<Layer> {
         Layer {
             texture: "Rock020_1K-PNG".into(),
             tile_scale: 4.0,
-            colour: [0.48, 0.46, 0.44],
+            colour: [0.084, 0.082, 0.069],
             roughness: 0.8,
             slope: STEEP,
             height: Band::ANY,
