@@ -67,7 +67,6 @@ pub struct LocalPlayerPlugin;
 impl Plugin for LocalPlayerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Update, stop_smoothing_what_is_no_longer_predicted)
-            .init_resource::<PointerOverUi>()
             // Lightyear counts rollbacks but does not register the type, so nothing outside the
             // process can read it. It is the one number that says whether prediction is agreeing
             // with the server: a steady climb means the client is guessing wrong.
@@ -88,7 +87,6 @@ impl Plugin for LocalPlayerPlugin {
             .add_systems(
                 Update,
                 (
-                    note_pointer_over_ui,
                     note_drawn_view,
                     grab_cursor,
                     draw_or_stow_the_weapon,
@@ -214,30 +212,6 @@ pub struct ScriptedInput(pub Option<PlayerInput>);
 #[reflect(Resource)]
 pub struct AimingTooLow(pub bool);
 
-/// Set while an inspector panel wants the pointer, so click-to-grab can stand aside.
-///
-/// Always false without the `inspector` feature — there is no UI to click on.
-#[derive(Resource, Default)]
-struct PointerOverUi(bool);
-
-/// Update: records whether egui is under the pointer, ahead of [`grab_cursor`].
-///
-/// A resource rather than querying egui inside `grab_cursor`, so that system needs no `cfg` on its
-/// parameters and reads the same either way.
-#[cfg(feature = "inspector")]
-fn note_pointer_over_ui(
-    mut contexts: bevy_inspector_egui::bevy_egui::EguiContexts,
-    mut over: ResMut<PointerOverUi>,
-) {
-    over.0 = contexts
-        .ctx_mut()
-        .map(|ctx| ctx.egui_wants_pointer_input())
-        .unwrap_or(false);
-}
-
-#[cfg(not(feature = "inspector"))]
-fn note_pointer_over_ui() {}
-
 /// Diagnostics: how many times the fixed movement step has actually run.
 ///
 /// Registered for reflection so it can be read over BRP while the game runs. A stalled simulation
@@ -294,43 +268,17 @@ fn spawn_player(mut commands: Commands) {
     ));
 }
 
-/// Update: locks the cursor on click, releases it on Escape.
+/// Update: gives the pointer back when the window stops being the one in front.
 ///
-/// Mouse look reads relative motion, which the OS only keeps delivering once the pointer is locked;
-/// unlocked, it stops at the screen edge. Escape has to give it back, or the window cannot be left.
-///
-/// Three clicks must *not* grab, or the window becomes impossible to work with:
-///
-/// - one landing outside the client area, which is how a window edge is dragged to resize it;
-/// - one on an unfocused window, which is how a window is raised;
-/// - one on an inspector panel, which is how its values are edited.
-///
-/// The first two are what made resizing the window impossible: the grab confined the pointer before
-/// it ever reached the edge.
+/// Taking it is the menu's job and only the menu's — see [`map_menu`](crate::map_menu), where a
+/// free pointer and a menu on screen are one state rather than two that can disagree. Which leaves
+/// exactly one release nobody asked for: alt-tabbing away, where a window that kept the pointer
+/// confined would hold a desktop it is no longer on.
 ///
 /// In Bevy 0.19 this lives on `CursorOptions`, a component beside `Window`, not a field inside it.
-fn grab_cursor(
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    over_ui: Res<PointerOverUi>,
-    menu: Res<crate::map_menu::MapMenu>,
-    window: Single<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
-) {
+fn grab_cursor(window: Single<(&Window, &mut CursorOptions), With<PrimaryWindow>>) {
     let (window, mut cursor) = window.into_inner();
-    let inside = window.cursor_position().is_some();
-    // A fourth click that must not grab: one landing on the map menu, which is modal and needs the
-    // pointer for as long as it is up.
-    if mouse.just_pressed(MouseButton::Left) && inside && window.focused && !over_ui.0 && !menu.open
-    {
-        cursor.grab_mode = CursorGrabMode::Locked;
-        cursor.visible = false;
-    }
-    // Losing focus has to release the pointer too, or alt-tabbing away leaves it captured.
     if !window.focused {
-        cursor.grab_mode = CursorGrabMode::None;
-        cursor.visible = true;
-    }
-    if keys.just_pressed(KeyCode::Escape) {
         cursor.grab_mode = CursorGrabMode::None;
         cursor.visible = true;
     }

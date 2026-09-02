@@ -1,46 +1,57 @@
-//! The map menu: what maps there are, which one this is, and how to make another.
+//! The menu: what is in front of the game whenever the game is not being played.
 //!
-//! **A menu, not a HUD.** It is modal and opened deliberately, because every action in it is
-//! disruptive to everybody — a load moves every player on the server onto different ground. So it
-//! takes the screen, takes the keyboard, and gives the cursor back; nothing in it annotates the
-//! game while the game is being played.
+//! **It is up exactly when the pointer is free.** Not a key that opens a panel and another that
+//! shuts it — the two states are the same state. If the cursor is yours, you are in the menu; if
+//! the game has it, you are playing. That is the whole rule, and everything else follows from it:
+//! alt-tabbing away releases the pointer and so raises the menu, "Resume" takes the pointer and so
+//! lowers it, and there is no way to be looking at a menu that the game is still listening past.
 //!
-//! It decides nothing. Every rule about what a map may be lives on the server and in `shared`, and
-//! this asks — which is why the form validates against
-//! [`Grid::new`](noob_tube_shared::terrain::Grid::new) as it is typed rather than against a second
-//! copy of the caps. The numbers under the form are the ones the caps are enforced against, and an
-//! author should watch them move.
+//! It is a **tree of small dialogs** rather than one page of everything. The root has two entries,
+//! and each one that needs details opens a page that asks for exactly those. A page knows its
+//! parent, so Escape always means "back" and means it once per level.
 //!
-//! Function keys and modifiers throughout, and that is not decoration: the fields take typing, so
-//! any plain letter used as a command would be a letter that cannot be typed into a map name.
+//! **Mouse and keyboard both, over one model.** Every page is a list of rows and a selection;
+//! hovering moves the selection, clicking activates the row under the pointer, the arrows move the
+//! selection and Enter activates it. There is no second code path for the mouse, so there is no
+//! way for the two to disagree about what is selected or what a row does.
+//!
+//! It decides nothing about maps. Every rule about what a map may be lives on the server and in
+//! `shared`, which is why the new-map form validates through
+//! [`Grid::new`](noob_tube_shared::terrain::Grid::new) rather than against a second copy of the
+//! caps. The numbers under the form are the ones those caps are enforced against, and an author
+//! should watch them move as they type.
 
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::ui::ScrollPosition;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use lightyear::prelude::{MessageReceiver, MessageSender, MessageSystems};
 use noob_tube_shared::protocol::TerrainChannel;
 use noob_tube_shared::terrain::{
-    Grid, MapList, MapRequest, MAX_BASELINE_BYTES, sanitise_name,
+    Grid, MAX_BASELINE_BYTES, MapList, MapRequest, sanitise_name,
 };
 
-/// Where the panel sits and how big the type is.
-const MARGIN: f32 = 40.0;
+/// How the dialog is drawn.
 const FONT_SIZE: f32 = 15.0;
-const PADDING: f32 = 18.0;
+const ROW_HEIGHT: f32 = 26.0;
+const PADDING: f32 = 20.0;
+const DIALOG_WIDTH: f32 = 460.0;
+/// How many rows the list shows before it starts scrolling under the selection.
+const VISIBLE_ROWS: f32 = 14.0;
 
 pub struct MapMenuPlugin;
 
 impl Plugin for MapMenuPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<MapMenu>()
+            .register_type::<Page>()
             .init_resource::<MapMenu>()
-            .add_systems(Startup, spawn_panel)
+            .add_systems(Startup, spawn_dialog)
             // After lightyear has filled the receivers, for the same reason the baseline's reader
             // is: an inbox read before that is always empty.
             .add_systems(PreUpdate, hear_the_server.after(MessageSystems::Receive))
-            .add_systems(Update, (open_and_close, edit).chain())
-            .add_systems(Update, draw.after(edit))
+            .add_systems(Update, (follow_the_cursor, operate, rebuild, paint).chain())
             // Immediately after the keyboard is read into the game's input, and never before: the
             // point is to overwrite what was sampled, not to race it.
             .add_systems(
@@ -50,74 +61,176 @@ impl Plugin for MapMenuPlugin {
     }
 }
 
+/// One page of the menu.
+///
+/// Each knows its parent, which is what makes Escape mean one thing everywhere. [`Page::Main`] has
+/// none, and Escape there means the only thing left: back to the game.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Reflect)]
+pub enum Page {
+    #[default]
+    Main,
+    Map,
+    New,
+    Load,
+    SaveAs,
+}
+
+impl Page {
+    fn title(self) -> &'static str {
+        match self {
+            Page::Main => "NOOB TUBE",
+            Page::Map => "MAP",
+            Page::New => "NEW MAP",
+            Page::Load => "LOAD MAP",
+            Page::SaveAs => "SAVE MAP AS",
+        }
+    }
+
+    fn parent(self) -> Option<Page> {
+        match self {
+            Page::Main => None,
+            Page::Map => Some(Page::Main),
+            Page::New | Page::Load | Page::SaveAs => Some(Page::Map),
+        }
+    }
+}
+
 /// One thing that can be typed into.
 ///
 /// Extent and spacing rather than sample counts, because those are what somebody making a map
 /// actually thinks in — and the counts are derived and shown back, since they are what the caps
 /// are enforced against.
-#[derive(Clone, Copy, PartialEq)]
-enum Field {
-    Name,
-    ExtentX,
-    ExtentZ,
-    Spacing,
-    Low,
-    High,
+const FIELDS: [&str; 6] = ["Name", "Extent X", "Extent Z", "Spacing", "Lowest", "Highest"];
+
+/// Indices into [`MapMenu::values`]. The first six are [`FIELDS`]; the last is its own, because a
+/// name to save under and a name to create under are different questions asked on different pages.
+const NAME: usize = 0;
+const EXTENT_X: usize = 1;
+const EXTENT_Z: usize = 2;
+const SPACING: usize = 3;
+const LOW: usize = 4;
+const HIGH: usize = 5;
+const SAVE_AS: usize = 6;
+
+/// What a row does when it is chosen.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Action {
+    /// Take the pointer back, which is the same thing as closing the menu.
+    Resume,
+    Go(Page),
+    Back,
+    /// Make the map the form describes.
+    Create,
+    /// Write the map in play under the name it came from — or ask for one, if it has none.
+    Save,
+    /// Write it under the name in the field.
+    SaveUnder,
 }
 
-const FIELDS: [(Field, &str); 6] = [
-    (Field::Name, "Name"),
-    (Field::ExtentX, "Extent X"),
-    (Field::ExtentZ, "Extent Z"),
-    (Field::Spacing, "Spacing"),
-    (Field::Low, "Lowest"),
-    (Field::High, "Highest"),
-];
+/// One line of a page.
+#[derive(Clone, Copy, PartialEq)]
+enum Row {
+    /// A command.
+    Do(Action, &'static str),
+    /// An editable field, by its index into [`MapMenu::values`].
+    Field(usize, &'static str),
+    /// A map to load, by its index into the server's list.
+    Map(usize),
+}
 
 /// The menu, and everything it is showing.
 ///
 /// Registered for reflection, so what it is showing can be read over BRP while the game runs. That
-/// is not decoration: a modal driven entirely by the keyboard has no other way of saying which
-/// field the typing is going into, and testing it from outside means being able to ask.
+/// is not decoration: a modal driven by pointer and keyboard has no other way of saying which row
+/// the selection is on, and testing it from outside means being able to ask.
 #[derive(Resource, Reflect)]
 #[reflect(Resource)]
 pub struct MapMenu {
+    /// Whether the menu is up. Derived from the cursor by [`follow_the_cursor`] and written
+    /// nowhere else — the two are one state, and a second source for it would be a second answer.
     pub open: bool,
+    pub page: Page,
     /// The last thing the server said. Never edited here — this is a copy of the server's answer,
     /// and the server answers every request, so it is never stale for longer than a round trip.
     known: MapList,
-    /// Which map in the list the arrows are on.
+    /// Which row of the current page the selection is on.
     selected: usize,
-    /// Which field the typing goes into.
-    focus: usize,
+    /// Every field on every page, so a half-typed name survives a walk through the tree.
     values: Vec<String>,
+    /// Set by the click that resumed, cleared when that click is let go.
+    ///
+    /// The button that takes the pointer back is under the same finger as the trigger, and the
+    /// frame after it grabs, a still-held button is indistinguishable from a shot. See
+    /// [`take_the_keyboard`].
+    swallow: bool,
 }
 
 impl Default for MapMenu {
     fn default() -> Self {
         Self {
             open: false,
+            page: Page::Main,
             known: MapList::default(),
             selected: 0,
-            focus: 0,
             // The built-in map's own numbers, so the first map somebody makes is a sensible one
             // and the form starts in a state that passes its own caps.
-            values: ["", "512", "512", "1", "-64", "64"].map(String::from).to_vec(),
+            values: ["", "512", "512", "1", "-64", "64", ""].map(String::from).to_vec(),
+            swallow: false,
         }
     }
 }
 
 impl MapMenu {
-    fn value(&self, field: Field) -> &str {
-        FIELDS
-            .iter()
-            .position(|(which, _)| *which == field)
-            .map(|index| self.values[index].as_str())
-            .unwrap_or_default()
+    /// The rows of the page being shown, in order.
+    ///
+    /// Built rather than stored, so there is one description of a page and the drawing, the
+    /// keyboard and the pointer all read it. A page whose rows depend on the server's list — the
+    /// load page — changes shape when the list does, and this is where that happens.
+    fn rows(&self) -> Vec<Row> {
+        match self.page {
+            Page::Main => vec![
+                Row::Do(Action::Resume, "Resume"),
+                Row::Do(Action::Go(Page::Map), "Map"),
+            ],
+            Page::Map => vec![
+                Row::Do(Action::Go(Page::New), "New map"),
+                Row::Do(Action::Go(Page::Load), "Load map"),
+                Row::Do(Action::Save, "Save map"),
+                Row::Do(Action::Go(Page::SaveAs), "Save map as"),
+                Row::Do(Action::Back, "Back"),
+            ],
+            Page::New => FIELDS
+                .iter()
+                .enumerate()
+                .map(|(index, label)| Row::Field(index, label))
+                .chain([Row::Do(Action::Create, "Create it"), Row::Do(Action::Back, "Back")])
+                .collect(),
+            Page::Load => (0..self.known.maps.len())
+                .map(Row::Map)
+                .chain([Row::Do(Action::Back, "Back")])
+                .collect(),
+            Page::SaveAs => vec![
+                Row::Field(SAVE_AS, "Name"),
+                Row::Do(Action::SaveUnder, "Save it"),
+                Row::Do(Action::Back, "Back"),
+            ],
+        }
     }
 
-    fn number(&self, field: Field) -> f32 {
-        self.value(field).trim().parse().unwrap_or(f32::NAN)
+    fn row(&self, index: usize) -> Option<Row> {
+        self.rows().get(index).copied()
+    }
+
+    /// Which field the typing goes into, if the selection is on one.
+    fn typing_into(&self) -> Option<usize> {
+        match self.row(self.selected) {
+            Some(Row::Field(index, _)) => Some(index),
+            _ => None,
+        }
+    }
+
+    fn number(&self, index: usize) -> f32 {
+        self.values[index].trim().parse().unwrap_or(f32::NAN)
     }
 
     /// The grid the form describes, or why it is not one.
@@ -127,65 +240,169 @@ impl MapMenu {
     /// drift would show up as a request that looks fine here and is refused there.
     fn described(&self) -> Result<Grid, String> {
         Grid::new(
-            self.number(Field::ExtentX),
-            self.number(Field::ExtentZ),
-            self.number(Field::Spacing),
-            self.number(Field::Low),
-            self.number(Field::High),
+            self.number(EXTENT_X),
+            self.number(EXTENT_Z),
+            self.number(SPACING),
+            self.number(LOW),
+            self.number(HIGH),
         )
         .map_err(|fault| fault.to_string())
     }
 
-    fn request_to_create(&self) -> MapRequest {
-        MapRequest::Create {
-            name: self.value(Field::Name).to_string(),
-            extent_x: self.number(Field::ExtentX),
-            extent_z: self.number(Field::ExtentZ),
-            spacing: self.number(Field::Spacing),
-            min_y: self.number(Field::Low),
-            max_y: self.number(Field::High),
+    /// Moves the selection, wrapping, and skipping nothing — every row on a page is reachable.
+    fn step(&mut self, forward: bool) {
+        let count = self.rows().len();
+        if count == 0 {
+            return;
+        }
+        let step = if forward { 1 } else { count - 1 };
+        self.selected = (self.selected + step) % count;
+    }
+
+    /// Opens a page, putting the selection somewhere sensible on it.
+    fn go(&mut self, page: Page) {
+        self.page = page;
+        self.selected = match page {
+            // On the map already being played, so Enter on the load page is a reload rather than
+            // whatever happens to sort first.
+            Page::Load => self
+                .known
+                .current
+                .as_ref()
+                .and_then(|current| self.known.maps.iter().position(|name| name == current))
+                .unwrap_or(0),
+            _ => 0,
+        };
+        if page == Page::SaveAs && self.values[SAVE_AS].is_empty() {
+            // Prefilled with the name it already has, so "save as" over the same map is a keypress
+            // rather than retyping. Only when empty: a name half-typed and navigated away from is
+            // still what the author meant.
+            self.values[SAVE_AS] = self.known.current.clone().unwrap_or_default();
+        }
+    }
+
+    /// Does whatever the selected row does. Returns what the server has to be told, if anything.
+    fn activate(&mut self) -> Option<MapRequest> {
+        match self.row(self.selected)? {
+            Row::Field(..) => None,
+            Row::Map(index) => {
+                let name = self.known.maps.get(index)?.clone();
+                Some(MapRequest::Load { name })
+            }
+            Row::Do(action, _) => match action {
+                // Handled by the caller, which is the only thing holding the cursor.
+                Action::Resume => None,
+                Action::Go(page) => {
+                    self.go(page);
+                    None
+                }
+                Action::Back => {
+                    if let Some(parent) = self.page.parent() {
+                        self.go(parent);
+                    }
+                    None
+                }
+                Action::Create => Some(MapRequest::Create {
+                    name: self.values[NAME].trim().to_string(),
+                    extent_x: self.number(EXTENT_X),
+                    extent_z: self.number(EXTENT_Z),
+                    spacing: self.number(SPACING),
+                    min_y: self.number(LOW),
+                    max_y: self.number(HIGH),
+                }),
+                // The built-in map has no file behind it, so there is nothing to save *over* and
+                // the only honest thing to do is ask for a name.
+                Action::Save => match self.known.current.clone() {
+                    Some(name) => Some(MapRequest::Save { name }),
+                    None => {
+                        self.go(Page::SaveAs);
+                        None
+                    }
+                },
+                Action::SaveUnder => {
+                    let name = self.values[SAVE_AS].trim().to_string();
+                    (!name.is_empty()).then_some(MapRequest::Save { name })
+                }
+            },
         }
     }
 }
 
-/// The panel itself.
+/// The dialog box.
 #[derive(Component)]
-struct MenuPanel;
+struct Dialog;
 
-/// The one text node inside it.
+/// Its heading.
 #[derive(Component)]
-struct MenuText;
+struct DialogTitle;
 
-/// Startup: builds the panel, if there is a screen to put it on.
+/// The box the rows live in, which is also what scrolls.
+#[derive(Component)]
+struct RowList;
+
+/// One row, by its index into the page.
+#[derive(Component)]
+struct MenuRow(usize);
+
+/// Everything under the rows: what the form adds up to, and what the server said about it.
+#[derive(Component)]
+struct DialogFoot;
+
+/// Startup: builds the dialog, if there is a screen to put it on.
 ///
 /// The window query is what leaves it out of a headless client — no window, no system run, and no
 /// menu nobody can see. The same guard the HUD uses.
-fn spawn_panel(windows: Query<(), With<PrimaryWindow>>, mut commands: Commands) {
+fn spawn_dialog(windows: Query<(), With<PrimaryWindow>>, mut commands: Commands) {
     if windows.is_empty() {
         return;
     }
     commands
         .spawn((
-            Name::from("Map menu"),
-            MenuPanel,
+            Name::from("Menu"),
+            Dialog,
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Px(MARGIN),
-                top: Val::Px(MARGIN),
-                right: Val::Px(MARGIN),
-                bottom: Val::Px(MARGIN),
+                left: Val::Percent(50.0),
+                top: Val::Percent(50.0),
+                width: Val::Px(DIALOG_WIDTH),
+                // Centred on the middle of the screen rather than filling it: the world stays
+                // visible around the dialog, which is what makes "I am still in a game" legible.
+                margin: UiRect {
+                    left: Val::Px(-DIALOG_WIDTH / 2.0),
+                    top: Val::Px(-160.0),
+                    ..default()
+                },
+                flex_direction: FlexDirection::Column,
+                border: UiRect::all(Val::Px(1.0)),
                 padding: UiRect::all(Val::Px(PADDING)),
+                row_gap: Val::Px(10.0),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.05, 0.05, 0.07, 0.94)),
+            BorderColor::all(Color::srgba(0.5, 0.55, 0.6, 0.35)),
             Visibility::Hidden,
         ))
-        .with_children(|panel| {
-            panel.spawn((
-                MenuText,
+        .with_children(|dialog| {
+            dialog.spawn((
+                DialogTitle,
                 Text::new(String::new()),
                 TextFont { font_size: bevy::text::FontSize::Px(FONT_SIZE), ..default() },
-                TextColor(Color::srgb(0.86, 0.88, 0.9)),
+                TextColor(Color::srgb(0.95, 0.8, 0.4)),
+            ));
+            dialog.spawn((
+                RowList,
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    max_height: Val::Px(ROW_HEIGHT * VISIBLE_ROWS),
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
+            ));
+            dialog.spawn((
+                DialogFoot,
+                Text::new(String::new()),
+                TextFont { font_size: bevy::text::FontSize::Px(FONT_SIZE - 2.0), ..default() },
+                TextColor(Color::srgb(0.62, 0.66, 0.7)),
             ));
         });
 }
@@ -200,111 +417,145 @@ fn hear_the_server(mut inbox: Query<&mut MessageReceiver<MapList>>, mut menu: Re
             if let Some(trouble) = &list.trouble {
                 warn!("the server refused a map request: {trouble}");
             }
-            menu.selected = menu.selected.min(list.maps.len().saturating_sub(1));
             menu.known = list;
         }
     }
 }
 
-/// Update: F2 opens it, F2 or Escape closes it.
+/// Update: the menu is up exactly while the pointer is free.
 ///
-/// A function key because every letter belongs to the fields. Opening gives the cursor back and
-/// closing does not take it again — a click does that, which is the rule the rest of the game
-/// already has.
-fn open_and_close(
-    keys: Res<ButtonInput<KeyCode>>,
+/// One direction only. Nothing else writes `open`, so there is no state in which the menu believes
+/// itself shut while the cursor says otherwise — the failure that a separate open flag invites and
+/// that leaves a player looking at a panel the game is still reading the keyboard past.
+fn follow_the_cursor(
+    cursor: Option<Single<&CursorOptions, With<PrimaryWindow>>>,
+    mouse: Res<ButtonInput<MouseButton>>,
     mut menu: ResMut<MapMenu>,
-    cursor: Option<Single<&mut bevy::window::CursorOptions, With<PrimaryWindow>>>,
 ) {
-    let wanted = if keys.just_pressed(KeyCode::F2) {
-        !menu.open
-    } else if menu.open && keys.just_pressed(KeyCode::Escape) {
-        false
-    } else {
-        return;
-    };
-    menu.open = wanted;
-    if wanted && let Some(cursor) = cursor {
-        let mut cursor = cursor.into_inner();
-        cursor.grab_mode = bevy::window::CursorGrabMode::None;
-        cursor.visible = true;
+    // No window, no menu — and no blanking of a scripted client's input either.
+    let up = cursor.is_some_and(|cursor| cursor.grab_mode == CursorGrabMode::None);
+    if menu.open != up {
+        menu.open = up;
+        if !up {
+            // Shut at the root, so the next release starts where a main menu starts rather than
+            // three pages into a form nobody remembers opening.
+            menu.go(Page::Main);
+        }
+    }
+    if menu.swallow && !mouse.pressed(MouseButton::Left) {
+        menu.swallow = false;
     }
 }
 
-/// Update: everything typed while the menu is open.
+/// Update: everything the pointer and the keyboard do to the menu.
 ///
-/// Reads `KeyboardInput` rather than `ButtonInput<KeyCode>` because it needs the *text* a key
-/// produced, which is what makes the fields take a keyboard layout rather than a US one.
-fn edit(
+/// One system for both, because they act on one model: whatever moved the selection last is what
+/// Enter or a click acts on. Splitting them would be two ideas of what is selected.
+fn operate(
     mut typed: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    rows: Query<(&MenuRow, &Interaction)>,
     mut menu: ResMut<MapMenu>,
+    cursor: Option<Single<&mut CursorOptions, With<PrimaryWindow>>>,
     sender: Option<Single<&mut MessageSender<MapRequest>>>,
 ) {
+    // A shortcut into the part of the tree that gets used, from inside the game. A function key
+    // because the fields take typing, and any letter used as a command is a letter that cannot be
+    // typed into a map name.
+    let shortcut = keys.just_pressed(KeyCode::F2);
     if !menu.open {
         // Anything typed while it was shut belongs to the game, not to a map name.
         typed.clear();
+        if shortcut && let Some(cursor) = cursor {
+            let mut cursor = cursor.into_inner();
+            cursor.grab_mode = CursorGrabMode::None;
+            cursor.visible = true;
+            menu.go(Page::Map);
+        }
         return;
     }
-    let held = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    let mut ask: Option<MapRequest> = None;
+    if shortcut {
+        menu.go(Page::Map);
+    }
 
+    let mut ask: Option<MapRequest> = None;
+    let mut resume = false;
+
+    // The pointer first, so a click and a keypress in the same frame agree about the row: hovering
+    // moves the selection, and Enter and a click then mean the same thing.
+    for (row, interaction) in rows.iter() {
+        match interaction {
+            Interaction::Hovered => menu.selected = row.0,
+            Interaction::Pressed => {
+                menu.selected = row.0;
+                // On the press itself rather than for as long as it is held, or a held button
+                // would walk down the tree a page per frame.
+                if mouse.just_pressed(MouseButton::Left) {
+                    resume |= menu.row(row.0) == Some(Row::Do(Action::Resume, "Resume"));
+                    ask = menu.activate().or(ask);
+                }
+            }
+            Interaction::None => {}
+        }
+    }
+
+    let held = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     for event in typed.read() {
         if event.state != ButtonState::Pressed {
             continue;
         }
         // Everything that is a *command* comes off the physical key, and only text comes off the
-        // logical one. Tab is Tab wherever a layout puts it, and Ctrl+N is under the same finger on
-        // every keyboard; what a key means as a letter is the only thing the layout gets to decide.
-        // Reading Tab and Backspace off `logical_key` is how the first version of this failed —
-        // silently, since a key that matched nothing simply did nothing.
+        // logical one. Tab is Tab wherever a layout puts it; what a key means as a letter is the
+        // only thing the layout gets to decide. Reading Tab and Backspace off `logical_key` is how
+        // the first version of this failed — silently, since a key that matched nothing did
+        // nothing.
         match event.key_code {
+            KeyCode::ArrowDown => menu.step(true),
+            KeyCode::ArrowUp => menu.step(false),
             KeyCode::Tab => {
                 let back = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-                let step = if back { FIELDS.len() - 1 } else { 1 };
-                menu.focus = (menu.focus + step) % FIELDS.len();
-            }
-            KeyCode::ArrowUp => menu.selected = menu.selected.saturating_sub(1),
-            KeyCode::ArrowDown => {
-                let last = menu.known.maps.len().saturating_sub(1);
-                menu.selected = (menu.selected + 1).min(last);
-            }
-            KeyCode::Backspace => {
-                let focus = menu.focus;
-                menu.values[focus].pop();
-            }
-            KeyCode::Delete => {
-                let focus = menu.focus;
-                menu.values[focus].clear();
+                menu.step(!back);
             }
             KeyCode::Enter | KeyCode::NumpadEnter => {
-                if let Some(name) = menu.known.maps.get(menu.selected).cloned() {
-                    ask = Some(MapRequest::Load { name });
+                resume |= menu.row(menu.selected) == Some(Row::Do(Action::Resume, "Resume"));
+                ask = menu.activate().or(ask);
+            }
+            KeyCode::Escape => match menu.page.parent() {
+                Some(parent) => menu.go(parent),
+                // Nowhere left to go back to but the game.
+                None => resume = true,
+            },
+            KeyCode::Backspace => {
+                if let Some(field) = menu.typing_into() {
+                    menu.values[field].pop();
                 }
             }
-            KeyCode::KeyN if held => ask = Some(menu.request_to_create()),
-            KeyCode::KeyS if held => {
-                let typed = menu.value(Field::Name).trim().to_string();
-                let name = if typed.is_empty() {
-                    menu.known.current.clone().unwrap_or_default()
-                } else {
-                    typed
-                };
-                ask = Some(MapRequest::Save { name });
+            KeyCode::Delete => {
+                if let Some(field) = menu.typing_into() {
+                    menu.values[field].clear();
+                }
             }
             _ => {
                 if let Key::Character(text) = &event.logical_key
                     && !held
+                    && let Some(field) = menu.typing_into()
                 {
-                    let focus = menu.focus;
                     for character in text.chars().filter(|c| !c.is_control()) {
-                        menu.values[focus].push(character);
+                        menu.values[field].push(character);
                     }
                 }
             }
         }
     }
 
+    if resume && let Some(cursor) = cursor {
+        let mut cursor = cursor.into_inner();
+        cursor.grab_mode = CursorGrabMode::Locked;
+        cursor.visible = false;
+        // Only a click leaves a button down to be mistaken for a trigger; Escape does not.
+        menu.swallow = mouse.pressed(MouseButton::Left);
+    }
     if let Some(request) = ask
         && let Some(sender) = sender
     {
@@ -312,108 +563,231 @@ fn edit(
     }
 }
 
-/// Update: writes the panel out, whenever anything it shows has changed.
-fn draw(
+/// Update: makes the row entities match the page.
+///
+/// Only when the *shape* changes — a different page, or a list that grew. Selection and typing
+/// leave the tree alone and are painted onto it, which is what keeps the pointer's hover from
+/// destroying the entity it is hovering over.
+fn rebuild(
     menu: Res<MapMenu>,
-    panel: Option<Single<&mut Visibility, With<MenuPanel>>>,
-    text: Option<Single<&mut Text, With<MenuText>>>,
+    list: Option<Single<Entity, With<RowList>>>,
+    mut shape: Local<Option<(Page, usize)>>,
+    mut commands: Commands,
 ) {
-    if !menu.is_changed() {
+    let Some(list) = list else { return };
+    let rows = menu.rows();
+    let now = (menu.page, rows.len());
+    if *shape == Some(now) {
         return;
     }
-    if let Some(panel) = panel {
-        *panel.into_inner() = if menu.open { Visibility::Visible } else { Visibility::Hidden };
+    *shape = Some(now);
+
+    let list = list.into_inner();
+    commands.entity(list).despawn_related::<Children>();
+    for index in 0..rows.len() {
+        commands.entity(list).with_children(|list| {
+            list.spawn((
+                MenuRow(index),
+                Button,
+                Node {
+                    height: Val::Px(ROW_HEIGHT),
+                    width: Val::Percent(100.0),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::SpaceBetween,
+                    padding: UiRect::horizontal(Val::Px(8.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::NONE),
+            ))
+            .with_children(|row| {
+                for _ in 0..2 {
+                    row.spawn((
+                        Text::new(String::new()),
+                        TextFont { font_size: bevy::text::FontSize::Px(FONT_SIZE), ..default() },
+                        TextColor(Color::WHITE),
+                    ));
+                }
+            });
+        });
     }
-    if menu.open && let Some(text) = text {
-        text.into_inner().0 = render(&menu);
+}
+
+/// Update: writes the selection, the values and the server's answer onto the rows.
+///
+/// Every frame the menu is up, rather than on change: the rows it paints may have been spawned by
+/// [`rebuild`] this same frame, and there is no change flag on an entity that did not exist yet.
+fn paint(
+    menu: Res<MapMenu>,
+    dialog: Option<Single<&mut Visibility, With<Dialog>>>,
+    title: Option<Single<&mut Text, (With<DialogTitle>, Without<DialogFoot>)>>,
+    foot: Option<Single<&mut Text, (With<DialogFoot>, Without<DialogTitle>)>>,
+    mut list: Query<&mut ScrollPosition, With<RowList>>,
+    mut rows: Query<(&MenuRow, &Children, &mut BackgroundColor)>,
+    mut texts: Query<(&mut Text, &mut TextColor), (Without<DialogTitle>, Without<DialogFoot>)>,
+) {
+    if let Some(dialog) = dialog {
+        *dialog.into_inner() =
+            if menu.open { Visibility::Visible } else { Visibility::Hidden };
     }
+    if !menu.open {
+        return;
+    }
+    if let Some(title) = title {
+        title.into_inner().0 = menu.page.title().to_string();
+    }
+    if let Some(foot) = foot {
+        foot.into_inner().0 = footer(&menu);
+    }
+
+    let model = menu.rows();
+    for (row, children, mut background) in rows.iter_mut() {
+        let Some(what) = model.get(row.0) else { continue };
+        let chosen = row.0 == menu.selected;
+        background.0 =
+            if chosen { Color::srgba(0.35, 0.45, 0.6, 0.55) } else { Color::NONE };
+        let (label, value) = describe(&menu, what, chosen);
+        for (slot, child) in children.iter().enumerate() {
+            let Ok((mut text, mut colour)) = texts.get_mut(child) else { continue };
+            match slot {
+                0 => {
+                    text.0 = label.clone();
+                    colour.0 = if chosen {
+                        Color::srgb(1.0, 1.0, 1.0)
+                    } else {
+                        Color::srgb(0.78, 0.8, 0.83)
+                    };
+                }
+                _ => {
+                    text.0 = value.clone();
+                    colour.0 = Color::srgb(0.6, 0.68, 0.78);
+                }
+            }
+        }
+    }
+
+    // Keeps the selection inside the window when the list is longer than the box. Rows are a fixed
+    // height on purpose: it is what makes this arithmetic rather than a measurement.
+    if let Ok(mut scroll) = list.single_mut() {
+        let top = menu.selected as f32 * ROW_HEIGHT;
+        let window = ROW_HEIGHT * VISIBLE_ROWS;
+        scroll.0.y = scroll.0.y.clamp(top + ROW_HEIGHT - window, top).max(0.0);
+    }
+}
+
+/// What a row says on the left and on the right.
+fn describe(menu: &MapMenu, row: &Row, chosen: bool) -> (String, String) {
+    match *row {
+        Row::Do(Action::Go(_), label) => (label.to_string(), "›".to_string()),
+        Row::Do(_, label) => (label.to_string(), String::new()),
+        Row::Field(index, label) => {
+            // The caret only where the typing is going, which on a page of six fields is the only
+            // thing saying so.
+            let caret = if chosen { "_" } else { "" };
+            (label.to_string(), format!("{}{caret}", menu.values[index]))
+        }
+        Row::Map(index) => {
+            let name = menu.known.maps.get(index).cloned().unwrap_or_default();
+            let playing = menu.known.current.as_ref() == Some(&name);
+            let note = match (playing, menu.known.unsaved) {
+                (true, true) => "playing, unsaved",
+                (true, false) => "playing",
+                _ => "",
+            };
+            (name, note.to_string())
+        }
+    }
+}
+
+/// Everything under the rows.
+///
+/// What the page needs said, then whatever the server said last. The server's word goes last on
+/// every page because it is the only line that is news.
+fn footer(menu: &MapMenu) -> String {
+    let playing = match &menu.known.current {
+        Some(name) if menu.known.unsaved => format!("Playing {name}, with unsaved changes."),
+        Some(name) => format!("Playing {name}."),
+        None => "Playing the built-in map, which has no file behind it.".to_string(),
+    };
+    let mut out = match menu.page {
+        Page::Main => format!("{playing}\n↑ ↓ to choose, Enter or a click to take it."),
+        Page::Map => format!("{playing}\nSaving is what keeps sculpted ground."),
+        Page::New => {
+            let mut out = match menu.described() {
+                Ok(grid) => {
+                    let bytes = grid.samples() * 2;
+                    let mut line = format!(
+                        "{} × {} samples, {:.0} KB to every joiner.",
+                        grid.nx,
+                        grid.nz,
+                        bytes as f32 / 1024.0,
+                    );
+                    if bytes > MAX_BASELINE_BYTES {
+                        line.push_str(" Over the cap.");
+                    }
+                    line
+                }
+                Err(trouble) => trouble,
+            };
+            out.push_str("\nTab or ↑ ↓ moves between fields. Everybody is moved onto it.");
+            match sanitise_name(&menu.values[NAME]) {
+                Ok(clean) if clean != menu.values[NAME].trim() => {
+                    out.push_str(&format!("\nIt will be called \"{clean}\"."));
+                }
+                Err(_) if !menu.values[NAME].trim().is_empty() => {
+                    out.push_str("\nThat name has nothing usable in it.");
+                }
+                _ => {}
+            }
+            out
+        }
+        Page::Load => {
+            if menu.known.maps.is_empty() {
+                "No maps yet. Make one first.".to_string()
+            } else {
+                format!("{playing}\nLoading moves everybody on the server onto it.")
+            }
+        }
+        Page::SaveAs => {
+            let typed = menu.values[SAVE_AS].trim();
+            match sanitise_name(typed) {
+                _ if typed.is_empty() => "Type a name to save it under.".to_string(),
+                Ok(clean) if menu.known.maps.iter().any(|name| name == &clean) => {
+                    format!("\"{clean}\" already exists and will be written over.")
+                }
+                Ok(clean) => format!("It will be saved as \"{clean}\"."),
+                Err(trouble) => trouble.to_string(),
+            }
+        }
+    };
+    if let Some(trouble) = &menu.known.trouble {
+        out.push_str(&format!("\nThe server said: {trouble}"));
+    }
+    out.push_str("\nEsc goes back. F2 jumps here from the game.");
+    out
 }
 
 /// Update: while the menu is up, the game is not being played.
 ///
 /// The keyboard is typing a map name and the pointer is back where it can reach the window, so
-/// nothing that happens in here is meant to reach the world. The look angles are left alone —
-/// they are the camera's, not the input's, and the camera has stopped turning anyway with the
-/// cursor released.
+/// nothing that happens in here is meant to reach the world. The look angles are left alone — they
+/// are the camera's, not the input's, and the camera has stopped turning anyway with the cursor
+/// released.
+///
+/// A scripted client is exempt, and has to be: a harness or a bot runs with the pointer free from
+/// the first frame, so blanking on the menu alone would blank every automated run there is.
 fn take_the_keyboard(
     menu: Res<MapMenu>,
+    scripted: Res<crate::local_player::ScriptedInput>,
     player: Single<&crate::local_player::LocalPlayer>,
     mut input: ResMut<crate::local_player::CurrentInput>,
 ) {
-    if menu.open {
+    if (menu.open || menu.swallow) && scripted.0.is_none() {
         input.0 = noob_tube_shared::player::PlayerInput {
             yaw: player.yaw,
             pitch: player.pitch,
             ..Default::default()
         };
     }
-}
-
-/// The whole menu as text.
-///
-/// One text node rather than a tree of them, and deliberately: this is a list and a form, both of
-/// which are lines, and a node per line would be more code to say the same thing with no more in
-/// it. It becomes a tree the day something in here has to be clicked.
-fn render(menu: &MapMenu) -> String {
-    let mut out = String::from("MAPS\n\n");
-
-    if menu.known.maps.is_empty() {
-        out.push_str("  (no maps yet — make one below)\n");
-    }
-    for (index, name) in menu.known.maps.iter().enumerate() {
-        let cursor = if index == menu.selected { ">" } else { " " };
-        let playing = if menu.known.current.as_deref() == Some(name.as_str()) {
-            if menu.known.unsaved { "   ← playing, unsaved" } else { "   ← playing" }
-        } else {
-            ""
-        };
-        out.push_str(&format!("  {cursor} {name}{playing}\n"));
-    }
-    if menu.known.current.is_none() {
-        out.push_str("\n  Playing the built-in map, which has no file. Ctrl+S keeps it.\n");
-    }
-    out.push_str("\n  ↑ ↓ to choose, Enter to load. Everybody is moved to it.\n\n");
-
-    out.push_str("NEW MAP\n\n");
-    for (index, (field, label)) in FIELDS.iter().enumerate() {
-        let caret = if index == menu.focus { "_" } else { "" };
-        let unit = if matches!(field, Field::Name) { "" } else { " m" };
-        out.push_str(&format!("  {label:<9} {}{caret}{unit}\n", menu.values[index]));
-    }
-
-    out.push_str("\n  ");
-    match menu.described() {
-        Ok(grid) => {
-            let samples = grid.samples();
-            let bytes = samples * 2;
-            out.push_str(&format!(
-                "{} × {} samples, {:.0} KB to every joiner",
-                grid.nx,
-                grid.nz,
-                bytes as f32 / 1024.0,
-            ));
-            if bytes > MAX_BASELINE_BYTES {
-                out.push_str(" — over the cap");
-            }
-        }
-        Err(trouble) => out.push_str(&trouble),
-    }
-    out.push_str("\n\n  Tab moves between fields. Ctrl+N makes it. Ctrl+S saves under Name.\n");
-
-    match sanitise_name(menu.value(Field::Name)) {
-        Ok(clean) if clean != menu.value(Field::Name).trim() => {
-            out.push_str(&format!("\n  It will be called \"{clean}\".\n"));
-        }
-        Err(_) if !menu.value(Field::Name).trim().is_empty() => {
-            out.push_str("\n  That name has nothing usable in it.\n");
-        }
-        _ => {}
-    }
-    if let Some(trouble) = &menu.known.trouble {
-        out.push_str(&format!("\n  The server said: {trouble}\n"));
-    }
-    out.push_str("\n  F2 or Escape closes this.");
-    out
 }
 
 #[cfg(test)]
@@ -437,21 +811,106 @@ mod tests {
     #[test]
     fn the_form_is_checked_against_the_rule_the_server_enforces() {
         let mut menu = MapMenu::default();
-        menu.values[3] = "0.05".into();
+        menu.values[SPACING] = "0.05".into();
         assert!(menu.described().is_err(), "a spacing under the cap was accepted");
 
         let mut menu = MapMenu::default();
-        menu.values[1] = "10000".into();
-        menu.values[2] = "10000".into();
+        menu.values[EXTENT_X] = "10000".into();
+        menu.values[EXTENT_Z] = "10000".into();
         assert!(menu.described().is_err(), "a ten-kilometre map was accepted");
 
         let mut menu = MapMenu::default();
-        menu.values[4] = "64".into();
-        menu.values[5] = "-64".into();
+        menu.values[LOW] = "64".into();
+        menu.values[HIGH] = "-64".into();
         assert!(menu.described().is_err(), "a map with its floor above its ceiling was accepted");
 
         let mut menu = MapMenu::default();
-        menu.values[1] = "not a number".into();
+        menu.values[EXTENT_X] = "not a number".into();
         assert!(menu.described().is_err(), "a map of unparseable width was accepted");
+    }
+
+    /// Every page has a way out, and it is the same key on all of them.
+    ///
+    /// The one structural claim the tree makes. A page whose parent were itself would trap a
+    /// player behind a dialog with the pointer released and the game unreachable.
+    #[test]
+    fn every_page_leads_back_to_the_root() {
+        for page in [Page::Main, Page::Map, Page::New, Page::Load, Page::SaveAs] {
+            let mut at = page;
+            for _ in 0..8 {
+                match at.parent() {
+                    Some(parent) => at = parent,
+                    None => break,
+                }
+            }
+            assert_eq!(at, Page::Main, "{page:?} does not lead back to the root");
+        }
+    }
+
+    /// Walking the tree with the keyboard reaches every dialog, and each one asks its own question.
+    #[test]
+    fn the_tree_opens_the_dialog_each_entry_promises() {
+        let mut menu = MapMenu::default();
+        menu.known.maps = vec!["ridge".to_string(), "valley".to_string()];
+        menu.known.current = Some("valley".to_string());
+
+        // Main: resume first, map second.
+        assert_eq!(menu.rows().len(), 2);
+        menu.step(true);
+        assert_eq!(menu.activate(), None, "opening the map page asked the server for something");
+        assert_eq!(menu.page, Page::Map);
+
+        // New map: six fields to fill in, and creating sends the form.
+        menu.go(Page::New);
+        assert_eq!(menu.rows().len(), FIELDS.len() + 2);
+        menu.values[NAME] = "ridge two".into();
+        menu.selected = FIELDS.len();
+        let asked = menu.activate().expect("creating asked for nothing");
+        assert!(matches!(asked, MapRequest::Create { .. }));
+
+        // Load: one row per map, and the selection starts on the one being played.
+        menu.go(Page::Load);
+        assert_eq!(menu.rows().len(), 3);
+        assert_eq!(menu.selected, 1, "the load page did not start on the map in play");
+        assert_eq!(menu.activate(), Some(MapRequest::Load { name: "valley".into() }));
+
+        // Save as: prefilled with the name in play, because saving over it is the common case.
+        menu.values[SAVE_AS].clear();
+        menu.go(Page::SaveAs);
+        assert_eq!(menu.values[SAVE_AS], "valley");
+        menu.selected = 1;
+        assert_eq!(menu.activate(), Some(MapRequest::Save { name: "valley".into() }));
+    }
+
+    /// Saving a map that has no file asks for a name instead of writing one under a guess.
+    #[test]
+    fn saving_the_built_in_map_asks_what_to_call_it() {
+        let mut menu = MapMenu::default();
+        menu.go(Page::Map);
+        menu.selected = 2;
+        assert_eq!(menu.activate(), None, "the built-in map was saved under no name at all");
+        assert_eq!(menu.page, Page::SaveAs);
+
+        // And with a name, that same entry writes it without asking anything.
+        let mut menu = MapMenu::default();
+        menu.known.current = Some("ridge".to_string());
+        menu.go(Page::Map);
+        menu.selected = 2;
+        assert_eq!(menu.activate(), Some(MapRequest::Save { name: "ridge".into() }));
+    }
+
+    /// Typing goes into a field only while a field is what is selected.
+    ///
+    /// The rule that lets one page hold both a form and its buttons: what a letter key does
+    /// depends on the selection and on nothing else.
+    #[test]
+    fn typing_lands_in_a_field_and_nowhere_else() {
+        let mut menu = MapMenu::default();
+        menu.go(Page::New);
+        assert_eq!(menu.typing_into(), Some(NAME));
+        menu.selected = FIELDS.len();
+        assert_eq!(menu.typing_into(), None, "a command row took typing");
+        menu.go(Page::Main);
+        assert_eq!(menu.typing_into(), None, "the root page took typing");
     }
 }
