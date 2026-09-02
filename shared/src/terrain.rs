@@ -323,6 +323,13 @@ pub enum MapRequest {
     Load { name: String },
     /// Write the map as it currently stands, under this name.
     Save { name: String },
+    /// Take a map off the server for good.
+    ///
+    /// The map *in play* is not touched by this, even when it is the one being deleted: what goes
+    /// is the file, and what is left is a game still standing on the ground that came out of it,
+    /// now unnamed and unsaved. Ending a round because somebody tidied up a directory would be a
+    /// strange thing for a menu to do.
+    Delete { name: String },
     /// Just tell me what there is.
     List,
 }

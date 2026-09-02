@@ -73,6 +73,10 @@ pub enum Page {
     New,
     Load,
     SaveAs,
+    Delete,
+    /// The one page that exists only to be answered. Deleting is the single thing in here that
+    /// cannot be undone by doing it again, so it is the single thing that asks twice.
+    Confirm,
 }
 
 impl Page {
@@ -83,6 +87,8 @@ impl Page {
             Page::New => "NEW MAP",
             Page::Load => "LOAD MAP",
             Page::SaveAs => "SAVE MAP AS",
+            Page::Delete => "DELETE MAP",
+            Page::Confirm => "DELETE?",
         }
     }
 
@@ -90,7 +96,8 @@ impl Page {
         match self {
             Page::Main => None,
             Page::Map => Some(Page::Main),
-            Page::New | Page::Load | Page::SaveAs => Some(Page::Map),
+            Page::New | Page::Load | Page::SaveAs | Page::Delete => Some(Page::Map),
+            Page::Confirm => Some(Page::Delete),
         }
     }
 }
@@ -125,6 +132,8 @@ enum Action {
     Save,
     /// Write it under the name in the field.
     SaveUnder,
+    /// Take the map named in [`MapMenu::doomed`] off the server.
+    DeleteIt,
 }
 
 /// One line of a page.
@@ -157,6 +166,15 @@ pub struct MapMenu {
     selected: usize,
     /// Every field on every page, so a half-typed name survives a walk through the tree.
     values: Vec<String>,
+    /// The map the confirmation page is asking about.
+    doomed: String,
+    /// Where to go when the server says the last request worked.
+    ///
+    /// A form should close when what it was filling in has happened, and the client cannot know
+    /// that until the answer comes back — so the page to land on is remembered rather than jumped
+    /// to. A refusal leaves the form where it is, with the reason under it, which is the only
+    /// place it is any use.
+    awaiting: Option<Page>,
     /// Set by the click that resumed, cleared when that click is let go.
     ///
     /// The button that takes the pointer back is under the same finger as the trigger, and the
@@ -175,6 +193,8 @@ impl Default for MapMenu {
             // The built-in map's own numbers, so the first map somebody makes is a sensible one
             // and the form starts in a state that passes its own caps.
             values: ["", "512", "512", "1", "-64", "64", ""].map(String::from).to_vec(),
+            doomed: String::new(),
+            awaiting: None,
             swallow: false,
         }
     }
@@ -197,6 +217,7 @@ impl MapMenu {
                 Row::Do(Action::Go(Page::Load), "Load map"),
                 Row::Do(Action::Save, "Save map"),
                 Row::Do(Action::Go(Page::SaveAs), "Save map as"),
+                Row::Do(Action::Go(Page::Delete), "Delete map"),
                 Row::Do(Action::Back, "Back"),
             ],
             Page::New => FIELDS
@@ -205,7 +226,10 @@ impl MapMenu {
                 .map(|(index, label)| Row::Field(index, label))
                 .chain([Row::Do(Action::Create, "Create it"), Row::Do(Action::Back, "Back")])
                 .collect(),
-            Page::Load => (0..self.known.maps.len())
+            // The same list twice, because picking a map is the same act whatever is about to be
+            // done with it. What differs is one line of `activate`, which is where the difference
+            // actually is.
+            Page::Load | Page::Delete => (0..self.known.maps.len())
                 .map(Row::Map)
                 .chain([Row::Do(Action::Back, "Back")])
                 .collect(),
@@ -214,7 +238,29 @@ impl MapMenu {
                 Row::Do(Action::SaveUnder, "Save it"),
                 Row::Do(Action::Back, "Back"),
             ],
+            Page::Confirm => vec![
+                Row::Do(Action::DeleteIt, "Delete it for good"),
+                Row::Do(Action::Back, "Keep it"),
+            ],
         }
+    }
+
+    /// Takes the server's answer, and lands where the last request was heading.
+    ///
+    /// A form closes when what it was filling in has happened, and the client cannot know that
+    /// until the answer comes back — so a refusal leaves the form where it is, with the reason
+    /// under it, which is the only place it is any use. A success also clears the names, which
+    /// now belong to a map that exists and would be refused as taken if asked for again.
+    fn hear(&mut self, list: MapList) {
+        if list.trouble.is_none()
+            && let Some(page) = self.awaiting.take()
+        {
+            self.values[NAME].clear();
+            self.values[SAVE_AS].clear();
+            self.known = list.clone();
+            self.go(page);
+        }
+        self.known = list;
     }
 
     fn row(&self, index: usize) -> Option<Row> {
@@ -265,12 +311,15 @@ impl MapMenu {
         self.selected = match page {
             // On the map already being played, so Enter on the load page is a reload rather than
             // whatever happens to sort first.
-            Page::Load => self
+            Page::Load | Page::Delete => self
                 .known
                 .current
                 .as_ref()
                 .and_then(|current| self.known.maps.iter().position(|name| name == current))
                 .unwrap_or(0),
+            // On "keep it". A destructive page that opens with its destructive row under the
+            // finger is a page that deletes a map on a stray Enter.
+            Page::Confirm => 1,
             _ => 0,
         };
         if page == Page::SaveAs && self.values[SAVE_AS].is_empty() {
@@ -287,6 +336,11 @@ impl MapMenu {
             Row::Field(..) => None,
             Row::Map(index) => {
                 let name = self.known.maps.get(index)?.clone();
+                if self.page == Page::Delete {
+                    self.doomed = name;
+                    self.go(Page::Confirm);
+                    return None;
+                }
                 Some(MapRequest::Load { name })
             }
             Row::Do(action, _) => match action {
@@ -302,6 +356,13 @@ impl MapMenu {
                     }
                     None
                 }
+                Action::DeleteIt => {
+                    let name = std::mem::take(&mut self.doomed);
+                    // Back to the list, which is where a second one would be deleted from, and
+                    // which will have this one gone from it by the time the answer lands.
+                    self.go(Page::Delete);
+                    (!name.is_empty()).then_some(MapRequest::Delete { name })
+                }
                 Action::Create => Some(MapRequest::Create {
                     name: self.values[NAME].trim().to_string(),
                     extent_x: self.number(EXTENT_X),
@@ -309,7 +370,8 @@ impl MapMenu {
                     spacing: self.number(SPACING),
                     min_y: self.number(LOW),
                     max_y: self.number(HIGH),
-                }),
+                })
+                .inspect(|_| self.awaiting = Some(Page::Map)),
                 // The built-in map has no file behind it, so there is nothing to save *over* and
                 // the only honest thing to do is ask for a name.
                 Action::Save => match self.known.current.clone() {
@@ -321,7 +383,9 @@ impl MapMenu {
                 },
                 Action::SaveUnder => {
                     let name = self.values[SAVE_AS].trim().to_string();
-                    (!name.is_empty()).then_some(MapRequest::Save { name })
+                    (!name.is_empty())
+                        .then_some(MapRequest::Save { name })
+                        .inspect(|_| self.awaiting = Some(Page::Map))
                 }
             },
         }
@@ -335,6 +399,10 @@ struct Dialog;
 /// Its heading.
 #[derive(Component)]
 struct DialogTitle;
+
+/// The line under the heading, saying what is being played.
+#[derive(Component)]
+struct DialogNote;
 
 /// The box the rows live in, which is also what scrolls.
 #[derive(Component)]
@@ -390,6 +458,12 @@ fn spawn_dialog(windows: Query<(), With<PrimaryWindow>>, mut commands: Commands)
                 TextColor(Color::srgb(0.95, 0.8, 0.4)),
             ));
             dialog.spawn((
+                DialogNote,
+                Text::new(String::new()),
+                TextFont { font_size: bevy::text::FontSize::Px(FONT_SIZE - 1.0), ..default() },
+                TextColor(Color::srgb(0.72, 0.76, 0.8)),
+            ));
+            dialog.spawn((
                 RowList,
                 Node {
                     flex_direction: FlexDirection::Column,
@@ -417,7 +491,7 @@ fn hear_the_server(mut inbox: Query<&mut MessageReceiver<MapList>>, mut menu: Re
             if let Some(trouble) = &list.trouble {
                 warn!("the server refused a map request: {trouble}");
             }
-            menu.known = list;
+            menu.hear(list);
         }
     }
 }
@@ -460,27 +534,22 @@ fn operate(
     cursor: Option<Single<&mut CursorOptions, With<PrimaryWindow>>>,
     sender: Option<Single<&mut MessageSender<MapRequest>>>,
 ) {
-    // Two ways in from the game. Escape is the way out of anything, and here it is also the way
-    // back — it gives the pointer up, and a free pointer *is* the menu. F2 is a shortcut into the
-    // part of the tree that gets used, and a function key because the fields take typing: any
-    // letter used as a command is a letter that cannot be typed into a map name.
-    let back = keys.just_pressed(KeyCode::Escape);
-    let shortcut = keys.just_pressed(KeyCode::F2);
+    // One way in and one way out, and it is the same key: Escape gives the pointer up, and a free
+    // pointer *is* the menu. There was a second door on F2 for a while and it was one too many —
+    // a menu with two openings has two things to remember and a function key nobody could spend
+    // on anything else.
     if !menu.open {
         // Anything typed while it was shut belongs to the game, not to a map name.
         typed.clear();
-        if (back || shortcut) && let Some(cursor) = cursor {
+        if keys.just_pressed(KeyCode::Escape)
+            && let Some(cursor) = cursor
+        {
             let mut cursor = cursor.into_inner();
             cursor.grab_mode = CursorGrabMode::None;
             cursor.visible = true;
-            // Escape opens the root, because that is what backing out of the game means; F2 opens
-            // the page it is a shortcut to.
-            menu.go(if shortcut { Page::Map } else { Page::Main });
+            menu.go(Page::Main);
         }
         return;
-    }
-    if shortcut {
-        menu.go(Page::Map);
     }
 
     let mut ask: Option<MapRequest> = None;
@@ -619,13 +688,17 @@ fn rebuild(
 /// The three text nodes a page is written into, kept apart so Bevy can hand out three mutable
 /// borrows of `Text` at once. Aliases because the disjointness filters are the whole of the type
 /// and spelling them inline says nothing a reader wants to read.
-type TheTitle<'w, 's> = Single<'w, 's, &'static mut Text, (With<DialogTitle>, Without<DialogFoot>)>;
-type TheFooter<'w, 's> = Single<'w, 's, &'static mut Text, (With<DialogFoot>, Without<DialogTitle>)>;
+type Titles<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Text, Has<DialogTitle>, Has<DialogNote>, Has<DialogFoot>),
+    Or<(With<DialogTitle>, With<DialogNote>, With<DialogFoot>)>,
+>;
 type RowTexts<'w, 's> = Query<
     'w,
     's,
     (&'static mut Text, &'static mut TextColor),
-    (Without<DialogTitle>, Without<DialogFoot>),
+    (Without<DialogTitle>, Without<DialogNote>, Without<DialogFoot>),
 >;
 
 /// Update: writes the selection, the values and the server's answer onto the rows.
@@ -635,8 +708,7 @@ type RowTexts<'w, 's> = Query<
 fn paint(
     menu: Res<MapMenu>,
     dialog: Option<Single<&mut Visibility, With<Dialog>>>,
-    title: Option<TheTitle>,
-    foot: Option<TheFooter>,
+    mut headings: Titles,
     mut list: Query<&mut ScrollPosition, With<RowList>>,
     mut rows: Query<(&MenuRow, &Children, &mut BackgroundColor)>,
     mut texts: RowTexts,
@@ -648,11 +720,16 @@ fn paint(
     if !menu.open {
         return;
     }
-    if let Some(title) = title {
-        title.into_inner().0 = menu.page.title().to_string();
-    }
-    if let Some(foot) = foot {
-        foot.into_inner().0 = footer(&menu);
+    // One query over the three, because they differ only in which string they get, and three
+    // `Single`s differing only in their filters was three types nobody could read.
+    for (mut text, is_title, is_note, is_foot) in headings.iter_mut() {
+        if is_title {
+            text.0 = menu.page.title().to_string();
+        } else if is_note {
+            text.0 = playing(&menu);
+        } else if is_foot {
+            text.0 = footer(&menu);
+        }
     }
 
     let model = menu.rows();
@@ -717,16 +794,12 @@ fn describe(menu: &MapMenu, row: &Row, chosen: bool) -> (String, String) {
 /// Everything under the rows.
 ///
 /// What the page needs said, then whatever the server said last. The server's word goes last on
-/// every page because it is the only line that is news.
+/// every page because it is the only line that is news. What is being *played* is not in here at
+/// all — it is under the title, on every page, because it is the one fact every page is about.
 fn footer(menu: &MapMenu) -> String {
-    let playing = match &menu.known.current {
-        Some(name) if menu.known.unsaved => format!("Playing {name}, with unsaved changes."),
-        Some(name) => format!("Playing {name}."),
-        None => "Playing the built-in map, which has no file behind it.".to_string(),
-    };
     let mut out = match menu.page {
-        Page::Main => format!("{playing}\n↑ ↓ to choose, Enter or a click to take it."),
-        Page::Map => format!("{playing}\nSaving is what keeps sculpted ground."),
+        Page::Main => "Arrows to choose, Enter or a click to take it.".to_string(),
+        Page::Map => "Saving is what keeps sculpted ground.".to_string(),
         Page::New => {
             let mut out = match menu.described() {
                 Ok(grid) => {
@@ -744,7 +817,7 @@ fn footer(menu: &MapMenu) -> String {
                 }
                 Err(trouble) => trouble,
             };
-            out.push_str("\nTab or ↑ ↓ moves between fields. Everybody is moved onto it.");
+            out.push_str("\nTab or the arrows move between fields. Everybody is moved onto it.");
             match sanitise_name(&menu.values[NAME]) {
                 Ok(clean) if clean != menu.values[NAME].trim() => {
                     out.push_str(&format!("\nIt will be called \"{clean}\"."));
@@ -760,7 +833,7 @@ fn footer(menu: &MapMenu) -> String {
             if menu.known.maps.is_empty() {
                 "No maps yet. Make one first.".to_string()
             } else {
-                format!("{playing}\nLoading moves everybody on the server onto it.")
+                "Loading moves everybody on the server onto it.".to_string()
             }
         }
         Page::SaveAs => {
@@ -774,12 +847,44 @@ fn footer(menu: &MapMenu) -> String {
                 Err(trouble) => trouble.to_string(),
             }
         }
+        Page::Delete => {
+            if menu.known.maps.is_empty() {
+                "There is nothing to delete.".to_string()
+            } else {
+                "Choose one. You will be asked again before it goes.".to_string()
+            }
+        }
+        Page::Confirm => {
+            let mut out = format!("\"{}\" will be gone from the server for good.", menu.doomed);
+            if menu.known.current.as_ref() == Some(&menu.doomed) {
+                out.push_str(
+                    "\nYou keep playing it. It stops having a file, which is what unsaved means.",
+                );
+            }
+            out
+        }
     };
     if let Some(trouble) = &menu.known.trouble {
         out.push_str(&format!("\nThe server said: {trouble}"));
     }
-    out.push_str("\nEsc goes back. F2 jumps here from the game.");
+    out.push_str("\nEsc goes back, and back into the game from here.");
     out
+}
+
+/// The line under the title: what is being played, and whether it still matches its file.
+///
+/// On every page, because every page in here is about it — a load replaces it, a save writes it,
+/// a delete takes its file away. A menu that made you go and look would be one that let you save
+/// over the wrong map.
+fn playing(menu: &MapMenu) -> String {
+    match &menu.known.current {
+        Some(name) if menu.known.unsaved => format!("Playing {name} — unsaved changes"),
+        Some(name) => format!("Playing {name}"),
+        None if menu.known.unsaved => {
+            "Playing an unsaved map, which has no file behind it".to_string()
+        }
+        None => "Playing the built-in map, which has no file behind it".to_string(),
+    }
 }
 
 /// Update: while the menu is up, the game is not being played.
@@ -909,18 +1014,6 @@ mod tests {
         assert_eq!(grab_mode(&mut app), CursorGrabMode::Locked, "escape at the root did not resume");
     }
 
-    /// F2 is the shortcut, and it lands where it says it lands.
-    #[test]
-    fn f2_opens_the_map_page_from_the_game() {
-        let mut app = menu_app();
-        app.update();
-        set_grab(&mut app, CursorGrabMode::Locked);
-        app.update();
-
-        tap(&mut app, KeyCode::F2);
-        assert_eq!(grab_mode(&mut app), CursorGrabMode::None);
-        assert_eq!(app.world().resource::<MapMenu>().page, Page::Map);
-    }
 
     /// The form has to start in a state that would be accepted, or the first thing anybody does
     /// with it is read an error message. These are the built-in map's own numbers.
@@ -963,7 +1056,9 @@ mod tests {
     /// player behind a dialog with the pointer released and the game unreachable.
     #[test]
     fn every_page_leads_back_to_the_root() {
-        for page in [Page::Main, Page::Map, Page::New, Page::Load, Page::SaveAs] {
+        for page in
+            [Page::Main, Page::Map, Page::New, Page::Load, Page::SaveAs, Page::Delete, Page::Confirm]
+        {
             let mut at = page;
             for _ in 0..8 {
                 match at.parent() {
@@ -1025,6 +1120,59 @@ mod tests {
         menu.go(Page::Map);
         menu.selected = 2;
         assert_eq!(menu.activate(), Some(MapRequest::Save { name: "ridge".into() }));
+    }
+
+    /// Deleting asks twice, and opens the second question on "keep it".
+    ///
+    /// The one irreversible thing in the menu, so it is the one thing that does not happen on a
+    /// single Enter — and the row under the finger when it opens is the one that does nothing.
+    #[test]
+    fn deleting_asks_again_before_it_does_anything() {
+        let mut menu = MapMenu::default();
+        menu.known.maps = vec!["ridge".to_string(), "valley".to_string()];
+
+        menu.go(Page::Delete);
+        menu.selected = 1;
+        assert_eq!(menu.activate(), None, "picking a map to delete deleted it");
+        assert_eq!(menu.page, Page::Confirm);
+        assert_eq!(menu.doomed, "valley");
+        assert_eq!(menu.selected, 1, "the confirmation opened on the destructive row");
+
+        // "Keep it" is the row it opens on, and it goes back without asking for anything.
+        assert_eq!(menu.activate(), None);
+        assert_eq!(menu.page, Page::Delete);
+
+        menu.selected = 1;
+        menu.activate();
+        menu.selected = 0;
+        assert_eq!(menu.activate(), Some(MapRequest::Delete { name: "valley".into() }));
+        assert_eq!(menu.page, Page::Delete, "deleting did not go back to the list");
+    }
+
+    /// A form closes when the server says the thing happened, and not a moment before.
+    #[test]
+    fn a_created_map_takes_the_menu_with_it() {
+        let mut menu = MapMenu::default();
+        menu.go(Page::New);
+        menu.values[NAME] = "ridge".into();
+        menu.selected = FIELDS.len();
+        menu.activate().expect("creating asked for nothing");
+        assert_eq!(menu.page, Page::New, "the form closed before the server answered");
+
+        // A refusal leaves it open, with the name still in it to be corrected.
+        menu.hear(MapList { trouble: Some("that name is taken".into()), ..default() });
+        assert_eq!(menu.page, Page::New);
+        assert_eq!(menu.values[NAME], "ridge");
+
+        menu.selected = FIELDS.len();
+        menu.activate().expect("creating asked for nothing");
+        menu.hear(MapList {
+            maps: vec!["ridge".into()],
+            current: Some("ridge".into()),
+            ..default()
+        });
+        assert_eq!(menu.page, Page::Map, "the form stayed open over a map that exists");
+        assert!(menu.values[NAME].is_empty(), "the name of a map that now exists was kept");
     }
 
     /// Typing goes into a field only while a field is what is selected.

@@ -154,6 +154,20 @@ fn write(dir: &Path, name: &str, terrain: &Terrain) -> std::io::Result<()> {
     std::fs::write(heights_path(dir, name), terrain.encode())
 }
 
+/// Removes one, manifest first.
+///
+/// The reverse of [`write`], and for the same reason: [`scan`] lists a map by its manifest, so the
+/// moment that goes the map is invisible rather than listed-and-unloadable. A heights file left
+/// behind by a failure halfway is litter nobody reads; a manifest left behind is a map in the menu
+/// that cannot be opened.
+fn erase(dir: &Path, name: &str) -> std::io::Result<()> {
+    std::fs::remove_file(manifest_path(dir, name))?;
+    if let Err(error) = std::fs::remove_file(heights_path(dir, name)) {
+        warn!("deleted the map {name} but left its heights behind: {error}");
+    }
+    Ok(())
+}
+
 /// What one request needs from the world, beside the maps themselves.
 type Switching<'w, 's> = (
     ResMut<'w, Ground>,
@@ -286,6 +300,31 @@ fn act(
             info!("{peer:?} saved the map {name}");
             Ok(())
         }
+        MapRequest::Delete { name } => {
+            // Resolved against the list for the same reason a load is, and it matters more here:
+            // this is the one request that removes something. A name that is not one the server
+            // found is not a name at all, whatever it looks like.
+            let name = maps
+                .names
+                .iter()
+                .find(|known| *known == &name)
+                .cloned()
+                .ok_or(MapFault::NoSuchMap)?;
+            erase(&maps.dir, &name).map_err(|error| {
+                error!("could not delete the map {name}: {error}");
+                MapFault::NoSuchMap
+            })?;
+            maps.names.retain(|known| known != &name);
+            // The ground everybody is standing on is not disturbed. It simply stops having a file
+            // behind it, which is exactly what an unsaved map is.
+            if maps.current.as_deref() == Some(name.as_str()) {
+                maps.current = None;
+                maps.unsaved = true;
+            }
+            info!("{peer:?} deleted the map {name}");
+            Ok(())
+        }
+
     }
 }
 
@@ -365,6 +404,22 @@ mod tests {
         write(&dir, "whole", &made).expect("it writes");
         std::fs::remove_file(heights_path(&dir, "whole")).expect("the heights go");
         assert!(read(&dir, "whole").is_err(), "half a map loaded");
+    }
+
+    /// Deleting takes one map and leaves the rest, and leaves nothing behind that the list would
+    /// still report.
+    #[test]
+    fn a_deleted_map_goes_and_takes_nothing_else_with_it() {
+        let dir = scratch("delete");
+        let made = Terrain::new(64.0, 64.0, 1.0, -10.0, 10.0).expect("a map within the caps");
+        write(&dir, "keep", &made).expect("it writes");
+        write(&dir, "go", &made).expect("it writes");
+
+        erase(&dir, "go").expect("it deletes");
+        assert_eq!(scan(&dir), vec!["keep".to_string()], "the list still has the deleted map");
+        assert!(read(&dir, "go").is_err(), "a deleted map still loaded");
+        assert!(read(&dir, "keep").is_ok(), "deleting one map took another with it");
+        assert!(!heights_path(&dir, "go").exists(), "the heights were left behind");
     }
 
     /// And a blob that does not match its manifest is refused rather than read off its own end.

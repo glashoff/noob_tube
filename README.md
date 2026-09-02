@@ -2509,8 +2509,7 @@ bandwidth and alarming log noise, and a bigger map makes it worse rather than be
 
 Terrain is the first thing here that is *content* rather than constants, so it had to arrive with
 the map management this game did not have — a sculpt you cannot save is a demo. The menu carries
-it: what maps there are, which one is being played, load, save, and a form to make another. **F2**
-jumps straight to it from the game.
+it: what maps there are, which one is being played, load, save, delete, and a form to make another.
 
 A map is a manifest and a blob, and only one of them is binary. 66k samples as text is some 400 KB
 of digits and a slow parse, and nobody hand-edits a height field; everything *else* about a map is a
@@ -2610,11 +2609,33 @@ way to be looking at a menu the game is still reading the keyboard past. Click-t
 and with click-to-grab went the whole apparatus that existed to keep a click on an inspector panel
 from capturing the mouse.
 
+**Escape is the only door, and it goes both ways.** From the game it gives the pointer up, which is
+the same thing as opening the menu; at the root it takes it back. There was a second opening on F2
+for an afternoon and it was one too many — a menu with two ways in has two things to remember, and
+it spends a function key that the inspector already wanted.
+
 It is a **tree of small dialogs** rather than one page of everything: a root with two entries, and
-each entry that needs details opens a page asking for exactly those — new map, load, save, save as.
-A page knows its parent, so Escape means "back" and means it once per level, and there is a test
-that every page leads home. That is worth a test rather than a glance, because a page whose parent
-were itself would trap a player behind a dialog with the pointer released and the game unreachable.
+each entry that needs details opens a page asking for exactly those — new map, load, save, save as,
+delete. A page knows its parent, so Escape means "back" and means it once per level, and there is a
+test that every page leads home. That is worth a test rather than a glance, because a page whose
+parent were itself would trap a player behind a dialog with the pointer released and the game
+unreachable.
+
+Under the title, on every page, is the map being played and whether it still matches its file. Every
+page in here is about that map — a load replaces it, a save writes it, a delete takes its file away
+— and a menu that made you go and look is one that lets you save over the wrong map.
+
+**A form closes when the server says the thing happened**, not when the button was pressed. The page
+to land on is remembered rather than jumped to, so a refusal leaves the form open with the reason
+under it and the name still in it to be corrected, while a success lands on the map page with the
+new map named as the one in play.
+
+**Deleting asks twice.** It is the one thing in here that doing again does not undo, so it is the
+one thing that does not happen on a single Enter — and the row under the finger when the question
+opens is *keep it*. The file goes; the game does not. If you delete the map you are standing on, you
+go on standing on it: it simply stops having a file behind it, which is exactly what unsaved means.
+The manifest is removed before the heights, the reverse of writing and for the same reason — a map
+missing its manifest is invisible, and a map missing its heights would be listed and unopenable.
 
 **Mouse and keyboard run over one model.** A page is a list of rows and a selection; hovering moves
 the selection, clicking activates the row under the pointer, the arrows move it and Enter activates
