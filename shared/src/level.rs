@@ -124,7 +124,12 @@ pub fn default_markers() -> Vec<Marker> {
             kind: CRATE.into(),
             x: centre.x,
             z: centre.z,
-            y: CRATE_HALF_EXTENT,
+            // Zero, and the crate's own half-height is added where the crate is built. A marker
+            // says where a thing goes and how far *above the ground* — how tall the thing that
+            // lands there is, is the thing's business, the same split `spawn_vehicles` makes with
+            // its ride height. Putting it in the marker would mean every placement had to know the
+            // geometry of what it was placing, and a click would bury a crate to its middle.
+            y: 0.0,
             rotation: Quat::IDENTITY,
         });
     }
@@ -306,7 +311,7 @@ pub fn build_the_props(
                     CRATE_HALF_EXTENT * 2.0,
                     CRATE_HALF_EXTENT * 2.0,
                 ),
-                marker.where_it_stands(&ground.0),
+                marker.where_it_stands(&ground.0) + Vec3::Y * CRATE_HALF_EXTENT,
                 marker.rotation,
             ),
             PlacedProp,
@@ -417,12 +422,13 @@ mod tests {
         }
         for (marker, centre) in terrain.markers_of(CRATE).zip(CRATES) {
             assert_eq!((marker.x, marker.z), (centre.x, centre.z));
-            // The constant is a world height on a plane at zero; the marker is an offset. On the
-            // built-in map the two agree, and that agreement is the thing worth pinning.
+            // The constant is the *centre* of a box on a plane at zero; the marker is the point on
+            // the ground it stands on, and the box's own half-height is added where the box is
+            // built. The two agree once that is put back, and that agreement is what is pinned.
+            let stands = marker.where_it_stands(&terrain).y + CRATE_HALF_EXTENT;
             assert!(
-                (marker.where_it_stands(&terrain).y - centre.y).abs() < 0.01,
-                "a crate marker stands at {} where the constant says {}",
-                marker.where_it_stands(&terrain).y,
+                (stands - centre.y).abs() < 0.01,
+                "a crate marker puts its box at {stands} where the constant says {}",
                 centre.y,
             );
         }

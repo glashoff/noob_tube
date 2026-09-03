@@ -55,6 +55,12 @@ impl Plugin for SculptingPlugin {
     }
 }
 
+/// How many of the ten hotbar slots the brushes take, from key 1.
+///
+/// Shared with [`placing`](crate::placing), which fills the rest: the two read different digits and
+/// the offset between them has to be one number, not two that agree today.
+pub const BRUSH_SLOTS: usize = 4;
+
 /// Which tool, of the four.
 ///
 /// In the order they earn their place rather than the order they are reached for. **Flatten first**:
@@ -138,6 +144,7 @@ fn turn_it_on(
     wheel: Res<AccumulatedMouseScroll>,
     menu: Res<crate::map_menu::MapMenu>,
     mut chisel: ResMut<Chisel>,
+    mut placer: ResMut<crate::placing::Placer>,
 ) {
     if keys.just_pressed(KeyCode::F4) {
         chisel.on = !chisel.on;
@@ -157,7 +164,14 @@ fn turn_it_on(
         if keys.just_pressed(key) {
             chisel.tool = tool;
             chisel.anchor = None;
+            // The hand holds one thing: reaching for a brush is putting the placeable down.
+            placer.held = None;
         }
+    }
+    // With a placeable in hand the wheel turns it instead — see `placing::work_the_hand`. The
+    // brush's own radius and strength are not what the wheel means then.
+    if placer.held.is_some() {
+        return;
     }
     let notches = wheel.delta.y;
     if notches != 0.0 {
@@ -185,7 +199,7 @@ fn turn_it_on(
 /// The same ray a shot uses, against the same level geometry, which is what makes the ring land on
 /// the ground rather than near it — and it finds the crates and the ramp too, so a brush aimed at
 /// one is a brush that has plainly missed the ground.
-fn aim_the_brush(
+pub fn aim_the_brush(
     level: Level,
     camera: Option<Single<&GlobalTransform, With<Camera3d>>>,
     mut chisel: ResMut<Chisel>,
@@ -205,6 +219,16 @@ fn aim_the_brush(
         .map(|distance| origin + forward * distance);
 }
 
+/// Whether the brush is what the hand is holding.
+///
+/// Two reads that answer one question — the menu owns the keyboard while it is up, and a placeable
+/// owns the trigger while it is held — grouped because every system that asks one asks the other.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct Hand<'w> {
+    menu: Res<'w, crate::map_menu::MapMenu>,
+    placer: Res<'w, crate::placing::Placer>,
+}
+
 /// Update: works the brush while the button is down.
 /// The trigger comes from [`CurrentInput`](crate::local_player::CurrentInput) rather than from the
 /// mouse, and that is worth a sentence. It is the same door every other input goes through, so a
@@ -213,15 +237,16 @@ fn aim_the_brush(
 /// modifier rather than a trigger and the game has no field for it.
 fn work_the_brush(
     input: Res<crate::local_player::CurrentInput>,
+    hand: Hand,
     mouse: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
-    menu: Res<crate::map_menu::MapMenu>,
     ground: Option<Res<Ground>>,
     mut chisel: ResMut<Chisel>,
     sender: Option<Single<&mut MessageSender<Stroke>>>,
 ) {
     chisel.cooldown = (chisel.cooldown - time.delta_secs()).max(0.0);
-    if !chisel.on || menu.open || ground.is_none() {
+    // The trigger belongs to whatever is in the hand, and a placeable is not a brush.
+    if !chisel.on || hand.menu.open || ground.is_none() || hand.placer.held.is_some() {
         return;
     }
     let Some(at) = chisel.at else {
@@ -338,7 +363,7 @@ fn draw_the_brush(chisel: Res<Chisel>, ground: Option<Res<Ground>>, mut gizmos: 
 /// way past — otherwise every stroke is also a burst of fire into the hillside being shaped.
 /// Everything else about the input is left alone on purpose: walking, driving and looking are how a
 /// sculptor judges what they have made.
-fn hold_the_trigger(
+pub fn hold_the_trigger(
     chisel: Res<Chisel>,
     mut input: ResMut<crate::local_player::CurrentInput>,
 ) {
@@ -377,6 +402,7 @@ pub fn readout(chisel: &Chisel) -> String {
 /// Rebuilt every frame rather than edited, so a mode that ends takes its bindings with it.
 pub fn name_the_slots(
     chisel: Res<Chisel>,
+    placer: Res<crate::placing::Placer>,
     menu: Res<crate::map_menu::MapMenu>,
     mut hotbar: ResMut<crate::hotbar::Hotbar>,
 ) {
@@ -395,6 +421,8 @@ pub fn name_the_slots(
                 if chisel.anchor.is_some() { "far end".into() } else { "two clicks".into() }
             }
         };
-        hotbar.add(tool.name(), note, tool == chisel.tool);
+        // Lit only when the brush is what the hand holds: two slots showing as in hand at once
+        // would be the bar disagreeing with the game about a thing it exists to report.
+        hotbar.add(tool.name(), note, tool == chisel.tool && placer.held.is_none());
     }
 }

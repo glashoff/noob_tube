@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use lightyear::prelude::{MessageReceiver, MessageSystems, Predicted};
 use noob_tube_shared::level::{self, CRATE_HALF_EXTENT, RAMP_HALF_EXTENTS};
 use noob_tube_shared::sculpt::{self, GroundPatched, PendingEdits, TerrainEdit};
-use noob_tube_shared::terrain::{Ground, MarkerChanged, Terrain, TerrainBaseline};
+use noob_tube_shared::terrain::{Ground, MarkerChanged, Palette, Terrain, TerrainBaseline};
 use noob_tube_shared::types::Authored;
 
 pub struct WorldPlugin;
@@ -212,6 +212,11 @@ fn adopt_the_map(
                         baseline.pending.len(),
                     );
                     commands.insert_resource(Ground(terrain));
+                    // What this server can place. Empty means an older one, and the client's own
+                    // list is a better answer to that than a palette that can place nothing.
+                    if !baseline.palette.is_empty() {
+                        commands.insert_resource(Palette(baseline.palette.clone()));
+                    }
                     // Strokes accepted before this client arrived but not yet applied. The ground
                     // it was just given has not had them, and without them it never would — this
                     // client would be the only one standing on a map without somebody's hill.
@@ -397,8 +402,12 @@ fn draw_the_props(
             Authored,
             Mesh3d(mesh.clone()),
             MeshMaterial3d(material.clone()),
-            Transform::from_translation(marker.where_it_stands(&ground.0))
-                .with_rotation(marker.rotation),
+            // The crate's own half-height, added here rather than stored in the marker — see
+            // `level::default_markers`. The collider does the same, from the same numbers.
+            Transform::from_translation(
+                marker.where_it_stands(&ground.0) + Vec3::Y * CRATE_HALF_EXTENT,
+            )
+            .with_rotation(marker.rotation),
             ChildOf(*root),
         ));
     }

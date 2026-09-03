@@ -285,6 +285,7 @@ fn spawn_chisel_line(window: Option<Single<Entity, With<Window>>>, mut commands:
 /// Update: shows it while there is a brush, and hides it the rest of the time.
 fn update_chisel_line(
     chisel: Res<crate::sculpting::Chisel>,
+    placer: Res<crate::placing::Placer>,
     line: Option<Single<(&mut Text, &mut Visibility), With<ChiselLine>>>,
 ) {
     let Some(line) = line else {
@@ -293,7 +294,10 @@ fn update_chisel_line(
     let (mut text, mut visible) = line.into_inner();
     *visible = if chisel.on { Visibility::Visible } else { Visibility::Hidden };
     if chisel.on {
-        text.0 = crate::sculpting::readout(&chisel);
+        // Whichever the hand is holding. Saying "sculpt: flatten" while a crate is in the hand is
+        // the line reporting a tool that is not the one the next click will use.
+        text.0 = crate::placing::readout(&placer)
+            .unwrap_or_else(|| crate::sculpting::readout(&chisel));
     }
 }
 

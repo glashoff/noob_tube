@@ -863,6 +863,18 @@ impl Terrain {
     }
 }
 
+/// Every kind this server can place.
+///
+/// A resource of its own rather than a field on [`Terrain`], because it is a property of the
+/// *server* and not of the map: two maps on one server offer the same palette, and the same map
+/// carried to a server with more assets offers more. Putting it on the map would also put it in
+/// the manifest, where it would be a copy of the server's asset list going stale on disk.
+///
+/// It arrives with the baseline all the same, because that is the message a client already gets on
+/// joining and the palette is useless before there is a map to place on.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct Palette(pub Vec<String>);
+
 /// The map this world is played on.
 ///
 /// A resource rather than a component: there is one authoritative height field and no timeline on
@@ -907,6 +919,14 @@ pub struct TerrainBaseline {
     /// with no player spawn is unplayable, so an empty list is never a state anybody authored.
     #[serde(default)]
     pub markers: Vec<Marker>,
+    /// Every kind this server can place, which is the palette an author picks from.
+    ///
+    /// It travels rather than being a shared constant, and that is the whole point of a `kind`
+    /// being a name instead of an enum: a server with more assets offers more, and a client is
+    /// told what they are rather than needing the same build. Empty means "whatever this build
+    /// knows", which is what an older server sends.
+    #[serde(default)]
+    pub palette: Vec<String>,
 }
 
 impl TerrainBaseline {
@@ -919,6 +939,7 @@ impl TerrainBaseline {
             pending: pending.to_vec(),
             layers: terrain.layers.clone(),
             markers: terrain.markers.clone(),
+            palette: crate::level::PLACEABLES.iter().map(|kind| (*kind).to_string()).collect(),
         }
     }
 

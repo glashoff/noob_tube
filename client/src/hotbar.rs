@@ -6,9 +6,10 @@
 //! remember.
 //!
 //! **It shows bindings rather than owning them.** [`Hotbar`] is filled each frame by whoever the
-//! digits currently belong to — today that is [`sculpting`](crate::sculpting), which is also the
-//! code that reads the digits, so the label and the key that produces it are written in one place
-//! and cannot drift apart. Nothing bound, nothing shown: an empty bar is hidden rather than drawn
+//! digits currently belong to — [`sculpting`](crate::sculpting) for the brushes on 1 to 4 and
+//! [`placing`](crate::placing) for the placeables on 5 to 0, each of them the code that also
+//! *reads* those digits, so a label and the key that produces it are written in one place and
+//! cannot drift apart. Nothing bound, nothing shown: an empty bar is hidden rather than drawn
 //! as ten empty boxes promising keys that do nothing.
 
 use bevy::prelude::*;
@@ -33,7 +34,16 @@ impl Plugin for HotbarPlugin {
             // After everything that might fill it, so what is drawn is this frame's bindings and
             // not last frame's. `Update` ordering by set would be tidier the day a second thing
             // owns the digits; with one filler, being late is enough.
-            .add_systems(Update, (rebuild, paint).chain().after(crate::sculpting::name_the_slots));
+            // After *everything* that fills it. Two things own the digits now — the brushes and
+            // the placeables — and painting after only the first drew a four-slot bar for a game
+            // that had ten.
+            .add_systems(
+                Update,
+                (rebuild, paint)
+                    .chain()
+                    .after(crate::sculpting::name_the_slots)
+                    .after(crate::placing::name_the_slots),
+            );
     }
 }
 
