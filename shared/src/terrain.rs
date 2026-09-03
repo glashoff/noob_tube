@@ -1282,6 +1282,23 @@ pub struct Layer {
     /// Defaulted, so a manifest written before this existed still reads.
     #[serde(default = "anything")]
     pub dip: Band,
+    /// Tufts of grass a square metre of this layer grows, where it shows in full.
+    ///
+    /// **Grass is derived, and stored nowhere.** The rule above already answers the question a
+    /// scatter system has to ask — *what is this ground made of* — so a lawn is one number per
+    /// layer rather than a second data set with its own painting, its own file and its own way of
+    /// disagreeing with the ground it sits on. Paint rock over a hillside by making it steeper and
+    /// the grass thins out with the same weight the texture fades on, which is why it is this
+    /// number and not a density map.
+    ///
+    /// It belongs to the *layer* rather than to the client because ground made of grass grows grass
+    /// on every map, with nothing to author. The server never hears about any of it: no entity, no
+    /// collider, no message. See [`grass`](../../../noob_tube_client/grass/index.html).
+    ///
+    /// Defaulted to none, which is what every layer that is not grass wants and what a manifest
+    /// written before this existed reads as.
+    #[serde(default)]
+    pub grass: f32,
 }
 
 fn one() -> f32 {
@@ -1417,6 +1434,7 @@ pub fn default_layers() -> Vec<Layer> {
             slope: NOT_STEEP,
             height: Band::ANY,
             dip: NOT_HOLLOW,
+            grass: 8.0,
         },
         Layer {
             texture: "Ground048_1K-PNG".into(),
@@ -1426,6 +1444,11 @@ pub fn default_layers() -> Vec<Layer> {
             slope: NOT_STEEP,
             height: Band::ANY,
             dip: HOLLOW,
+            // A gully is bare mud in the middle and grassy at its lip, and the lip is most of it:
+            // this is what stops the crossing between the two layers being a line where the lawn
+            // ends. Thin rather than none, because the ground there is dirt and it should look
+            // like dirt showing through.
+            grass: 2.5,
         },
         Layer {
             texture: "Rock020_1K-PNG".into(),
@@ -1435,6 +1458,10 @@ pub fn default_layers() -> Vec<Layer> {
             slope: STEEP,
             height: Band::ANY,
             dip: Band::ANY,
+            // Nothing grows on a rock face, and this is the number that says so — the lawn thins
+            // out into the crossing to rock rather than stopping at an edge, because the weights
+            // it is thinned by are the same ones the texture fades on.
+            grass: 0.0,
         },
     ]
 }

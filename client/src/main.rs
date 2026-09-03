@@ -5,6 +5,7 @@ mod character;
 mod corrections;
 mod crosshair;
 mod debug_draw;
+mod grass;
 mod ground_material;
 mod harness;
 mod hotbar;
@@ -68,7 +69,7 @@ fn main() {
         .add_plugins((bot::BotPlugin, map_menu::MapMenuPlugin, placing::PlacingPlugin,
             sculpting::SculptingPlugin, hotbar::HotbarPlugin,
                       ground_material::GroundMaterialPlugin, recording::RecordingPlugin,
-                      water::WaterPlugin))
+                      water::WaterPlugin, grass::GrassPlugin))
         .add_plugins(client::ClientPlugins {
             tick_duration: net.tick_duration(),
         })
