@@ -87,16 +87,6 @@ const SHARPNESS: f32 = 6.0;
 /// Below this a projection contributes less than the eye can see and is not sampled.
 const NEGLIGIBLE: f32 = 0.002;
 
-/// Where the ground stops being shaded as a curve and starts being shaded as facets.
-///
-/// The same crossing as `STEEP` in `default_layers` and `RELIEF_*_TAN_SQUARED` in
-/// `shared/src/terrain.rs`: 35° with a 16° blend, so it rises from 27° to 43°. Three expressions of
-/// one idea — steep ground is bent in the height field, painted as rock, and shaded as the
-/// triangles it is actually made of. terrain.md §10 says this classification has to live twice, in
-/// Rust and in WGSL; these are the same two numbers rather than two numbers that happen to agree.
-const FACET_MIDDLE: f32 = 35.0;
-const FACET_BLEND: f32 = 16.0;
-
 /// A band with a soft edge, exactly as `Band::weight` computes it in Rust.
 ///
 /// `low` and `high` rather than `from` and `to`, because `from` is a reserved word in WGSL — it
@@ -343,23 +333,13 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let dx = dpdx(world);
     let dy = dpdy(world);
 
-    // **The triangle's own normal, which the mesh has all along and the vertex normals average
-    // away.** A height field cannot make an angular rock: it is single-valued, so there is no
-    // overhang and no vertical face in it, and every cliff is a ramp. What it does have is edges —
-    // the mesh is triangles, and each one is flat — and smooth shading is what hides them. So on
-    // steep ground it stops hiding them.
-    //
-    // Free, because it is the cross product of two vectors this fragment already took: the
-    // screen-space derivatives of the world position *are* two edges of the triangle being
-    // rasterised. The sign is not free — which way the cross product points depends on the winding
-    // and on screen y running downwards — so it is turned to agree with the normal the mesh sent.
-    let across = cross(dx, dy);
-    let facet = normalize(across) * select(-1.0, 1.0, dot(across, normal) >= 0.0);
-    // The plane the detail maps sit on: the interpolated normal on gentle ground, the triangle's
-    // own on a face. `planes` and `slope` above deliberately keep the smooth one — projection
-    // weights that jumped at every triangle edge would put a seam in the *texture*, and layer
-    // bands that did would put one in the paint.
-    let base = normalize(mix(normal, facet, band(slope, FACET_MIDDLE, 1.0e9, FACET_BLEND)));
+    // **The shading normal is the interpolated one, everywhere.** There was a version of this that
+    // swapped in the triangle's own normal on steep ground — free, since the screen-space
+    // derivatives of the world position are two of its edges — and while the ground was a smooth
+    // height field it was the only thing that gave a rock face any edges at all. It is not that any
+    // more: `Terrain::relief_at` moves every drawn vertex, so the roughness is in the surface, and
+    // faceting on top of it only draws the triangulation over the top of the shape. Rock is rough
+    // because it is rough, not because of how it is lit.
 
     // How much each world plane faces the camera-side of this surface. Normalised, so the three
     // always sum to one and a blend of them is an average rather than a brightening.
@@ -397,11 +377,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         // Roughness from the map when there is one, and the layer's own number when there is
         // not: the same relation `Layer::colour` has to a colour map, where the constant is what
         // the ground wears until something better has loaded and is measured from it afterwards.
-        var n = base;
+        var n = normal;
         var r = rules.colour[0].w;
         if rules.dip[0].w > 0.5 {
             let d = triplanar_detail(
-                packed_0, sampler_0, world, dx, dy, planes, rules.height[0].w, base,
+                packed_0, sampler_0, world, dx, dy, planes, rules.height[0].w, normal,
             );
             n = d.normal;
             r = d.roughness;
@@ -421,11 +401,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         // Roughness from the map when there is one, and the layer's own number when there is
         // not: the same relation `Layer::colour` has to a colour map, where the constant is what
         // the ground wears until something better has loaded and is measured from it afterwards.
-        var n = base;
+        var n = normal;
         var r = rules.colour[1].w;
         if rules.dip[1].w > 0.5 {
             let d = triplanar_detail(
-                packed_1, sampler_1, world, dx, dy, planes, rules.height[1].w, base,
+                packed_1, sampler_1, world, dx, dy, planes, rules.height[1].w, normal,
             );
             n = d.normal;
             r = d.roughness;
@@ -445,11 +425,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         // Roughness from the map when there is one, and the layer's own number when there is
         // not: the same relation `Layer::colour` has to a colour map, where the constant is what
         // the ground wears until something better has loaded and is measured from it afterwards.
-        var n = base;
+        var n = normal;
         var r = rules.colour[2].w;
         if rules.dip[2].w > 0.5 {
             let d = triplanar_detail(
-                packed_2, sampler_2, world, dx, dy, planes, rules.height[2].w, base,
+                packed_2, sampler_2, world, dx, dy, planes, rules.height[2].w, normal,
             );
             n = d.normal;
             r = d.roughness;
@@ -469,11 +449,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         // Roughness from the map when there is one, and the layer's own number when there is
         // not: the same relation `Layer::colour` has to a colour map, where the constant is what
         // the ground wears until something better has loaded and is measured from it afterwards.
-        var n = base;
+        var n = normal;
         var r = rules.colour[3].w;
         if rules.dip[3].w > 0.5 {
             let d = triplanar_detail(
-                packed_3, sampler_3, world, dx, dy, planes, rules.height[3].w, base,
+                packed_3, sampler_3, world, dx, dy, planes, rules.height[3].w, normal,
             );
             n = d.normal;
             r = d.roughness;
@@ -491,7 +471,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     } else {
         colour = vec3<f32>(0.5, 0.0, 0.5);
         roughness = 1.0;
-        shading = base;
+        shading = normal;
     }
 
     pbr_input.material.base_color = vec4<f32>(colour, 1.0);
