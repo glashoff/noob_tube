@@ -12,6 +12,7 @@ them, where each file that ships is let through by name.
     tools/fetch-ground-textures --dry-run          # what it would fetch, and how much traffic
     tools/fetch-ground-textures --maps all         # normal, roughness, displacement, AO as well
     tools/fetch-ground-textures --category Grass   # any other ambientCG category
+    tools/fetch-ground-textures Grass001 Rock020   # named packs, whatever category they are in
 
 The defaults are chosen so a fetched pack is usable without renaming anything:
 `client/src/ground_material.rs` builds its path as `textures/{name}_Color.png`, so a 1K PNG colour
@@ -128,6 +129,54 @@ def catalogue(category: str, sort: str) -> list[dict]:
             return assets
 
 
+def named(ids: list[str]) -> list[dict]:
+    """The packs with these exact ids, whatever category each is in — and without asking.
+
+    Two of the three textures this repository ships are not Ground: `Grass001` is Grass and
+    `Rock020` is Rock. Naming a pack therefore has to be a way round the category listing rather
+    than a filter on it, and the obvious way round — the API's free-text search — turns out not to
+    be one. It does not carry every asset. `Grass001` comes back from it; `Ground048` and `Rock020`
+    do not, though the Ground listing has one of them and `/get?file=Rock020_1K-PNG.zip` serves the
+    other. An index that answers "no" for a pack that is right there is worse than no index.
+
+    So a named pack is not looked up at all. Its download address is built from the id, which is
+    the shape ambientCG has always used, and fetching it is then the test of whether it exists — a
+    typo arrives as a 404 on that one pack rather than as an error before anything starts. What is
+    given up is the size the listing would have carried, which is why `on_disk` has a second way to
+    recognise a whole pack.
+    """
+    attributes = [f"{r}-{f}" for f in ("PNG", "JPG") for r in ("1K", "2K", "4K", "8K")]
+    assets = []
+    for wanted in ids:
+        downloads = [
+            {
+                "attribute": a,
+                "filetype": "zip",
+                "fileName": f"{wanted}_{a}.zip",
+                "downloadLink": f"https://ambientcg.com/get?file={wanted}_{a}.zip",
+                "size": None,
+            }
+            for a in attributes
+        ]
+        folders = {"default": {"downloadFiletypeCategories": {"zip": {"downloads": downloads}}}}
+        assets.append({"assetId": wanted, "downloadFolders": folders})
+    return assets
+
+
+def on_disk(archive: Path, download: dict) -> bool:
+    """Whether this pack is already here whole.
+
+    By size when the listing gave one: it is the cheap check and it catches a truncation. A pack
+    named rather than listed has no size to compare against, so the question becomes whether the
+    file opens as a zip at all — weaker, but it is the same thing the unpacking would find out a
+    moment later anyway.
+    """
+    if not archive.exists():
+        return False
+    size = download.get("size")
+    return archive.stat().st_size == size if size else zipfile.is_zipfile(archive)
+
+
 def zip_for(asset: dict, attribute: str) -> dict | None:
     """The one download of a pack matching e.g. `1K-PNG`, or nothing if it has none.
 
@@ -172,6 +221,12 @@ def unpack(archive: Path, name: str, wanted: list[str], suffix: str, out: Path) 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "assets",
+        nargs="*",
+        metavar="ASSET",
+        help="asset ids to fetch instead of a whole category, e.g. Grass001 Ground048",
     )
     parser.add_argument("--category", default="Ground", help="ambientCG category (default: Ground)")
     parser.add_argument(
@@ -220,8 +275,12 @@ def main() -> None:
     attribute = f"{args.resolution}-{args.format}"
     suffix = args.format.lower()
 
-    print(f"Asking ambientCG for the {args.category} materials…")
-    assets = catalogue(args.category, args.sort)
+    if args.assets:
+        print(f"Asking ambientCG about {', '.join(args.assets)}…")
+        assets = named(args.assets)
+    else:
+        print(f"Asking ambientCG for the {args.category} materials…")
+        assets = catalogue(args.category, args.sort)
     if not assets:
         die(f"No materials in category {args.category!r}. The category names are the ones in the\n"
             f"sidebar at https://ambientcg.com/list — Ground, Grass, Rock, Concrete, and so on.")
@@ -246,13 +305,12 @@ def main() -> None:
             missing.append(asset["assetId"])
             continue
         archive = args.packs / download["fileName"]
-        held = archive.exists() and archive.stat().st_size == download["size"]
-        if held or (args.no_packs and unpacked):
+        if on_disk(archive, download) or (args.no_packs and unpacked):
             (done if unpacked else local).append((name, archive, download))
         else:
             fetch.append((name, archive, download))
 
-    traffic = sum(d["size"] for _, _, d in fetch)
+    traffic = sum(d["size"] or 0 for _, _, d in fetch)
     print(
         f"{len(assets)} materials: {len(fetch)} to download ({traffic / 1e9:.2f} GB), "
         f"{len(local)} to unpack from {args.packs.name}/, {len(done)} already done, "
@@ -262,7 +320,7 @@ def main() -> None:
         print("  no download: " + ", ".join(missing))
     if args.dry_run:
         for name, _, download in fetch:
-            print(f"  {name}  {download['size'] / 1e6:6.1f} MB")
+            print(f"  {name}  {(download['size'] or 0) / 1e6:6.1f} MB")
         return
     if not fetch and not local:
         print("Nothing to do.")
@@ -274,15 +332,21 @@ def main() -> None:
 
     kept, todo = 0, local + fetch
     for index, (name, archive, download) in enumerate(todo, 1):
-        held = archive.exists() and archive.stat().st_size == download["size"]
+        held = on_disk(archive, download)
         head = f"[{index}/{len(todo)}] {name}"
         if held:
             print(f"{head}  (have the pack)", end="", flush=True)
-        else:
+        elif download["size"]:
             print(f"{head}  ({download['size'] / 1e6:.1f} MB)", end="", flush=True)
+        else:
+            print(f"{head}  (size unlisted)", end="", flush=True)
             try:
                 get(download["downloadLink"], into=archive)
-            except (urllib.error.HTTPError, RuntimeError) as error:
+            except urllib.error.HTTPError as error:
+                hint = " — check the id" if error.code == 404 and args.assets else ""
+                print(f"\n    skipped: HTTP {error.code}{hint}")
+                continue
+            except RuntimeError as error:
                 print(f"\n    skipped: {error}")
                 continue
 
@@ -297,8 +361,8 @@ def main() -> None:
 
     print(f"\nDone: {kept} files in {args.out}.")
     if not args.no_packs:
-        on_disk = sum(p.stat().st_size for p in args.packs.glob("*.zip"))
-        print(f"The packs stay in {args.packs} ({on_disk / 1e9:.2f} GB) — re-run with --maps all to "
+        bytes_held = sum(p.stat().st_size for p in args.packs.glob("*.zip"))
+        print(f"The packs stay in {args.packs} ({bytes_held / 1e9:.2f} GB) — re-run with --maps all to "
               f"unpack more of\nwhat is in them without downloading anything again.")
     print(f"All CC0. A layer reads one by name, without the map suffix: texture = \"{todo[0][0]}\".")
 
