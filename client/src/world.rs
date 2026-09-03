@@ -117,14 +117,17 @@ fn ground_mesh(terrain: &Terrain, tx: u32, tz: u32) -> Mesh {
         for column in 0..=across {
             let (ix, iz) = (ix0 + column * step, iz0 + row * step);
             let here = grid.world_of(ix, iz);
-            positions.push([here.x, terrain.height_at(ix, iz), here.y]);
+            // `surface_at`, not `height_at`: the authored field is what the map stores, and the
+            // surface is that plus the relief steep ground carries. The collider is built from the
+            // same call, which is the whole reason the relief lives in `Terrain` rather than here.
+            positions.push([here.x, terrain.surface_at(ix, iz), here.y]);
             // Central differences, one sample either side, falling back to this sample at the rim
             // of the map. The cross product of the two tangents comes out as this without building
             // them.
-            let west = terrain.height_at(ix.saturating_sub(step), iz);
-            let east = terrain.height_at((ix + step).min(grid.nx - 1), iz);
-            let south = terrain.height_at(ix, iz.saturating_sub(step));
-            let north = terrain.height_at(ix, (iz + step).min(grid.nz - 1));
+            let west = terrain.surface_at(ix.saturating_sub(step), iz);
+            let east = terrain.surface_at((ix + step).min(grid.nx - 1), iz);
+            let south = terrain.surface_at(ix, iz.saturating_sub(step));
+            let north = terrain.surface_at(ix, (iz + step).min(grid.nz - 1));
             let normal = Vec3::new(west - east, 2.0 * step as f32 * grid.spacing, south - north);
             normals.push(normal.normalize().into());
             uvs.push([here.x, here.y]);
@@ -501,8 +504,8 @@ mod tests {
                 }
                 let (u, v) =
                     ((ix - x0) as f32 / step as f32, (iz - z0) as f32 / step as f32);
-                let (h00, h10) = (terrain.height_at(x0, z0), terrain.height_at(x1, z0));
-                let (h01, h11) = (terrain.height_at(x0, z1), terrain.height_at(x1, z1));
+                let (h00, h10) = (terrain.surface_at(x0, z0), terrain.surface_at(x1, z0));
+                let (h01, h11) = (terrain.surface_at(x0, z1), terrain.surface_at(x1, z1));
                 // Each cell is two triangles split along the anti-diagonal `u + v = 1`, which is
                 // the edge `[here + 1, next_row]` above.
                 let drawn = if u + v <= 1.0 {
@@ -510,7 +513,7 @@ mod tests {
                 } else {
                     h11 + (h01 - h11) * (1.0 - u) + (h10 - h11) * (1.0 - v)
                 };
-                worst = worst.max((drawn - terrain.height_at(ix, iz)).abs());
+                worst = worst.max((drawn - terrain.surface_at(ix, iz)).abs());
             }
         }
         assert!(worst < 0.7, "the drawn ground is {worst:.2} m from the ground underfoot");

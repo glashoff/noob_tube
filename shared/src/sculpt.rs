@@ -419,12 +419,25 @@ mod tests {
             radius: 2.0,
             brush: Brush::Lift { metres: 8.0 } };
         map.sculpt(&spike).expect("the spike");
-        let peak = map.height_over(0.0, 0.0);
+
+        // Authored heights, not `height_over`. That one answers with the *surface*, and the surface
+        // carries the relief steep ground is given — which is a function of where in the world a
+        // face stands and is deliberately not symmetric about anything. An eight-metre spike in a
+        // two-metre brush is as steep as ground gets, so asking the surface here would measure the
+        // relief rather than the stroke. Sculpting is authoring, and authoring is in the field the
+        // map stores.
+        fn authored(map: &Terrain, x: f32, z: f32) -> f32 {
+            let grid = map.grid;
+            let ix = ((x - grid.origin_x) / grid.spacing).round() as u32;
+            let iz = ((z - grid.origin_z) / grid.spacing).round() as u32;
+            map.height_at(ix, iz)
+        }
+        let peak = authored(&map, 0.0, 0.0);
 
         map.sculpt(&stroke(Brush::Smooth { amount: 1.0 })).expect("the smoothing");
-        assert!(map.height_over(0.0, 0.0) < peak, "the spike did not come down");
-        let (west, east) = (map.height_over(-3.0, 0.0), map.height_over(3.0, 0.0));
-        let (south, north) = (map.height_over(0.0, -3.0), map.height_over(0.0, 3.0));
+        assert!(authored(&map, 0.0, 0.0) < peak, "the spike did not come down");
+        let (west, east) = (authored(&map, -3.0, 0.0), authored(&map, 3.0, 0.0));
+        let (south, north) = (authored(&map, 0.0, -3.0), authored(&map, 0.0, 3.0));
         assert!((west - east).abs() < 1e-3, "{west:.4} west against {east:.4} east");
         assert!((south - north).abs() < 1e-3, "{south:.4} south against {north:.4} north");
     }

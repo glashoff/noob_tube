@@ -132,6 +132,64 @@ pub(crate) fn falloff(distance_squared: f32, radius: f32) -> f32 {
     if t >= 1.0 { 0.0 } else { smoothstep(1.0 - t) }
 }
 
+/// How far a rock face is pushed off its authored height, and over what distance.
+///
+/// Two octaves, because one reads as a regular swell and three cost samples nobody can see. Eleven
+/// metres is the shorter, and it is a floor rather than a taste: the drawn mesh keeps one vertex in
+/// two metres, so a bump four metres across is the finest thing it can carry at all, and anything
+/// under that would exist only in the collider — ground you walk into and cannot see. The two
+/// lengths are not multiples of each other, so their sum does not repeat on a grid.
+///
+/// **The rises are what the mesh will carry, and that is measured rather than chosen.** Together
+/// they reach about 0.99 m on a face. `the_drawn_ground_stays_near_the_ground_underfoot` says the
+/// drawn ground is within 0.7 m of the walked ground over the built-in map, which was 0.62 m before
+/// any of this and is 0.68 m now — the relief spends six centimetres of a gap that exists because
+/// the picture skips every second sample. Doubling the coarse rise buys visibly nothing and costs
+/// another centimetre; a rise of 1.4 breaks the test outright at 0.84 m. This is the constant to
+/// lower if a map ever fails it.
+const RELIEF_COARSE_METRES: f32 = 23.0;
+const RELIEF_COARSE_RISE: f32 = 0.75;
+const RELIEF_FINE_METRES: f32 = 11.0;
+const RELIEF_FINE_RISE: f32 = 0.24;
+
+/// Where relief starts and where it is at full strength, as squared gradients.
+///
+/// The tangents of 27° and 43° — the edges `STEEP` crosses between in
+/// [`default_layers`], squared so the mask can be computed without a square root. Rock is painted
+/// exactly where the ground is bent, because they are the same two numbers rather than two numbers
+/// that happen to agree today.
+const RELIEF_FROM_TAN_SQUARED: f32 = 0.2596; // tan(27°)²
+const RELIEF_TO_TAN_SQUARED: f32 = 0.8696; // tan(43°)²
+
+/// Value noise on a lattice `metres` across, from -1 to 1, with no transcendental in it.
+///
+/// The lattice corners are hashed as integers and the cell is interpolated with the same
+/// [`smoothstep`] everything else here uses. That is the whole point of writing it out rather than
+/// reaching for a noise crate: the ground has to come out bit for bit the same on a server and on
+/// every client that has the map, and the moment a `sin` or a `powf` enters that stops being
+/// something anyone can promise.
+fn wobble(x: f32, z: f32, metres: f32) -> f32 {
+    /// One lattice corner, as 24 bits of hash scaled into 0..1 — exact in an `f32`, both the shift
+    /// and the divisor being powers of two.
+    fn corner(ix: i32, iz: i32) -> f32 {
+        let mut h = (ix as u32).wrapping_mul(0x27d4_eb2d) ^ (iz as u32).wrapping_mul(0x1656_67b1);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2c1b_3c6d);
+        h ^= h >> 13;
+        h = h.wrapping_mul(0x297a_2d39);
+        h ^= h >> 16;
+        (h >> 8) as f32 / (1u32 << 24) as f32
+    }
+
+    let (u, v) = (x / metres, z / metres);
+    let (cell_x, cell_z) = (u.floor(), v.floor());
+    let (ix, iz) = (cell_x as i32, cell_z as i32);
+    let (fx, fz) = (smoothstep(u - cell_x), smoothstep(v - cell_z));
+    let south = corner(ix, iz) + (corner(ix + 1, iz) - corner(ix, iz)) * fx;
+    let north = corner(ix, iz + 1) + (corner(ix + 1, iz + 1) - corner(ix, iz + 1)) * fx;
+    (south + (north - south) * fz) * 2.0 - 1.0
+}
+
 /// The squared distance from a point to a segment. No square root anywhere in it.
 pub(crate) fn to_segment_squared(point: Vec2, from: Vec2, to: Vec2) -> f32 {
     let along = to - from;
@@ -650,9 +708,94 @@ impl Terrain {
         spawns.next().is_some_and(|first| first.id == id) && spawns.next().is_none()
     }
 
-    /// The height at one sample, in metres.
+    /// The height at one sample as it was **authored**, in metres.
+    ///
+    /// This is the number in the file: what a sculpt brush wrote, what `encode` sends, what
+    /// `decode` reads back. It is not quite the ground — see [`surface_at`](Self::surface_at),
+    /// which adds the relief that steep ground carries and that nothing stores.
+    ///
+    /// The two are separate on purpose. Everything that *edits* or *transmits* the map works in
+    /// authored heights, because relief added to a stored value would be re-added the next time it
+    /// was stored, and a face would grow lumpier every time somebody sculpted near it.
     pub fn height_at(&self, ix: u32, iz: u32) -> f32 {
         self.grid.height(self.heights[self.grid.index(ix, iz)])
+    }
+
+    /// The ground at one sample: what is drawn there and what is stood on.
+    ///
+    /// The authored height plus [`relief_at`](Self::relief_at). **Every piece of geometry goes
+    /// through this and nothing else does** — the collider in
+    /// [`height_field`](Self::height_field), the drawn mesh in `client/src/world.rs`, and
+    /// [`height_over`](Self::height_over), which is how a thing is put on the ground when there is
+    /// no collider to ask yet. terrain.md's rule is that the shape you see and the shape you walk
+    /// on come from the same numbers, and this is the number.
+    pub fn surface_at(&self, ix: u32, iz: u32) -> f32 {
+        self.height_at(ix, iz) + self.relief_at(ix, iz)
+    }
+
+    /// How much this sample is pushed off the authored height because it is steep, in metres.
+    ///
+    /// **A rock face made of two triangles is a ramp, and reads as one.** No normal map fixes that:
+    /// the silhouette against the sky is straight, the shadow it casts is straight, and a texture
+    /// of broken stone laid over a plane says only that somebody laid a texture over a plane. So
+    /// the steep ground is actually moved, in the height field, where the collider and the picture
+    /// both read it and cannot disagree about it.
+    ///
+    /// **Nothing stores this.** It is a function of world position, so it costs no bytes in the
+    /// file, none on the wire, and a client and a server that have the same authored field have
+    /// the same ground without exchanging a word about it. That is also why it is written the way
+    /// it is: `hash` is integer arithmetic and the interpolation is polynomial, because §"Smoothstep"
+    /// above rules out `sqrt`, `sin` and `powf` for exactly this reason — they go through `libm`,
+    /// which may differ in the last ulp between platforms, and two machines that disagree about
+    /// the ground disagree about where a player is standing.
+    ///
+    /// **Only where rock is**, and by the same crossing the rock layer is painted on: the mask is
+    /// the gradient measured against the tangents of `STEEP`'s edges in
+    /// [`default_layers`](crate::terrain::default_layers). Flat ground keeps its authored height
+    /// exactly, which is what keeps the spawns, the ramp and the crates standing on the plane they
+    /// were placed on.
+    ///
+    /// The mask reads the **authored** gradient, not the relieved one. Measuring the slope of a
+    /// surface in order to decide how much to bend it would be a feedback loop, and a slow one:
+    /// it would settle somewhere, but nowhere anybody chose.
+    ///
+    /// **Two octaves and no finer.** The drawn mesh keeps one vertex in `MESH_STRIDE` — two
+    /// metres — so anything shorter than about four metres cannot be drawn at all while the
+    /// collider, which keeps every sample, would still have it. That is not roughness, it is the
+    /// drawn ground and the walked ground coming apart, which
+    /// `the_drawn_ground_stays_near_the_ground_underfoot` measures and this had to be tuned
+    /// against. Nine metres is the shorter of the two, and it is the floor.
+    pub fn relief_at(&self, ix: u32, iz: u32) -> f32 {
+        let mask = self.steepness_at(ix, iz);
+        if mask <= 0.0 {
+            return 0.0;
+        }
+        let here = self.grid.world_of(ix, iz);
+        let coarse = wobble(here.x, here.y, RELIEF_COARSE_METRES) * RELIEF_COARSE_RISE;
+        let fine = wobble(here.x + 137.0, here.y - 91.0, RELIEF_FINE_METRES) * RELIEF_FINE_RISE;
+        mask * (coarse + fine)
+    }
+
+    /// How much this sample counts as rock, from 0 on flat ground to 1 on a face.
+    ///
+    /// The gradient **squared**, against the squared tangents of the same two angles the rock layer
+    /// crosses over — 27° and 43°, the edges of `STEEP`. Squared throughout because the honest
+    /// form of the question is "is the rise over the run steeper than this", and comparing the
+    /// squares answers it without the square root that `Vec2::length` would take and that this
+    /// file may not use.
+    ///
+    /// Central differences over one sample either side, clamped at the rim exactly as the drawn
+    /// normals are, so the edge of the map reads as flat rather than as a cliff.
+    fn steepness_at(&self, ix: u32, iz: u32) -> f32 {
+        let grid = self.grid;
+        let at = |x: u32, z: u32| self.height_at(x.min(grid.nx - 1), z.min(grid.nz - 1));
+        let run = 2.0 * grid.spacing;
+        let dx = (at(ix + 1, iz) - at(ix.saturating_sub(1), iz)) / run;
+        let dz = (at(ix, iz + 1) - at(ix, iz.saturating_sub(1))) / run;
+        let gradient_squared = dx * dx + dz * dz;
+        let t = (gradient_squared - RELIEF_FROM_TAN_SQUARED)
+            / (RELIEF_TO_TAN_SQUARED - RELIEF_FROM_TAN_SQUARED);
+        smoothstep(t.clamp(0.0, 1.0))
     }
 
     /// The ground under a point, in metres, between the samples.
@@ -673,8 +816,8 @@ impl Terrain {
         };
         let (ix, tx) = along(x, grid.origin_x, grid.nx);
         let (iz, tz) = along(z, grid.origin_z, grid.nz);
-        let (h00, h10) = (self.height_at(ix, iz), self.height_at(ix + 1, iz));
-        let (h01, h11) = (self.height_at(ix, iz + 1), self.height_at(ix + 1, iz + 1));
+        let (h00, h10) = (self.surface_at(ix, iz), self.surface_at(ix + 1, iz));
+        let (h01, h11) = (self.surface_at(ix, iz + 1), self.surface_at(ix + 1, iz + 1));
         let south = h00 + (h10 - h00) * tx;
         let north = h01 + (h11 - h01) * tx;
         south + (north - south) * tz
@@ -841,7 +984,7 @@ impl Terrain {
         let mut data = vec![0.0f32; nx * nz];
         for ix in 0..nx {
             for iz in 0..nz {
-                data[iz + ix * nz] = self.height_at(ix0 + ix as u32, iz0 + iz as u32);
+                data[iz + ix * nz] = self.surface_at(ix0 + ix as u32, iz0 + iz as u32);
             }
         }
         let heights = Array2::new(nz, nx, data);
