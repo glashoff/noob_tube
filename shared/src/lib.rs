@@ -12,6 +12,7 @@ pub mod movement;
 pub mod physics;
 pub mod player;
 pub mod props;
+pub mod rock;
 pub mod protocol;
 pub mod sculpt;
 pub mod shooting;

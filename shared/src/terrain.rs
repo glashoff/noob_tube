@@ -786,7 +786,7 @@ impl Terrain {
     ///
     /// Central differences over one sample either side, clamped at the rim exactly as the drawn
     /// normals are, so the edge of the map reads as flat rather than as a cliff.
-    fn steepness_at(&self, ix: u32, iz: u32) -> f32 {
+    pub fn steepness_at(&self, ix: u32, iz: u32) -> f32 {
         let grid = self.grid;
         let at = |x: u32, z: u32| self.height_at(x.min(grid.nx - 1), z.min(grid.nz - 1));
         let run = 2.0 * grid.spacing;

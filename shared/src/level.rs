@@ -193,6 +193,24 @@ pub struct GroundCollider {
     pub tz: u32,
 }
 
+/// One tile's worth of rock, as a single compound shape.
+///
+/// Beside the height field rather than instead of it: the ground under a rock is still ground, and
+/// walking off a boulder has to land on something. The two are separate entities because they are
+/// separate shapes with separate lifetimes — a tile always has a height field and may have no rock
+/// at all — and separate components because a stroke has to find both.
+#[derive(Component)]
+pub struct RockCollider {
+    pub tx: u32,
+    pub tz: u32,
+}
+
+/// Everything one tile of the map put in the world: its height field and its rock.
+///
+/// Named because a map change has to take down both, and a query filter spelt out at the call site
+/// is the kind of thing that gets one of the two added to it and not the other.
+type AnyTileShape = Or<(With<GroundCollider>, With<RockCollider>)>;
+
 /// PreUpdate: builds the ground the current map describes, and takes down whatever was there.
 ///
 /// Run whenever [`Ground`] appears or changes, rather than at startup, because on a client it does
@@ -208,7 +226,7 @@ pub struct GroundCollider {
 /// query beyond that goes through Avian.
 pub fn build_the_ground(
     ground: Res<Ground>,
-    old: Query<Entity, With<GroundCollider>>,
+    old: Query<Entity, AnyTileShape>,
     mut commands: Commands,
 ) {
     for previous in old.iter() {
@@ -219,6 +237,11 @@ pub fn build_the_ground(
         for tx in 0..wide {
             let (collider, at) = ground.0.tile_collider(tx, tz);
             commands.spawn((GroundCollider { tx, tz }, level_geometry(collider, at)));
+            // The rock the same samples describe. Its parts are already in world space, so the
+            // body goes at the origin rather than at the tile's centre — see `rock::tile_collider`.
+            if let Some(rocks) = crate::rock::tile_collider(&ground.0, tx, tz) {
+                commands.spawn((RockCollider { tx, tz }, level_geometry(rocks, Vec3::ZERO)));
+            }
         }
     }
 }
@@ -236,6 +259,7 @@ pub fn rebuild_patched_ground(
     ground: Res<Ground>,
     mut patched: MessageReader<GroundPatched>,
     tiles: Query<(Entity, &GroundCollider)>,
+    rocks: Query<(Entity, &RockCollider)>,
     mut commands: Commands,
 ) {
     let mut dirty: Vec<(u32, u32)> = Vec::new();
@@ -257,6 +281,21 @@ pub fn rebuild_patched_ground(
         if dirty.contains(&(tile.tx, tile.tz)) {
             let (collider, at) = ground.0.tile_collider(tile.tx, tile.tz);
             commands.entity(entity).insert((collider, Position(at)));
+        }
+    }
+    // Rock cannot be replaced in place the way a height field can: a stroke changes how many rocks
+    // a tile has, and a tile can go from some to none or back. So the dirty tiles' rock comes down
+    // and is built again. Running it twice does the same thing as running it once — the second run
+    // despawns what the first spawned and spawns the same shape — which is what a rollback
+    // re-running the frame needs.
+    for (entity, tile) in rocks.iter() {
+        if dirty.contains(&(tile.tx, tile.tz)) {
+            commands.entity(entity).despawn();
+        }
+    }
+    for &(tx, tz) in &dirty {
+        if let Some(collider) = crate::rock::tile_collider(&ground.0, tx, tz) {
+            commands.spawn((RockCollider { tx, tz }, level_geometry(collider, Vec3::ZERO)));
         }
     }
 }

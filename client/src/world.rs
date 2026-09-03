@@ -165,6 +165,80 @@ fn ground_mesh(terrain: &Terrain, tx: u32, tz: u32) -> Mesh {
     .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
+/// One tile's rock as one mesh, or nothing if the tile has none.
+///
+/// **Read out of the collider, not built beside it.** `rock::tile_collider` and this go through the
+/// same `Collider::convex_hull`, and the faces drawn here are that hull's own faces — so the block
+/// you see is the block you bump into, not a second model of it. `shape_scaled` gives the built
+/// shape back; a hull knows its faces, which vertices are on each of them and which way each one
+/// points, which is everything a mesh needs and more than a triangle soup would have said.
+///
+/// **One mesh a tile, not one a rock.** A face of a hill can carry a few hundred, and a few hundred
+/// entities with a few hundred draw calls is how you spend a frame on gravel. Merged, a tileful of
+/// rock costs what the tile's ground costs: one.
+///
+/// The vertices are in world space, like the ground's, so the entity sits at the identity and a
+/// rock's position is the same number here as in its collider. Each face gets its own copies of its
+/// corners carrying the face's normal — which is the definition of flat shading, and the only way
+/// to get it, since a shared vertex can only carry one normal and a corner of a rock is on three
+/// faces pointing three ways.
+fn rock_mesh(terrain: &Terrain, tx: u32, tz: u32) -> Option<Mesh> {
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut dips: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for rock in noob_tube_shared::rock::rocks_of_tile(terrain, tx, tz) {
+        let Some(collider) = rock.collider() else {
+            continue;
+        };
+        let Some(hull) = collider.shape_scaled().as_convex_polyhedron() else {
+            continue;
+        };
+        let corners = hull.points();
+        let on_face = hull.vertices_adj_to_face();
+        for face in hull.faces() {
+            let first = face.first_vertex_or_edge as usize;
+            let count = face.num_vertices_or_edges as usize;
+            if count < 3 {
+                continue;
+            }
+            let facing = rock.facing * face.normal;
+            let base = positions.len() as u32;
+            for step in 0..count {
+                let at = rock.at + rock.facing * corners[on_face[first + step] as usize];
+                positions.push(at.to_array());
+                normals.push(facing.to_array());
+                uvs.push([at.x, at.z]);
+                // No hollow. `dip_at` measures a valley twelve metres wide, and a boulder is not
+                // one — asking the ground under it would paint the dirt of the gully it sits in
+                // over the stone itself.
+                dips.push([0.0, 0.0]);
+            }
+            // A fan, which is enough: every face of a convex hull is a convex polygon, and its
+            // corners come back wound the one way round.
+            for step in 1..count as u32 - 1 {
+                indices.extend_from_slice(&[base, base + step, base + step + 1]);
+            }
+        }
+    }
+    if indices.is_empty() {
+        return None;
+    }
+    Some(
+        Mesh::new(
+            bevy::mesh::PrimitiveTopology::TriangleList,
+            bevy::asset::RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, dips)
+        .with_inserted_indices(bevy::mesh::Indices::U32(indices)),
+    )
+}
+
 /// Root of everything the level owns.
 ///
 /// Giving the level a root is worth more than the tidier inspector tree it produces: despawning it
@@ -252,8 +326,14 @@ fn redress_patched_tiles(
     ground: Res<Ground>,
     mut patched: MessageReader<GroundPatched>,
     tiles: Query<(&GroundTile, &Mesh3d)>,
+    rocks: Query<(Entity, &RockTile)>,
+    root: Single<Entity, With<LevelRoot>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut commands: Commands,
 ) {
+    // The constant handle the material is always written under, rather than the one a tile happens
+    // to be holding: a rebuild has to reach it even in the frame before any tile exists.
+    let material = crate::ground_material::GROUND_MATERIAL;
     let mut dirty: Vec<(u32, u32)> = Vec::new();
     for GroundPatched(patch) in patched.read() {
         let (tx0, tx1, tz0, tz1) =
@@ -279,6 +359,20 @@ fn redress_patched_tiles(
             *slot = ground_mesh(&ground.0, tile.tx, tile.tz);
         }
     }
+    // The rock the same samples describe. It cannot go through its handle the way the ground does:
+    // a stroke changes how many rocks a tile has, and a tile that ends up with none has no mesh to
+    // write into at all. So the tile's rock is despawned and built again — the same shape as the
+    // collider does it in `rebuild_patched_ground`, for the same reason.
+    for (entity, tile) in rocks.iter() {
+        if dirty.contains(&(tile.tx, tile.tz)) {
+            commands.entity(entity).despawn();
+        }
+    }
+    for &(tx, tz) in &dirty {
+        if let Some(mesh) = rock_mesh(&ground.0, tx, tz) {
+            commands.spawn(rock_tile(*root, RockTile { tx, tz }, meshes.add(mesh), material.clone()));
+        }
+    }
 }
 
 /// Update: the ground, as something to look at, in tiles.
@@ -294,7 +388,7 @@ fn redress_patched_tiles(
 fn dress_the_ground(
     ground: Res<Ground>,
     root: Single<Entity, With<LevelRoot>>,
-    old: Query<Entity, With<GroundTile>>,
+    old: Query<Entity, AnyDrawnTile>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut dressing: Dressing,
@@ -321,8 +415,33 @@ fn dress_the_ground(
                 Transform::IDENTITY,
                 ChildOf(*root),
             ));
+            // The rock standing on it, when the samples describe any. Same material: the ground
+            // shader is triplanar over world position and needs no uv set, so a boulder gets the
+            // rock texture and the facets its own steepness earns, with nothing added here.
+            if let Some(mesh) = rock_mesh(terrain, tx, tz) {
+                commands
+                    .spawn(rock_tile(*root, RockTile { tx, tz }, meshes.add(mesh), material.clone()));
+            }
         }
     }
+}
+
+/// What a tile's rock is spawned as, in one place so that the first build and every rebuild agree.
+fn rock_tile(
+    root: Entity,
+    tile: RockTile,
+    mesh: Handle<Mesh>,
+    material: Handle<crate::ground_material::GroundMaterial>,
+) -> impl Bundle {
+    (
+        Name::from(format!("Rock {},{}", tile.tx, tile.tz)),
+        Authored,
+        tile,
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::IDENTITY,
+        ChildOf(root),
+    )
 }
 
 /// What it takes to put a material on the ground: the store to write it into, the server to load
@@ -332,6 +451,19 @@ struct Dressing<'w> {
     materials: ResMut<'w, Assets<crate::ground_material::GroundMaterial>>,
     assets: Res<'w, AssetServer>,
     ours: ResMut<'w, crate::ground_material::GroundTextures>,
+}
+
+/// Everything one tile of the map draws: its ground and the rock standing on it.
+///
+/// Named because a map change has to take down both, and a query filter spelt out at the call site
+/// is the kind of thing that gets one of the two added to it and not the other.
+type AnyDrawnTile = Or<(With<GroundTile>, With<RockTile>)>;
+
+/// One drawn tileful of rock, which a stroke finds the same way it finds the ground under it.
+#[derive(Component)]
+struct RockTile {
+    tx: u32,
+    tz: u32,
 }
 
 /// One drawn piece of ground: which tile it is, so a stroke can find it, and a marker so the next
