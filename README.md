@@ -523,6 +523,7 @@ a map at once and the game has no undo for that.
 cargo run --release -p import_heightmap -- ~/Downloads/Terrain004_8K.exr
 cargo run --release -p import_heightmap -- terrain.exr --name "north ridge" --relief 80
 cargo run --release -p import_heightmap -- terrain.exr --samples 513 --dry-run
+cargo run --release -p import_heightmap -- terrain.exr --preview /tmp/look.png
 ```
 
 EXR, and 16-bit PNG is not offered as an alternative: eight bits over a 128 m range is 128 discrete
@@ -565,6 +566,13 @@ last column is at once how rocky the map looks and how much of it is closed to d
 the rock layer is a rule that never fires and a real landscape reads as upholstery; over it, the
 routes between the valleys start closing. Halving the map doubles every gradient — the same 90 m at
 `--samples 513` is 21% over 35° — so the default is right for its footprint and not for all of them.
+
+`--preview` draws the finished map from above, one pixel per sample, **coloured by the layer rules
+themselves** — `default_layers` and `surface_of`, so it is grass where the map will be grass and rock
+where it will be rock, lit from the north-west so that ridges read as ridges. That makes it a check
+on `--relief` rather than a picture: whether the rock layer is firing across half the map or nowhere
+at all is visible in it, and neither is visible in a height ramp. The marker huddle is crossed and
+ringed, at the radius the flat-spot search measured over.
 
 The run ends by reading both files back through `Manifest::check` and `Terrain::decode`, the three
 steps a load is made of, and comparing. Everything before that is the importer's opinion that it

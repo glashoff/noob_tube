@@ -19,3 +19,6 @@ serde_json = { workspace = true }
 # heights over a 128 m range — half-metre terraces on every slope — and the whole reason the game
 # stores `u16` is that this is visible. Pure Rust, no unsafe, no C library to have installed.
 exr = "1.74"
+# PNG out, for `--preview` and nothing else. The same version and the same one-codec feature set
+# `tools/bake_ground_maps` pins — see client/Cargo.toml, where the reasoning is.
+image = { version = "0.25", default-features = false, features = ["png"] }

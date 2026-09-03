@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use noob_tube_shared::level::default_markers;
 use noob_tube_shared::terrain::{
     DEFAULT_MAX_Y, DEFAULT_MIN_Y, DEFAULT_SPACING, Grid, Manifest, Marker, Terrain, VERSION,
-    sanitise_name, slope_degrees,
+    default_layers, sanitise_name, slope_degrees, surface_of,
 };
 
 /// Samples per axis when nobody says otherwise, and the reason the cap is 2049 and not 2048.
@@ -123,6 +123,8 @@ struct Args {
     /// Where the marker huddle goes, if the search is not to choose.
     spawn_at: Option<(f32, f32)>,
     maps: PathBuf,
+    /// Where to draw the finished map from above, if anywhere.
+    preview: Option<PathBuf>,
     dry_run: bool,
 }
 
@@ -143,6 +145,7 @@ usage: import_heightmap <heightmap.exr> [options]
   --max-y <metres>    ceiling of the quantisation range (default: 64)
   --spawn-at <x,z>    put the markers here instead of searching for flat ground
   --maps <dir>        where to write (default: the repository's maps/)
+  --preview <file>    also draw the finished map from above, as a PNG
   --dry-run           report what it would write, and write nothing";
 
 fn parse_args() -> Result<Args, String> {
@@ -155,6 +158,7 @@ fn parse_args() -> Result<Args, String> {
     let mut max_y = DEFAULT_MAX_Y;
     let mut spawn_at = None;
     let mut maps = default_maps_dir();
+    let mut preview = None;
     let mut dry_run = false;
 
     let mut argv = std::env::args().skip(1);
@@ -176,6 +180,7 @@ fn parse_args() -> Result<Args, String> {
             "--max-y" => max_y = parse_number(&value(&mut argv)?, "--max-y")?,
             "--spawn-at" => spawn_at = Some(parse_pair(&value(&mut argv)?)?),
             "--maps" => maps = PathBuf::from(value(&mut argv)?),
+            "--preview" => preview = Some(PathBuf::from(value(&mut argv)?)),
             "--dry-run" => dry_run = true,
             other if other.starts_with('-') => return Err(format!("no such option {other}\n\n{USAGE}")),
             other if source.is_none() => source = Some(PathBuf::from(other)),
@@ -207,6 +212,7 @@ fn parse_args() -> Result<Args, String> {
         max_y,
         spawn_at,
         maps,
+        preview,
         dry_run,
     })
 }
@@ -303,6 +309,11 @@ fn run() -> Result<(), String> {
     };
 
     report(&terrain, args.relief);
+
+    if let Some(path) = &args.preview {
+        draw(&terrain, path)?;
+        println!("drew {}", path.display());
+    }
 
     let manifest = Manifest {
         version: VERSION,
@@ -656,6 +667,144 @@ fn flattest(grid: &Grid, heights: &[u16], reach: f32) -> Result<((f32, f32), f32
             distance(a).total_cmp(&distance(b))
         })
         .ok_or_else(|| "found nowhere at all to put the markers".to_string())
+}
+
+/// Where the light comes from in the preview: over the shoulder from the north-west, and high.
+///
+/// Not straight down, which would light every slope by its steepness alone and lose which *way*
+/// each one faces — the thing that makes a picture of terrain read as terrain rather than as a
+/// contour map. North-west because it is the convention every relief map has used for a century,
+/// and because a landscape lit from the other side reads inside-out to most people: ridges look
+/// like gullies.
+const SUN: [f32; 3] = [-0.55, 0.68, -0.48];
+
+/// How much of the preview is ambient rather than sun, so that ground facing away is still legible.
+const AMBIENT: f32 = 0.28;
+
+/// Draws the finished map from above, in the colours it will actually wear.
+///
+/// **The layer rules do the colouring, not a height ramp.** `default_layers` and `surface_of` are
+/// the game's own answer to "what is this ground", so the preview is grass where the map will be
+/// grass and rock where it will be rock — which makes it a check on `--relief` and not merely a
+/// picture: it is the only way to see, before loading anything, whether the rock layer is firing
+/// across half the map or nowhere at all.
+///
+/// It is drawn from the *authored* height field, which is what the two files contain. The relief
+/// steep ground carries at play time is a function of position added on top of this, and it is a
+/// metre of detail on a picture whose pixels are a metre wide.
+///
+/// One pixel per sample, and the image is laid out the way the source was — sample (0, 0) top left
+/// — so it can be put beside the heightmap it came from.
+fn draw(terrain: &Terrain, path: &Path) -> Result<(), String> {
+    let grid = terrain.grid;
+    let layers = default_layers();
+    let mut pixels = vec![0u8; grid.samples() * 3];
+
+    for iz in 0..grid.nz {
+        for ix in 0..grid.nx {
+            let y = terrain.height_at(ix, iz);
+            let west = terrain.height_at(ix.saturating_sub(1), iz);
+            let east = terrain.height_at((ix + 1).min(grid.nx - 1), iz);
+            let south = terrain.height_at(ix, iz.saturating_sub(1));
+            let north = terrain.height_at(ix, (iz + 1).min(grid.nz - 1));
+            let up = 2.0 * grid.spacing;
+            let (dx, dz) = (west - east, south - north);
+            let length = (dx * dx + up * up + dz * dz).sqrt();
+            let normal = [dx / length, up / length, dz / length];
+
+            let colour = surface_of(&layers, normal[1], y, terrain.dip_at(ix, iz))
+                .map_or(NOTHING, |index| layers[index].colour);
+            let sun = (normal[0] * SUN[0] + normal[1] * SUN[1] + normal[2] * SUN[2]).max(0.0);
+            let lit = AMBIENT + (1.0 - AMBIENT) * sun;
+
+            let at = grid.index(ix, iz) * 3;
+            for channel in 0..3 {
+                pixels[at + channel] = srgb(colour[channel] * lit);
+            }
+        }
+    }
+
+    // The markers last, over the ground rather than under it. A cross and a ring, because thirteen
+    // markers in a thirty-metre huddle are four pixels on a 1025-pixel map: the crosses say what is
+    // there and the ring is what the eye finds from across the picture.
+    for marker in &terrain.markers {
+        stamp(&mut pixels, &grid, marker.x, marker.z, Mark::Cross);
+    }
+    if !terrain.markers.is_empty() {
+        // The bounding box's middle rather than the mean of the positions, because that is what
+        // `place_markers` moved on to the flat ground: eight of the thirteen are player spawns in a
+        // row, and a mean would sit on them rather than in the middle of the huddle.
+        let (mut low, mut high) =
+            ((f32::INFINITY, f32::INFINITY), (f32::NEG_INFINITY, f32::NEG_INFINITY));
+        for marker in &terrain.markers {
+            low = (low.0.min(marker.x), low.1.min(marker.z));
+            high = (high.0.max(marker.x), high.1.max(marker.z));
+        }
+        stamp(&mut pixels, &grid, (low.0 + high.0) / 2.0, (low.1 + high.1) / 2.0, Mark::Ring);
+    }
+
+    image::RgbImage::from_raw(grid.nx, grid.nz, pixels)
+        .ok_or_else(|| "the preview came out the wrong size".to_string())?
+        .save(path)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))
+}
+
+/// What a sample with no layer over it is drawn as — a mid grey, and it should never appear.
+///
+/// `default_layers` covers every slope and every hollow between them, so `surface_of` returning
+/// nothing means a rule has developed a gap. Grey rather than a panic, because this is a preview.
+const NOTHING: [f32; 3] = [0.18, 0.18, 0.18];
+
+/// Linear light to one channel of an 8-bit sRGB image, by the standard's own two-part curve.
+///
+/// A layer's `colour` is linear — see `terrain::default_layers`, where each was measured off its
+/// texture in linear light — and writing a linear value into a PNG is what makes grass come out
+/// nearly black. This is the same conversion the renderer does on the way to the screen.
+fn srgb(linear: f32) -> u8 {
+    let clamped = linear.clamp(0.0, 1.0);
+    let encoded = if clamped <= 0.003_130_8 {
+        12.92 * clamped
+    } else {
+        1.055 * clamped.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round() as u8
+}
+
+/// What to draw at a place on the preview.
+enum Mark {
+    Cross,
+    Ring,
+}
+
+/// Puts one mark on the preview, in white, at a world position.
+fn stamp(pixels: &mut [u8], grid: &Grid, x: f32, z: f32, mark: Mark) {
+    let px = ((x - grid.origin_x) / grid.spacing).round() as i64;
+    let pz = ((z - grid.origin_z) / grid.spacing).round() as i64;
+    let mut plot = |dx: i64, dz: i64| {
+        let (ix, iz) = (px + dx, pz + dz);
+        if ix < 0 || iz < 0 || ix >= grid.nx as i64 || iz >= grid.nz as i64 {
+            return;
+        }
+        let at = (iz as usize * grid.nx as usize + ix as usize) * 3;
+        pixels[at..at + 3].fill(0xff);
+    };
+    match mark {
+        Mark::Cross => {
+            for step in -2..=2 {
+                plot(step, 0);
+                plot(0, step);
+            }
+        }
+        // A ring at the radius the flat-spot search actually measured over, so what is marked is
+        // the ground that was tested and not a decoration around the middle of it.
+        Mark::Ring => {
+            let radius = 24.0 / grid.spacing;
+            for degree in 0..360 {
+                let angle = degree as f32 * core::f32::consts::TAU / 360.0;
+                plot((radius * angle.cos()).round() as i64, (radius * angle.sin()).round() as i64);
+            }
+        }
+    }
 }
 
 /// What the finished map is, in the numbers an author would change `--relief` against.

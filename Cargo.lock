@@ -4492,6 +4492,7 @@ name = "import_heightmap"
 version = "0.1.0"
 dependencies = [
  "exr",
+ "image",
  "noob_tube_shared",
  "serde_json",
 ]
