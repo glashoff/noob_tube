@@ -19,7 +19,7 @@ use noob_tube_shared::player::{Aim, Player, PlayerInput, PlayerState, ViewBracke
 use noob_tube_shared::physics::{Layer, Level, PhysicsPlugin};
 use avian3d::prelude::{
     Collider, ColliderDensity, CollisionLayers, Forces, LayerMask, LockedAxes, PhysicsSystems,
-    Position, RigidBody, Rotation, WriteRigidBodyForces,
+    Position, RigidBody, Rotation, Sleeping, WriteRigidBodyForces,
 };
 use noob_tube_shared::hitbox::Hitbox;
 use noob_tube_shared::props::{self, Bobbing, Density};
@@ -738,6 +738,19 @@ fn ease_the_driverless(
     }
 }
 
+/// What [`the_world_follows_the_drivers`] carries from one run to the next.
+///
+/// Two `Local`s in a struct rather than two arguments, and the reason is the same one the client's
+/// `Aim` gives: they are always read together and never separately — the system's whole job is to
+/// notice when either of them has changed.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Remembered<'s> {
+    /// The peers driving something, as of the last rewrite.
+    last: Local<'s, Vec<PeerId>>,
+    /// The crates Avian had frozen, as of the last rewrite.
+    still: Local<'s, Vec<Entity>>,
+}
+
 /// FixedUpdate: decides who predicts what, and it is the only thing that decides it.
 ///
 /// Everything a bumper can reach has to be predicted by the driver about to reach it, or the client
@@ -777,18 +790,27 @@ fn the_world_follows_the_drivers(
     driving: Query<&Owner, With<Driving>>,
     owners: Query<&Owner>,
     vehicles: Query<(Entity, Option<&Driver>), With<VehicleKind>>,
-    crates: Query<Entity, With<Loose>>,
-    mut last: Local<Vec<PeerId>>,
+    crates: Query<(Entity, Has<Sleeping>), With<Loose>>,
+    mut before: Remembered,
     mut commands: Commands,
 ) {
+    let Remembered { last, still } = &mut before;
     let now: Vec<PeerId> = driving.iter().map(|owner| owner.0).collect();
-    // Compared as a set rather than a list, because a query's order is not a promise and a
-    // reordering is not a change. `PeerId` is not `Ord`, and for the handful of drivers a server
-    // has, a scan beats reaching for a hash set.
-    if now.len() == last.len() && now.iter().all(|peer| last.contains(peer)) {
+    // Which crates are frozen, because that decides who predicts them just as much as who is
+    // driving does — see the loop at the bottom.
+    let asleep: Vec<Entity> =
+        crates.iter().filter(|(_, sleeping)| *sleeping).map(|(entity, _)| entity).collect();
+    // Compared as sets rather than lists, because a query's order is not a promise and a
+    // reordering is not a change. `PeerId` is not `Ord`, and for the handful of drivers and crates
+    // a server has, a scan beats reaching for a hash set.
+    let same_drivers = now.len() == last.len() && now.iter().all(|peer| last.contains(peer));
+    let same_crates =
+        asleep.len() == still.len() && asleep.iter().all(|entity| still.contains(entity));
+    if same_drivers && same_crates {
         return;
     }
-    *last = now.clone();
+    **last = now.clone();
+    **still = asleep;
 
     /// `Only`/`AllExcept` rather than the single-peer pair, because there can be as many drivers as
     /// there are vehicles and every one of them needs the same answer.
@@ -827,10 +849,36 @@ fn the_world_follows_the_drivers(
     } else {
         &[]
     };
-    for entity in crates.iter() {
-        commands.entity(entity).insert(addressed(watching));
+    let mut frozen = 0;
+    for (entity, sleeping) in crates.iter() {
+        // **A crate Avian has frozen is not predicted at all**, whoever is driving.
+        //
+        // Prediction is for things that are going to move before the next update arrives. A frozen
+        // crate is the opposite of that: the server has decided it will not move until something
+        // hits it, so an interpolated copy is not a round trip behind — it is exact.
+        //
+        // Handing it over anyway is what cost: the client cannot freeze its own copy the way the
+        // server froze that one, so it keeps simulating a box that has stopped, and a box that is
+        // simulated on one side and frozen on the other disagrees for ever. Measured, before this:
+        // four crates corrected four times in every ten seconds, each rollback replaying the whole
+        // world including the car somebody was driving.
+        //
+        // What it costs back is the first moment of an impact: a bumper meets the interpolated copy
+        // until the server says that crate has woken, which is one round trip. That copy is in the
+        // right place — it has not moved — so what is lost is the reaction, not the position, and
+        // the crate is handed over the moment it is worth predicting.
+        let audience = if sleeping {
+            frozen += 1;
+            &[]
+        } else {
+            watching
+        };
+        commands.entity(entity).insert(addressed(audience));
     }
-    info!("{} driver(s) now predict the world around them", now.len());
+    info!(
+        "{} driver(s) now predict the world around them, less {frozen} crate(s) lying still",
+        now.len(),
+    );
 }
 
 /// FixedUpdate: hands each vehicle the input of whoever is sitting in it.
