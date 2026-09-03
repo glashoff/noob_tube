@@ -39,6 +39,26 @@ const GRAB_RADIUS: f32 = 2.5;
 /// is the one alignment anybody actually asks for.
 const TURN_STEP: f32 = std::f32::consts::FRAC_PI_2 / 6.0;
 
+/// How big the box drawn on a marker is, in metres, and how far its arrow reaches.
+///
+/// A metre a side, which is about the smallest thing a marker spawns. The symbol says *a thing goes
+/// here, facing that way* rather than showing what the thing is — it cannot show that, since a
+/// `kind` is a palette id and this client may have no model for it at all.
+const SYMBOL_SIDE: f32 = 1.0;
+const ARROW_LENGTH: f32 = 1.5;
+
+/// Degrees of hue between one placeable and the next.
+///
+/// The golden angle, and the reason is that it spreads *any* number of kinds as far apart as they
+/// can be spread: the three this game ships with land eighty-five degrees apart, six leave thirty
+/// between the closest pair and ten leave twenty, with each new kind falling into the widest gap
+/// left rather than on top of something. Hashing the name instead would keep a kind's colour when
+/// the palette changed, but hashing spreads by luck — these three names come out thirty-one degrees
+/// apart, and a spawn the same colour as a crate is the one failure this drawing must not have. The
+/// cost is that a colour follows a kind's *place* in the palette, so a server that adds a placeable
+/// in the middle of its list restyles the ones after it.
+const GOLDEN_ANGLE: f32 = 137.507_76;
+
 pub struct PlacingPlugin;
 
 impl Plugin for PlacingPlugin {
@@ -62,6 +82,8 @@ impl Plugin for PlacingPlugin {
                     .after(crate::sculpting::aim_the_brush)
                     .before(crate::sculpting::hold_the_trigger),
             )
+            // The overlay, after the aim it draws the highlight from.
+            .add_systems(Update, draw_the_markers.after(work_the_hand))
             // After sculpting has named its four, because the bar is one row and these are the
             // slots after them.
             .add_systems(Update, name_the_slots.after(crate::sculpting::name_the_slots));
@@ -297,6 +319,97 @@ fn work_the_hand(
     }));
 }
 
+/// The hue a placeable is drawn in, from where it sits in the palette.
+///
+/// `None` for a kind the palette does not list. The server refuses to place one, so that is a map
+/// read before the palette arrived rather than a mistake worth colouring in.
+fn hue_of(kind: &str, palette: &[String]) -> Option<f32> {
+    let place = palette.iter().position(|entry| entry == kind)?;
+    Some((place as f32 * GOLDEN_ANGLE).rem_euclid(360.0))
+}
+
+/// That hue as a colour, at the lightness the caller asks for: bright for the one under the aim,
+/// ordinary for the rest, faint for the one that is not there yet.
+fn colour_of(kind: &str, palette: &[String], lightness: f32) -> Color {
+    match hue_of(kind, palette) {
+        Some(hue) => Color::hsl(hue, 0.85, lightness),
+        None => Color::hsl(0.0, 0.0, lightness),
+    }
+}
+
+/// Where a marker's arrow ends: the −Z that is forward everywhere here, turned by the marker's own
+/// rotation.
+///
+/// Its own function because it is the one line of this drawing that can be wrong without looking
+/// wrong — an arrow pointing the other way is still an arrow, and the mistake would show up as
+/// vehicles spawning backwards rather than as anything visibly broken.
+fn tip_of_the_arrow(centre: Vec3, rotation: Quat) -> Vec3 {
+    centre + rotation * Vec3::NEG_Z * ARROW_LENGTH
+}
+
+/// One marker's symbol: a box standing where the thing goes, and an arrow along its facing.
+fn symbol(gizmos: &mut Gizmos, foot: Vec3, rotation: Quat, colour: Color) {
+    let centre = foot + Vec3::Y * (SYMBOL_SIDE * 0.5);
+    let stance = Transform::from_translation(centre)
+        .with_rotation(rotation)
+        .with_scale(Vec3::splat(SYMBOL_SIDE));
+    gizmos.cube(stance, colour);
+    gizmos.arrow(centre, tip_of_the_arrow(centre, rotation), colour);
+}
+
+/// Update: the markers on the map, while edit mode is on.
+///
+/// A marker is map content with no body of its own — "invisible outside edit mode" is terrain.md
+/// §7's own wording — and a player spawn has nothing standing on it even in a running round. So
+/// without this an author places one, the map looks exactly as it did, and the only way to find out
+/// whether anything happened is to die. `webgame` answers this the same way and it is the answer
+/// worth copying: a box where the thing goes, an arrow along the way it faces, coloured by kind,
+/// and shown only to somebody editing.
+///
+/// Gizmos rather than meshes, for the reason the brush ring is gizmos: this is a tool overlay, it
+/// changes every frame, and drawing it as entities would mean spawning and despawning a symbol per
+/// marker per map switch — bookkeeping for something that exists one frame at a time.
+///
+/// Drawn through the whole of edit mode rather than only while a placeable is in hand, because a
+/// marker's height is an offset from the ground: sculpting under a spawn moves it, and the person
+/// sculpting is exactly the person who needs to see where it is.
+fn draw_the_markers(
+    ground: Option<Res<Ground>>,
+    chisel: Res<Chisel>,
+    placer: Res<Placer>,
+    mut gizmos: Gizmos,
+) {
+    let Some(ground) = ground else {
+        return;
+    };
+    if !chisel.on {
+        return;
+    }
+    for marker in &ground.0.markers {
+        let picked = placer.under == Some(marker.id);
+        let colour = colour_of(&marker.kind, &placer.palette, if picked { 0.8 } else { 0.5 });
+        symbol(&mut gizmos, marker.where_it_stands(&ground.0), marker.rotation, colour);
+        if picked {
+            // The reach, drawn on the one it caught. Without it a right-click that grabbed nothing
+            // and a right-click the server refused look exactly alike.
+            crate::sculpting::ring_on_the_ground(
+                &mut gizmos,
+                &ground.0,
+                Vec2::new(marker.x, marker.z),
+                GRAB_RADIUS,
+                colour,
+            );
+        }
+    }
+    // Where the next one would go, facing the way the wheel has left it. The same shape as a placed
+    // marker and fainter: what the click is about to do is put *that* on the map, and a preview in
+    // some other shape would be a second thing to learn to read.
+    if let (Some(kind), Some(at)) = (placer.in_hand(), chisel.at) {
+        let colour = colour_of(kind, &placer.palette, 0.65).with_alpha(0.4);
+        symbol(&mut gizmos, at, placer.facing, colour);
+    }
+}
+
 /// What the hand is holding, as a line of text. Used by the HUD.
 ///
 /// Its bindings spelled out for the same reason the brush's are: a verb nobody can find is a verb
@@ -398,6 +511,47 @@ mod tests {
 
         assert_eq!(placer.slots[0], CRATE, "a kind the server has should survive");
         assert!(placer.slots[1].is_empty(), "a kind the server does not have should go");
+    }
+
+    /// The arrow points where the marker faces, which is −Z turned by its rotation.
+    ///
+    /// The convention `level.rs` states and uses, checked here because this is the one place it is
+    /// drawn: an arrow pointing the wrong way still looks like an arrow, and the mistake would only
+    /// surface as vehicles spawning backwards from where the author put them.
+    #[test]
+    fn the_arrow_points_the_way_the_marker_faces() {
+        let centre = Vec3::new(3.0, 1.0, -2.0);
+        let ahead = tip_of_the_arrow(centre, Quat::IDENTITY) - centre;
+        assert!(ahead.normalize().abs_diff_eq(Vec3::NEG_Z, 1.0e-5), "forward is −Z, got {ahead}");
+        assert!((ahead.length() - ARROW_LENGTH).abs() < 1.0e-5);
+
+        // A quarter turn about +Y takes −Z to −X, which is the turn `VEHICLE_STARTS` gives its
+        // second vehicle.
+        let quarter = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let left = tip_of_the_arrow(centre, quarter) - centre;
+        assert!(left.normalize().abs_diff_eq(Vec3::NEG_X, 1.0e-5), "a quarter turn gave {left}");
+    }
+
+    /// No two placeables are drawn in the same colour, however many the server offers.
+    ///
+    /// The property the golden angle buys, and the one thing this drawing has to get right: a
+    /// symbol that does not say *which* kind is a symbol that only says something is there, which
+    /// the box already said.
+    #[test]
+    fn every_placeable_gets_its_own_colour() {
+        let palette: Vec<String> = (0..10).map(|n| format!("kind {n}")).collect();
+        let mut hues: Vec<f32> = palette
+            .iter()
+            .map(|kind| hue_of(kind, &palette).expect("it is in the palette"))
+            .collect();
+        hues.sort_by(f32::total_cmp);
+        for pair in hues.windows(2) {
+            assert!(pair[1] - pair[0] > 19.0, "{pair:?} are the same colour to the eye");
+        }
+        // Round the end of the wheel as well: the first and the last are neighbours too.
+        assert!(hues[0] + 360.0 - hues[9] > 19.0, "the wheel wraps onto itself");
+
+        assert_eq!(hue_of("dragon", &palette), None, "a kind the palette does not list has no hue");
     }
 
     /// A turn is a whole number of notches to a right angle.

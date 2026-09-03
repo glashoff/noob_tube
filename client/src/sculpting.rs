@@ -18,7 +18,7 @@ use lightyear::prelude::MessageSender;
 use noob_tube_shared::physics::Level;
 use noob_tube_shared::protocol::TerrainChannel;
 use noob_tube_shared::sculpt::{Brush, MAX_LIFT, MAX_RADIUS, Stroke};
-use noob_tube_shared::terrain::Ground;
+use noob_tube_shared::terrain::{Ground, Terrain};
 
 /// How far a sculptor can reach, in metres. Past this the brush has nothing under it.
 const REACH: f32 = 200.0;
@@ -339,21 +339,37 @@ fn draw_the_brush(chisel: Res<Chisel>, ground: Option<Res<Ground>>, mut gizmos: 
         Tool::Smooth => Color::srgb(0.6, 1.0, 0.6),
         Tool::Ramp => Color::srgb(1.0, 0.5, 0.9),
     };
+    ring_on_the_ground(&mut gizmos, &ground.0, Vec2::new(at.x, at.z), chisel.radius, colour);
+    if let Some(anchor) = chisel.anchor {
+        gizmos.line(anchor + Vec3::Y * 0.05, at + Vec3::Y * 0.05, colour);
+    }
+}
+
+/// A circle laid on the ground rather than drawn through it.
+///
+/// Every point is lifted to the height of the ground under it, which is what makes a ring read as a
+/// mark on a hillside instead of a hoop floating through one. Shared with
+/// [`placing`](crate::placing): a brush's footprint and a marker's reach are the same kind of
+/// statement, and drawing them two different ways would make them look like different things.
+pub fn ring_on_the_ground(
+    gizmos: &mut Gizmos,
+    ground: &Terrain,
+    at: Vec2,
+    radius: f32,
+    colour: Color,
+) {
     let steps = 48;
     let mut previous = None;
     for step in 0..=steps {
         let angle = step as f32 / steps as f32 * std::f32::consts::TAU;
         let (sin, cos) = angle.sin_cos();
-        let x = at.x + cos * chisel.radius;
-        let z = at.z + sin * chisel.radius;
-        let point = Vec3::new(x, ground.0.height_over(x, z) + 0.05, z);
+        let x = at.x + cos * radius;
+        let z = at.y + sin * radius;
+        let point = Vec3::new(x, ground.height_over(x, z) + 0.05, z);
         if let Some(previous) = previous {
             gizmos.line(previous, point, colour);
         }
         previous = Some(point);
-    }
-    if let Some(anchor) = chisel.anchor {
-        gizmos.line(anchor + Vec3::Y * 0.05, at + Vec3::Y * 0.05, colour);
     }
 }
 
