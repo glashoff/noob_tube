@@ -145,6 +145,14 @@ pub struct Corrections {
     /// The last second of samples, oldest first, as (when, total lag, smoothing's share).
     #[reflect(ignore)]
     recent: VecDeque<(f32, f32, f32)>,
+    /// Who the rollbacks have been moving since the last summary, by name.
+    ///
+    /// The question a per-rollback figure cannot answer. "Something jumped 4 cm" says a correction
+    /// happened; it does not say whether it was the car under you or a crate two hundred metres
+    /// away that nobody is looking at — and those two ask for opposite fixes. A tally by name over
+    /// ten seconds says which, and it costs one hash lookup per predicted body per rollback.
+    #[reflect(ignore)]
+    blame: HashMap<String, (u32, f32, f32)>,
 }
 
 /// PreUpdate, inside the rollback and before it snaps back: where the predicted bodies were.
@@ -160,21 +168,41 @@ fn remember(
     }
 }
 
+/// How far a body has to be moved by a rollback before it is worth naming, in metres.
+///
+/// A tenth of a millimetre. Not zero: a body at rest still comes back from a replay a few floating
+/// point ulps away from where it went in, and a tally that counted those would name every crate on
+/// the map every ten seconds and say nothing.
+const WORTH_NAMING: f32 = 1.0e-4;
+
 /// PreUpdate, after the replay and before the rollback ends: where they are instead.
 fn measure(
     mut corrections: ResMut<Corrections>,
     ticks: Res<MovementTicks>,
-    bodies: Query<(Entity, &Position), PredictedBody>,
+    bodies: Query<(Entity, &Position, Option<&Name>), PredictedBody>,
 ) {
     let replayed = ticks.0.saturating_sub(corrections.ticks);
 
-    // The largest any predicted body moved. One number rather than one per entity: what matters is
-    // whether anything jumped visibly, not which.
+    // The largest any predicted body moved, and — this is the part that says what to *do* about it
+    // — which bodies those were. A number on its own cannot tell the car under you from a crate
+    // nobody is near, and the two are different bugs.
     let mut worst = 0.0f32;
-    for (entity, position) in bodies.iter() {
-        if let Some(was) = corrections.bodies.get(&entity) {
-            worst = worst.max(was.distance(position.0));
+    for (entity, position, name) in bodies.iter() {
+        let Some(was) = corrections.bodies.get(&entity) else {
+            continue;
+        };
+        let moved = was.distance(position.0);
+        worst = worst.max(moved);
+        if moved < WORTH_NAMING {
+            continue;
         }
+        // The name *and* the entity: everything on this side is called "Crate" or "Buggy", and
+        // one crate corrected twelve times is a different problem from twelve crates corrected once.
+        let who = name.map_or_else(|| format!("{entity}"), |name| format!("{name} {entity}"));
+        let seen = corrections.blame.entry(who).or_insert((0, 0.0, 0.0));
+        seen.0 += 1;
+        seen.1 += moved;
+        seen.2 = seen.2.max(moved);
     }
     corrections.worst_body = corrections.worst_body.max(worst);
     corrections.count += 1;
@@ -276,4 +304,22 @@ fn summarise(mut corrections: ResMut<Corrections>, time: Res<Time>) {
         lag * 100.0,
         corrections.worst_body * 100.0,
     );
+
+    // And who was being moved. Worst first, because the biggest single snap is what a player sees;
+    // the count beside it separates one bad moment from a body that is being corrected constantly.
+    let mut blame: Vec<(String, (u32, f32, f32))> =
+        std::mem::take(&mut corrections.blame).into_iter().collect();
+    if blame.is_empty() {
+        return;
+    }
+    blame.sort_by(|a, b| b.1.2.total_cmp(&a.1.2));
+    let named = blame
+        .iter()
+        .take(6)
+        .map(|(who, (times, total, worst))| {
+            format!("{who} {times}x, worst {:.1} cm, {:.1} cm in all", worst * 100.0, total * 100.0)
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    info!("view: what the rollbacks moved: {named}");
 }
