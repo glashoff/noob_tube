@@ -20,6 +20,13 @@ const SLOT_WIDTH: f32 = 92.0;
 const SLOT_HEIGHT: f32 = 52.0;
 const SLOT_GAP: f32 = 6.0;
 const BOTTOM: f32 = 16.0;
+
+/// How much room the bar takes along the bottom of the screen, in logical pixels.
+///
+/// Read by the [`hud`](crate::hud), whose readouts stand in the same corner. The row is ten slots
+/// wide and centred, so in a small window it reaches the left edge — and a readout at the margin is
+/// then printed straight through the tools, which is exactly what a hotbar is for looking at.
+pub const CLEARANCE: f32 = BOTTOM + SLOT_HEIGHT;
 const NAME_SIZE: f32 = 14.0;
 const NOTE_SIZE: f32 = 11.0;
 const KEY_SIZE: f32 = 10.0;

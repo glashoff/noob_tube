@@ -43,6 +43,15 @@ const MARGIN: f32 = 12.0;
 const FONT_SIZE: f32 = 13.0;
 /// Breathing room inside the backing panel.
 const PADDING: f32 = 5.0;
+/// Where the bottom-left stack of readouts starts, and how far apart its lines sit.
+///
+/// Clear of the hotbar rather than at the margin, and taken from the bar's own numbers rather than
+/// a number that happens to look right today — see [`hotbar::CLEARANCE`](crate::hotbar::CLEARANCE),
+/// which is where the reason lives.
+const STACK_FOOT: f32 = crate::hotbar::CLEARANCE + MARGIN;
+/// One line, its panel, and a little air.
+const STACK_STEP: f32 = MARGIN * 2.4;
+
 /// How often the frame rate is rewritten, in seconds.
 const FRAME_RATE_PERIOD: f32 = 1.0;
 
@@ -104,7 +113,7 @@ fn spawn_readout(window: Option<Single<Entity, With<Window>>>, mut commands: Com
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(MARGIN),
-            bottom: Val::Px(MARGIN),
+            bottom: Val::Px(STACK_FOOT),
             padding: UiRect::axes(Val::Px(PADDING * 1.4), Val::Px(PADDING)),
             ..default()
         },
@@ -272,7 +281,7 @@ fn spawn_chisel_line(window: Option<Single<Entity, With<Window>>>, mut commands:
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(MARGIN),
-            bottom: Val::Px(MARGIN * 3.4),
+            bottom: Val::Px(STACK_FOOT + STACK_STEP),
             padding: UiRect::axes(Val::Px(PADDING * 1.4), Val::Px(PADDING)),
             ..default()
         },
@@ -323,7 +332,7 @@ fn spawn_flight_line(window: Option<Single<Entity, With<Window>>>, mut commands:
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(MARGIN),
-            bottom: Val::Px(MARGIN * 5.8),
+            bottom: Val::Px(STACK_FOOT + STACK_STEP * 2.0),
             padding: UiRect::axes(Val::Px(PADDING * 1.4), Val::Px(PADDING)),
             ..default()
         },
