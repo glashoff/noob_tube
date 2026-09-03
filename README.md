@@ -479,6 +479,38 @@ release; a debug build of the decomposition is a coffee rather than a keystroke.
 [Bullet holes hanging beside the bodywork](#bullet-holes-hanging-beside-the-bodywork) for what the
 scores mean and why the chosen settings are the chosen settings.
 
+### Ground textures
+
+The ground layers are ambientCG packs, and choosing one means looking at the hundred-odd the Ground
+category holds. `tools/fetch-ground-textures` brings them down — slowly on purpose, a pause between
+packs and a backoff when the server asks for one — and leaves the zips in `downloads/`, which
+`.gitignore` closes.
+
+```bash
+tools/fetch-ground-textures                     # 1K PNG colour maps, the whole Ground category
+tools/fetch-ground-textures --dry-run           # what it would fetch, and how much traffic
+tools/fetch-ground-textures Grass001 Rock020    # named packs, whatever category they are in
+tools/fetch-ground-textures --maps all Grass001 # every map of one pack, out of the kept zip
+```
+
+Keeping the zips is the point: ambientCG sells nothing smaller than a whole pack, so the colour map
+already costs the download of its five siblings. `--maps all` on a pack that is already in
+`downloads/` re-opens it and fetches nothing.
+
+A layer names a pack without the map suffix — `texture = "Ground108_1K-PNG"` finds
+`Ground108_1K-PNG_Color.png`. Beside it the shader wants the detail map, which is baked from the
+same pack:
+
+```bash
+cargo run -p bake_ground_maps -- Ground108_1K-PNG    # -> Ground108_1K-PNG_Packed.png
+```
+
+That folds the pack's normal, roughness and displacement maps into one RGBA image, because reading
+them separately would cost three times the texture fetches of colour on a shader that is already
+triplanar and tiles stochastically. Without it a layer still draws — in its own colour, at its own
+constant roughness, lit by the height field's normal alone, which is what the ground looked like
+before any of this. The three packs that ship are baked and committed.
+
 ### An inspector window
 
 `--features inspector` adds `bevy-inspector-egui`, an egui panel listing every entity and component
