@@ -132,62 +132,67 @@ pub(crate) fn falloff(distance_squared: f32, radius: f32) -> f32 {
     if t >= 1.0 { 0.0 } else { smoothstep(1.0 - t) }
 }
 
-/// How far a rock face is pushed off its authored height, and over what distance.
+/// How far the ground is roughened where it is rock: sideways, and up and down, in metres.
 ///
-/// Two octaves, because one reads as a regular swell and three cost samples nobody can see. Eleven
-/// metres is the shorter, and it is a floor rather than a taste: the drawn mesh keeps one vertex in
-/// two metres, so a bump four metres across is the finest thing it can carry at all, and anything
-/// under that would exist only in the collider — ground you walk into and cannot see. The two
-/// lengths are not multiples of each other, so their sum does not repeat on a grid.
+/// **The two knobs.** `UPRIGHT` moves a point along y and is what makes a face lumpy rather than
+/// planar; `SIDEWAYS` moves it in x and z and is what stops the result looking like a grid, because
+/// a surface displaced only in y still has all its vertices in rows and the eye finds them.
 ///
-/// **The rises are what the mesh will carry, and that is measured rather than chosen.** Together
-/// they reach about 0.99 m on a face. `the_drawn_ground_stays_near_the_ground_underfoot` says the
-/// drawn ground is within 0.7 m of the walked ground over the built-in map, which was 0.62 m before
-/// any of this and is 0.68 m now — the relief spends six centimetres of a gap that exists because
-/// the picture skips every second sample. Doubling the coarse rise buys visibly nothing and costs
-/// another centimetre; a rise of 1.4 breaks the test outright at 0.84 m. This is the constant to
-/// lower if a map ever fails it.
-const RELIEF_COARSE_METRES: f32 = 23.0;
-const RELIEF_COARSE_RISE: f32 = 0.75;
-const RELIEF_FINE_METRES: f32 = 11.0;
-const RELIEF_FINE_RISE: f32 = 0.24;
+/// **Both are free, and the second one only because of how it is applied.** Up and down is in the
+/// height field, so the collider has it and the ground you walk on is the ground you see. Sideways
+/// is not and cannot be — `y = f(x, z)` has no way to say that a point moved in x — but the vertex
+/// takes the ground's height with it when it slides, so it lands back on the collider rather than
+/// standing off it. Measured over the built-in map, a drawn vertex is 0.00 m from the ground
+/// underfoot, and the gap between them elsewhere went from 0.62 m to 0.65 m against a 0.7 m limit.
+/// See [`point_at`](Terrain::point_at) for the version of this that cost 0.94 m instead.
+///
+/// Constants rather than settings in `noob_tube.toml`, and that is not laziness. A server and a
+/// client with different numbers here would have different ground — not slightly different, but
+/// different in the place where one of them decides what a player may stand on. The knobs that may
+/// vary per process are network knobs, and these are not.
+pub const ROUGH_UPRIGHT: f32 = 0.55;
+pub const ROUGH_SIDEWAYS: f32 = 0.30;
+
+/// Samples between the points that are displaced, with the ones between them interpolated.
+///
+/// **This has to be the drawn mesh's own stride**, and `client/src/world.rs` asserts that it is.
+/// The reason is the one number this whole file keeps an eye on: displacing every *sample* would
+/// put detail in the collider that the drawn mesh, which keeps one vertex in two, cannot show —
+/// ground you walk into and cannot see. Displacing every second one instead puts a drawn vertex
+/// exactly on each displaced point, and the collider's samples in between land on the straight line
+/// the mesh draws between them. The two agree by construction rather than by luck.
+///
+/// Which is also why the interpolation below is linear and not `smoothstep`: a triangle is flat, so
+/// what the picture does between two vertices is a straight line, and anything smoother here would
+/// be the collider curving away from it.
+pub const ROUGH_STRIDE: u32 = 2;
 
 /// Where relief starts and where it is at full strength, as squared gradients.
 ///
 /// The tangents of 27° and 43° — the edges `STEEP` crosses between in
-/// [`default_layers`], squared so the mask can be computed without a square root. Rock is painted
-/// exactly where the ground is bent, because they are the same two numbers rather than two numbers
-/// that happen to agree today.
+/// [`default_layers`], squared so the mask can be computed without a square root. Rock is roughened
+/// exactly where it is painted, because they are the same two numbers rather than two numbers that
+/// happen to agree today.
 const RELIEF_FROM_TAN_SQUARED: f32 = 0.2596; // tan(27°)²
 const RELIEF_TO_TAN_SQUARED: f32 = 0.8696; // tan(43°)²
 
-/// Value noise on a lattice `metres` across, from -1 to 1, with no transcendental in it.
+/// One lattice point's displacement along one axis, from -1 to 1, exact and the same everywhere.
 ///
-/// The lattice corners are hashed as integers and the cell is interpolated with the same
-/// [`smoothstep`] everything else here uses. That is the whole point of writing it out rather than
-/// reaching for a noise crate: the ground has to come out bit for bit the same on a server and on
-/// every client that has the map, and the moment a `sin` or a `powf` enters that stops being
-/// something anyone can promise.
-fn wobble(x: f32, z: f32, metres: f32) -> f32 {
-    /// One lattice corner, as 24 bits of hash scaled into 0..1 — exact in an `f32`, both the shift
-    /// and the divisor being powers of two.
-    fn corner(ix: i32, iz: i32) -> f32 {
-        let mut h = (ix as u32).wrapping_mul(0x27d4_eb2d) ^ (iz as u32).wrapping_mul(0x1656_67b1);
-        h ^= h >> 15;
-        h = h.wrapping_mul(0x2c1b_3c6d);
-        h ^= h >> 13;
-        h = h.wrapping_mul(0x297a_2d39);
-        h ^= h >> 16;
-        (h >> 8) as f32 / (1u32 << 24) as f32
-    }
-
-    let (u, v) = (x / metres, z / metres);
-    let (cell_x, cell_z) = (u.floor(), v.floor());
-    let (ix, iz) = (cell_x as i32, cell_z as i32);
-    let (fx, fz) = (smoothstep(u - cell_x), smoothstep(v - cell_z));
-    let south = corner(ix, iz) + (corner(ix + 1, iz) - corner(ix, iz)) * fx;
-    let north = corner(ix, iz + 1) + (corner(ix + 1, iz + 1) - corner(ix, iz + 1)) * fx;
-    (south + (north - south) * fz) * 2.0 - 1.0
+/// Integer hashing, because [`smoothstep`]'s own note rules out `sqrt`, `sin` and `powf` in this
+/// file: `libm` may differ in the last ulp between platforms, and two machines that disagree about
+/// the ground disagree about where a player is standing. Twenty four bits over a power of two, so
+/// the division is exact rather than nearly so.
+fn shove(cx: u32, cz: u32, axis: u32) -> f32 {
+    let mut h = cx
+        .wrapping_mul(0x27d4_eb2d)
+        ^ cz.wrapping_mul(0x1656_67b1)
+        ^ axis.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2c1b_3c6d);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x297a_2d39);
+    h ^= h >> 16;
+    (h >> 8) as f32 / (1u32 << 23) as f32 - 1.0
 }
 
 /// The squared distance from a point to a segment. No square root anywhere in it.
@@ -730,50 +735,83 @@ impl Terrain {
     /// no collider to ask yet. terrain.md's rule is that the shape you see and the shape you walk
     /// on come from the same numbers, and this is the number.
     pub fn surface_at(&self, ix: u32, iz: u32) -> f32 {
-        self.height_at(ix, iz) + self.relief_at(ix, iz)
+        self.height_at(ix, iz) + self.relief_at(ix, iz).y
     }
 
-    /// How much this sample is pushed off the authored height because it is steep, in metres.
+    /// How far this sample is pushed off where the map put it, in metres, along all three axes.
     ///
-    /// **A rock face made of two triangles is a ramp, and reads as one.** No normal map fixes that:
-    /// the silhouette against the sky is straight, the shadow it casts is straight, and a texture
-    /// of broken stone laid over a plane says only that somebody laid a texture over a plane. So
-    /// the steep ground is actually moved, in the height field, where the collider and the picture
-    /// both read it and cannot disagree about it.
+    /// **A rock face made of a smooth height field is a ramp, and reads as one.** No normal map
+    /// fixes that: the silhouette against the sky is straight and the shadow it casts is straight.
+    /// So the steep ground is actually moved — and moved sideways as well as up and down, because a
+    /// surface displaced only in y still has every one of its vertices in a row and the eye finds
+    /// the rows.
     ///
-    /// **Nothing stores this.** It is a function of world position, so it costs no bytes in the
-    /// file, none on the wire, and a client and a server that have the same authored field have
-    /// the same ground without exchanging a word about it. That is also why it is written the way
-    /// it is: `hash` is integer arithmetic and the interpolation is polynomial, because §"Smoothstep"
-    /// above rules out `sqrt`, `sin` and `powf` for exactly this reason — they go through `libm`,
-    /// which may differ in the last ulp between platforms, and two machines that disagree about
-    /// the ground disagree about where a player is standing.
+    /// **Nothing stores this.** It is a function of the sample index, so it costs no bytes in the
+    /// file, none on the wire, and a client and a server that have the same authored field have the
+    /// same ground without exchanging a word about it.
     ///
-    /// **Only where rock is**, and by the same crossing the rock layer is painted on: the mask is
-    /// the gradient measured against the tangents of `STEEP`'s edges in
-    /// [`default_layers`](crate::terrain::default_layers). Flat ground keeps its authored height
-    /// exactly, which is what keeps the spawns, the ramp and the crates standing on the plane they
-    /// were placed on.
+    /// **Only where rock is**, and by the same crossing the rock layer is painted on — the mask is
+    /// the gradient measured against the tangents of `STEEP`'s edges. Flat ground keeps its authored
+    /// position exactly, which is what keeps the spawns, the ramp and the crates standing on the
+    /// plane they were placed on. The mask reads the **authored** gradient, never the roughened one:
+    /// measuring the slope of a surface in order to decide how much to bend it is a feedback loop
+    /// that settles somewhere nobody chose.
     ///
-    /// The mask reads the **authored** gradient, not the relieved one. Measuring the slope of a
-    /// surface in order to decide how much to bend it would be a feedback loop, and a slow one:
-    /// it would settle somewhere, but nowhere anybody chose.
-    ///
-    /// **Two octaves and no finer.** The drawn mesh keeps one vertex in `MESH_STRIDE` — two
-    /// metres — so anything shorter than about four metres cannot be drawn at all while the
-    /// collider, which keeps every sample, would still have it. That is not roughness, it is the
-    /// drawn ground and the walked ground coming apart, which
-    /// `the_drawn_ground_stays_near_the_ground_underfoot` measures and this had to be tuned
-    /// against. Nine metres is the shorter of the two, and it is the floor.
-    pub fn relief_at(&self, ix: u32, iz: u32) -> f32 {
-        let mask = self.steepness_at(ix, iz);
-        if mask <= 0.0 {
-            return 0.0;
+    /// Drawn on the lattice of [`ROUGH_STRIDE`] and straight-line interpolated between — see there
+    /// for why that is the mesh's own stride and why the interpolation is not something smoother.
+    /// The `y` of this is in the height field, so the collider has it; the `x` and `z` are not and
+    /// cannot be, so they are in the drawn mesh alone.
+    pub fn relief_at(&self, ix: u32, iz: u32) -> Vec3 {
+        let (nx, nz) = (self.grid.nx - 1, self.grid.nz - 1);
+        let s = ROUGH_STRIDE;
+        let (cx, cz) = (ix / s, iz / s);
+        let (fx, fz) = ((ix % s) as f32 / s as f32, (iz % s) as f32 / s as f32);
+
+        // One lattice point's whole displacement, mask and all. **Masked here and not afterwards**:
+        // interpolating the mask and the shove separately and multiplying gives the product of two
+        // straight lines, which is a curve, and a curve is precisely what the drawn mesh cannot
+        // follow between two vertices.
+        let corner = |cx: u32, cz: u32| {
+            let mask = self.steepness_at((cx * s).min(nx), (cz * s).min(nz));
+            mask * Vec3::new(
+                shove(cx, cz, 0) * ROUGH_SIDEWAYS,
+                shove(cx, cz, 1) * ROUGH_UPRIGHT,
+                shove(cx, cz, 2) * ROUGH_SIDEWAYS,
+            )
+        };
+
+        // **Across the two triangles the mesh draws, not bilinearly across the cell.** The two are
+        // the same only on the cell's edges. The split is the anti-diagonal `fx + fz = 1`, which is
+        // the edge `client/src/world.rs` winds its two triangles about.
+        let (a, b) = (corner(cx, cz), corner(cx + 1, cz));
+        let (c, d) = (corner(cx, cz + 1), corner(cx + 1, cz + 1));
+        if fx + fz <= 1.0 {
+            a + (b - a) * fx + (c - a) * fz
+        } else {
+            d + (c - d) * (1.0 - fx) + (b - d) * (1.0 - fz)
         }
-        let here = self.grid.world_of(ix, iz);
-        let coarse = wobble(here.x, here.y, RELIEF_COARSE_METRES) * RELIEF_COARSE_RISE;
-        let fine = wobble(here.x + 137.0, here.y - 91.0, RELIEF_FINE_METRES) * RELIEF_FINE_RISE;
-        mask * (coarse + fine)
+    }
+
+    /// Where this sample actually is, once the ground has been roughened — all three axes.
+    ///
+    /// What the drawn mesh is built from. The collider gets [`surface_at`](Self::surface_at)
+    /// instead, which is the same field read on its own lattice, because a height field has no way
+    /// to say that a point moved in x.
+    ///
+    /// **The sideways move takes the ground's height with it, and that is what makes it free.** The
+    /// obvious way round — slide the vertex in x and z and keep the height it had — draws it at the
+    /// height the slope had where it came *from*, which on a steep face is a gradient times the
+    /// distance out. Measured before this was written: 0.94 m of picture standing off its own
+    /// collision, bought for 30 cm of sideways. Asking the surface where the vertex *landed* puts it
+    /// back on the collider by construction, and the look is the same — what breaks up the grid is
+    /// that the vertices no longer sit in rows, not which height they carry.
+    pub fn point_at(&self, ix: u32, iz: u32) -> Vec3 {
+        let at = self.grid.world_of(ix, iz);
+        let push = self.relief_at(ix, iz);
+        let (x, z) = (at.x + push.x, at.y + push.z);
+        // `height_over`, not `height_at`: it reads the roughened surface, so the upright part of
+        // the shove is already in the answer and must not be added a second time.
+        Vec3::new(x, self.height_over(x, z), z)
     }
 
     /// How much this sample counts as rock, from 0 on flat ground to 1 on a face.
