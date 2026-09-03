@@ -206,11 +206,22 @@ pub struct GroundCollider {
 /// The point of it being this short is that nothing downstream had to change. `level_geometry`
 /// gives it the static body and the level layer that `Level`'s sweeps and rays need, and every
 /// query beyond that goes through Avian.
+///
+/// **A stroke is not a new map**, and this leaves one alone: [`rebuild_patched_ground`] replaces
+/// the tiles an edit moved, and this rebuilds all sixty-four. Both used to run on every stroke,
+/// because a stroke marks the resource changed exactly as a map switch does — 34 ms of colliders
+/// twenty times a second, on the server as well as on every client. [`Installed`] is what tells
+/// the two apart.
 pub fn build_the_ground(
     ground: Res<Ground>,
     old: Query<Entity, With<GroundCollider>>,
+    mut built: Local<Option<crate::terrain::Installed>>,
     mut commands: Commands,
 ) {
+    if *built == Some(ground.installed()) {
+        return;
+    }
+    *built = Some(ground.installed());
     for previous in old.iter() {
         commands.entity(previous).despawn();
     }
@@ -346,7 +357,7 @@ mod tests {
     fn played_level() -> App {
         use bevy::ecs::system::RunSystemOnce;
         let mut app = bare_app();
-        app.insert_resource(crate::terrain::Ground(crate::terrain::default_terrain()));
+        app.insert_resource(crate::terrain::Ground::of(crate::terrain::default_terrain()));
         app.world_mut().run_system_once(spawn_level).expect("the level spawns");
         app.world_mut().run_system_once(build_the_ground).expect("the ground is built");
         app.world_mut().run_system_once(build_the_props).expect("the props are built");

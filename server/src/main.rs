@@ -61,7 +61,7 @@ fn main() {
         // The map. The server owns it — it is the authority, and until step six of terrain.md
         // there is one map and it is the built-in one. Every client is sent a copy of exactly
         // this on join; none of them may read one for itself.
-        .insert_resource(Ground(terrain::default_terrain()))
+        .insert_resource(Ground::of(terrain::default_terrain()))
         // What maps there are, read once at startup. The built-in map is what a server starts on
         // and it has no file behind it, so `current` is None until somebody saves or loads.
         .insert_resource(maps::Maps::discover(maps::MAPS))
@@ -1382,7 +1382,7 @@ mod tests {
 
         let mut app = App::new();
         app.insert_resource(NetConfig::default());
-        app.insert_resource(Ground(ground));
+        app.insert_resource(Ground::of(ground));
         let kept = app.world_mut().spawn((Loose, FromMarker(id))).id();
         let orphan = app.world_mut().spawn((Loose, FromMarker(id + 1))).id();
 
@@ -1418,7 +1418,7 @@ mod tests {
 
         let mut app = App::new();
         app.insert_resource(NetConfig::default());
-        app.insert_resource(Ground(bare));
+        app.insert_resource(Ground::of(bare));
         let driver = app.world_mut().spawn((Player { peer: 3 }, Driving)).id();
         let vehicle = app
             .world_mut()

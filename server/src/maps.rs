@@ -281,7 +281,7 @@ fn act(
             maps.names.sort();
             maps.current = Some(name.clone());
             maps.unsaved = false;
-            world.0.0 = terrain;
+            *world.0 = Ground::of(terrain);
             info!("{peer:?} made the map {name}");
             Ok(())
         }
@@ -298,7 +298,7 @@ fn act(
             let terrain = read(&maps.dir, &name)?;
             maps.current = Some(name.clone());
             maps.unsaved = false;
-            world.0.0 = terrain;
+            *world.0 = Ground::of(terrain);
             info!("{peer:?} loaded the map {name}");
             Ok(())
         }

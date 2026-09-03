@@ -1038,7 +1038,7 @@ mod tests {
     fn map_app() -> App {
         use bevy::ecs::system::RunSystemOnce;
         let mut app = crate::physics::test_support::bare_app();
-        app.insert_resource(crate::terrain::Ground(crate::terrain::default_terrain()));
+        app.insert_resource(crate::terrain::Ground::of(crate::terrain::default_terrain()));
         app.world_mut()
             .run_system_once(crate::level::build_the_ground)
             .expect("the ground is built");

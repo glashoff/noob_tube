@@ -123,23 +123,45 @@ fn ground_mesh(terrain: &Terrain, tx: u32, tz: u32) -> Mesh {
     let mut uvs = Vec::with_capacity(wide * deep);
     let mut dips = Vec::with_capacity(wide * deep);
 
-    for row in 0..=down {
-        for column in 0..=across {
-            let (ix, iz) = (ix0 + column * step, iz0 + row * step);
+    // Every point this tile needs, each worked out once: its own, and a ring of one sample around
+    // it for the normals.
+    //
+    // **`point_at` is by far the most expensive thing in this file** — 615 ns against 8 for a plain
+    // height, because the roughening it applies asks the slope of the ground at some twenty places
+    // — and the obvious loop called it five times a vertex, for the vertex and its four
+    // neighbours. Every point in a tile was therefore computed five times over. Measured on the
+    // default map: 3.24 ms a tile before, and the whole of it was this.
+    //
+    // The ring is clamped at the edge of the map, which is the same `saturating_sub` and `min` the
+    // normals used to do — moved to where the points are made. Taken from the whole field rather
+    // than from the tile, which is what stops a seam showing: two tiles meeting along an edge share
+    // those vertices, and they have to agree about which way the ground faces there as well.
+    let span = (across + 3) as usize;
+    let mut points = Vec::with_capacity(span * (down + 3) as usize);
+    for r in 0..=down + 2 {
+        for c in 0..=across + 2 {
             // `point_at`, not `world_of` and `height_at`: the map says where a sample nominally is,
             // and the roughening moves it — sideways as well as up and down, which is the whole
             // reason this is a point rather than a height. The collider gets `surface_at`, the same
             // number without the sideways part, because a height field cannot hold it.
-            let here = terrain.point_at(ix, iz);
+            let ix = (ix0 + c * step).saturating_sub(step).min(grid.nx - 1);
+            let iz = (iz0 + r * step).saturating_sub(step).min(grid.nz - 1);
+            points.push(terrain.point_at(ix, iz));
+        }
+    }
+    let point = |c: u32, r: u32| points[r as usize * span + c as usize];
+
+    for row in 0..=down {
+        for column in 0..=across {
+            let (ix, iz) = (ix0 + column * step, iz0 + row * step);
+            let here = point(column + 1, row + 1);
             positions.push(here.to_array());
             // Central differences over the *moved* points, one sample either side, falling back to
-            // this sample at the rim of the map. Taken from the whole field rather than from the
-            // tile, which is what stops a seam showing: two tiles meeting along an edge share those
-            // vertices, and they have to agree about which way the ground faces there as well.
-            let west = terrain.point_at(ix.saturating_sub(step), iz);
-            let east = terrain.point_at((ix + step).min(grid.nx - 1), iz);
-            let south = terrain.point_at(ix, iz.saturating_sub(step));
-            let north = terrain.point_at(ix, (iz + step).min(grid.nz - 1));
+            // this sample at the rim of the map.
+            let west = point(column, row + 1);
+            let east = point(column + 2, row + 1);
+            let south = point(column + 1, row);
+            let north = point(column + 1, row + 2);
             // Two chords of the surface rather than two axis-aligned rises, because the samples no
             // longer sit on the axes. `east - west` runs roughly +x and `north - south` roughly +z,
             // and z cross x is +y.
@@ -229,7 +251,7 @@ fn adopt_the_map(
                         terrain.grid.spacing,
                         baseline.pending.len(),
                     );
-                    commands.insert_resource(Ground(terrain));
+                    commands.insert_resource(Ground::of(terrain));
                     // What this server can place. Empty means an older one, and the client's own
                     // list is a better answer to that than a palette that can place nothing.
                     if !baseline.palette.is_empty() {
@@ -306,14 +328,24 @@ fn redress_patched_tiles(
 ///
 /// Everything it built last time comes down first, because this runs again whenever the map
 /// changes and a second map on top of the first is two grounds.
+///
+/// **A stroke is not a new map**, and this leaves one alone — [`redress_patched_tiles`] is what a
+/// stroke gets. Both used to run on every one of them, because a stroke marks [`Ground`] changed
+/// exactly as a map switch does, and the whole map's meshes are 217 ms of work: at twenty strokes a
+/// second that is four times the wall clock, which is what a held brush felt like.
 fn dress_the_ground(
     ground: Res<Ground>,
     root: Single<Entity, With<LevelRoot>>,
     old: Query<Entity, With<GroundTile>>,
+    mut drawn: Local<Option<noob_tube_shared::terrain::Installed>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut dressing: Dressing,
 ) {
+    if *drawn == Some(ground.installed()) {
+        return;
+    }
+    *drawn = Some(ground.installed());
     let Dressing { materials, assets, ours } = &mut dressing;
     for tile in old.iter() {
         commands.entity(tile).despawn();
@@ -592,3 +624,4 @@ mod tests {
         assert!(worst < 0.5, "sliding vertices sideways moved the picture {worst:.2} m off");
     }
 }
+

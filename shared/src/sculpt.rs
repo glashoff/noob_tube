@@ -550,7 +550,7 @@ mod tests {
 
         let mut app = App::new();
         app.add_message::<GroundPatched>();
-        app.insert_resource(Ground(flat_map()));
+        app.insert_resource(Ground::of(flat_map()));
         let standing = app.world_mut().spawn(PlayerState::default()).id();
         // Well outside the brush, and it must not move.
         let bystander = app
@@ -580,7 +580,7 @@ mod tests {
 
         let mut app = App::new();
         app.add_message::<GroundPatched>();
-        app.insert_resource(Ground(flat_map()));
+        app.insert_resource(Ground::of(flat_map()));
         let standing = app.world_mut().spawn(PlayerState::default()).id();
 
         let patch = {

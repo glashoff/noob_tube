@@ -783,6 +783,15 @@ impl Terrain {
             )
         };
 
+        // A sample that *is* a lattice point, which is every sample the drawn mesh stands on and
+        // every fourth one the collider does. The general form below reaches the same answer — with
+        // both weights zero it is `a + (b - a) * 0 + (c - a) * 0`, which is exactly `a` in IEEE —
+        // but it works out the other three corners to multiply them by nothing, and each of those
+        // is a slope measurement. Not an approximation: the same number, three quarters cheaper.
+        if fx == 0.0 && fz == 0.0 {
+            return corner(cx, cz);
+        }
+
         // **Across the two triangles the mesh draws, not bilinearly across the cell.** The two are
         // the same only on the cell's edges. The split is the anti-diagonal `fx + fz = 1`, which is
         // the edge `client/src/world.rs` winds its two triangles about.
@@ -1072,7 +1081,41 @@ pub struct Palette(pub Vec<String>);
 /// state, so a client that read it would walk on different ground from everyone else for as long
 /// as anybody held an unsaved edit.
 #[derive(Resource, Clone, Debug)]
-pub struct Ground(pub Terrain);
+pub struct Ground(pub Terrain, Installed);
+
+/// Which map this is, as a number that differs for every map installed in this process.
+///
+/// It exists for one question, and only the systems that rebuild the *whole* world from the map
+/// ask it: **is this a different map, or the same one edited?** A stroke marks the resource changed
+/// exactly as a map switch does, and there is nothing in a [`Terrain`] to tell the two apart — so
+/// `resource_exists_and_changed::<Ground>` had every one of them rebuilding everything on every
+/// stroke of a held brush. Measured on the default map: 217 ms of tile meshes and 34 ms of tile
+/// colliders, twenty times a second, for an edit that touched four tiles.
+///
+/// Counted rather than derived from the map's content, because it is not content: it never travels,
+/// it is never saved, and two machines have no reason to agree about it. A fresh number per
+/// *construction* is what makes it work through `insert_resource` as well as through assignment —
+/// a client replaces the whole resource when a baseline arrives, and a counter carried in the old
+/// value would go with it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Installed(u64);
+
+static MAPS_INSTALLED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl Ground {
+    /// A map, installed. Every call is a different map as far as [`Installed`] is concerned, which
+    /// is what a rebuild reads — so this is for a map that *arrived*, and never for one that was
+    /// edited.
+    pub fn of(terrain: Terrain) -> Self {
+        let count = MAPS_INSTALLED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(terrain, Installed(count))
+    }
+
+    /// Which map this is. See [`Installed`] for the one question it answers.
+    pub fn installed(&self) -> Installed {
+        self.1
+    }
+}
 
 /// The whole map, on its way to a client that has just joined.
 ///
