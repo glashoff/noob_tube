@@ -13,6 +13,7 @@ use lightyear::prelude::*;
 use lightyear::prelude::input::native::InputPlugin;
 use std::f32::consts::{PI, TAU};
 
+use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, RigidBody, Rotation};
 use lightyear_avian3d::prelude::LightyearAvianPlugin;
 
 use crate::player::{Aim, Player, PlayerInput, PlayerState};
@@ -159,8 +160,89 @@ impl Plugin for ProtocolPlugin {
         //
         // Players are not rigid bodies and are untouched by any of it: the registrations are
         // filtered on `With<RigidBody>`.
-        app.add_plugins(LightyearAvianPlugin::default());
+        // Its own registration of the four is switched off and done here instead, because one of
+        // its four rollback conditions has to be widened and there is no way to amend one after the
+        // fact: registering a component twice sets replicon's receive function twice, which is a
+        // panic. The other three are exactly what it would have installed.
+        //
+        // `lightyear_avian3d` rolls back when the server's value and the predicted one differ by
+        // more than a centimetre — a centimetre of position, and a centimetre *per second* of
+        // velocity. The position half is right. The velocity half is a hair trigger: a crate that
+        // has been shoved and has come to rest is not still, it creeps, and measured it creeps at
+        // between eight and thirty millimetres a second. That is on both sides of the 1 cm/s line
+        // at once, so client and server disagree about it every single update.
+        //
+        // The cost of that is not the crate. A rollback replays *every* predicted body, so one
+        // crate nobody is looking at drags the car somebody is driving through the same replay —
+        // measured, with the pile disturbed: one crate corrected 177 times in ten seconds by four
+        // millimetres each, and the buggy moved up to three metres by those same rollbacks. It is
+        // the thing that makes a landing after a jump land somewhere else, and it is why a fresh
+        // client and a fresh buggy change nothing: the pile is the server's.
+        //
+        // A quarter of a metre a second instead, and the reason it is safe is that the *position*
+        // check is untouched. A velocity error this rule now tolerates becomes a centimetre of
+        // position error in forty milliseconds, which is under three ticks — so a disagreement that
+        // matters is still caught, by the check that measures the thing a player can actually see.
+        // What is given up is rolling back for a disagreement that would never have shown.
+        app.add_plugins(LightyearAvianPlugin {
+            register_physics_components: false,
+            ..LightyearAvianPlugin::default()
+        });
+        app.component::<Position>()
+            .replicate_filtered::<With<RigidBody>>()
+            .predict()
+            .with_rollback_condition(position_worth_a_rollback)
+            .add_linear_interpolation()
+            .add_correction();
+        app.component::<Rotation>()
+            .replicate_filtered::<With<RigidBody>>()
+            .predict()
+            .with_rollback_condition(rotation_worth_a_rollback)
+            .add_linear_interpolation()
+            .add_correction();
+        app.component::<LinearVelocity>()
+            .replicate_filtered::<With<RigidBody>>()
+            .predict()
+            .with_rollback_condition(linear_velocity_worth_a_rollback);
+        app.component::<AngularVelocity>()
+            .replicate_filtered::<With<RigidBody>>()
+            .predict()
+            .with_rollback_condition(angular_velocity_worth_a_rollback);
     }
+}
+
+/// How far apart two poses have to be before replaying the world is worth it.
+///
+/// A centimetre and a hundredth of a radian, which is what `lightyear_avian3d` uses and what these
+/// two exist to preserve: they are its own numbers, written out here only because switching its
+/// registration off to widen the velocity rule takes the other three with it.
+const POSE_TOLERANCE: f32 = 0.01;
+
+/// The same question for velocity, answered differently.
+///
+/// A quarter of a metre a second, and a radian a second — a slow walk, and a sixth of a turn. Both
+/// are an order of magnitude above the creep of a settled pile of boxes and well below anything a
+/// player could see happen.
+const VELOCITY_TOLERANCE: f32 = 0.25;
+const SPIN_TOLERANCE: f32 = 1.0;
+
+fn position_worth_a_rollback(confirmed: &Position, predicted: &Position) -> bool {
+    (confirmed.0 - predicted.0).length() >= POSE_TOLERANCE
+}
+
+fn rotation_worth_a_rollback(confirmed: &Rotation, predicted: &Rotation) -> bool {
+    confirmed.angle_between(*predicted) >= POSE_TOLERANCE
+}
+
+fn linear_velocity_worth_a_rollback(confirmed: &LinearVelocity, predicted: &LinearVelocity) -> bool {
+    (confirmed.0 - predicted.0).length() >= VELOCITY_TOLERANCE
+}
+
+fn angular_velocity_worth_a_rollback(
+    confirmed: &AngularVelocity,
+    predicted: &AngularVelocity,
+) -> bool {
+    (confirmed.0 - predicted.0).length() >= SPIN_TOLERANCE
 }
 
 /// The channel the map travels on.
