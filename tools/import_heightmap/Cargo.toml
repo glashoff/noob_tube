@@ -1,0 +1,21 @@
+[package]
+name = "import_heightmap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Not part of the game. This is terrain.md §14's *importing a height field*: the offline step that
+# turns a heightmap image into the `maps/<name>.json` + `maps/<name>.heights` pair the server loads.
+# A workspace member so that it keeps compiling and the one lockfile covers it; nothing in the game
+# depends on it, and it never runs at play time.
+[dependencies]
+# The map format itself, rather than a second copy of it here. `Grid::quantise`, `Terrain::encode`
+# and `Manifest` are what the server reads a map back with, so an import that goes through them
+# cannot write a file the server then refuses — and cannot drift when the format moves.
+noob_tube_shared = { workspace = true }
+serde_json = { workspace = true }
+# OpenEXR in, and nothing else. Heightmaps are shipped as EXR because 8 bits of PNG is 128 discrete
+# heights over a 128 m range — half-metre terraces on every slope — and the whole reason the game
+# stores `u16` is that this is visible. Pure Rust, no unsafe, no C library to have installed.
+exr = "1.74"
