@@ -151,7 +151,7 @@ only in texture size.
 | Source | **ambientCG** by Lennart Demes — https://ambientcg.com |
 | Packs | `Grass001`, `Ground048`, `Rock020`, each `1K-PNG` |
 | Licence | **CC0 1.0 Universal** — https://creativecommons.org/publicdomain/zero/1.0/ |
-| Changes | None. The colour map of each pack, under ambientCG's own file name; the other maps of each pack were not taken. |
+| Changes | The colour map of each pack, unchanged and under ambientCG's own file name. Beside it a `_Packed.png` this repository derives: the same pack's normal, roughness and displacement maps folded into one image, four channels, eight bits each. |
 
 The original page for any pack is `https://ambientcg.com/view?id=<pack>` — for the first of them,
 <https://ambientcg.com/view?id=Grass001>.
@@ -166,7 +166,17 @@ question the `ND` raises does not arise here at all.
 ground of the two games reads as the same place. Which of them shows at a point is decided by slope
 alone — see `default_layers` in `shared/src/terrain.rs`.
 
-**Colour maps only.** Each pack also ships normal, roughness, displacement and ambient-occlusion
-maps; the normal map alone is six megabytes, and there is nothing to hang one on until the ground
-mesh carries tangents. Roughness is a constant per layer for now. Both are additions rather than
-corrections when they come.
+**Two files a pack, out of the eleven each one ships.** The colour map is taken as it is. The
+normal, roughness and displacement maps are not: separately they are nine megabytes and three more
+texture fetches per plane per layer, so `tools/bake_ground_maps` packs them into one four-channel
+image — normal x and y in `rg`, roughness in `b`, height in `a`, the normal's z rebuilt in the
+shader from the other two. That derived file is the only thing under `assets/` this project makes
+rather than takes, and it is checked in because the alternative is a two-gigabyte download between
+a fresh checkout and ground that looks right.
+
+The ambient-occlusion map is the one of the five left behind. It is the least of them next to a
+real normal under a real light, and the fourth channel was worth more as height.
+
+Height is baked but not yet read: it is there for blending layers by which one's high points win at
+a boundary — gravel through grass rather than a dissolve — which is a change to the transitions and
+belongs on its own. The normal's z is not stored because a unit vector does not carry one.

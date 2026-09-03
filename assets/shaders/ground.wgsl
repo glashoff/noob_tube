@@ -10,6 +10,13 @@
 // this file and the Rust that goes with it cannot disagree about where a layer starts. Only the
 // arithmetic between them lives twice, which is what terrain.md §10 says has to.
 //
+// **Two textures a layer, not five.** Colour is one of them; the other packs the tangent normal's
+// x and y, a roughness and a height into the four channels of a single image, baked offline by
+// `tools/bake_ground_maps`. Read as three separate maps they would have cost three times the
+// fetches of colour on a shader that already samples nine times for one layer on a slope. Packed,
+// they cost one more sample wherever colour takes one — and the normal is the difference between
+// ground that is a photograph laid flat and ground that answers the sun.
+//
 // **Triplanar, and not as an option.** A height field has no UVs and could not use them if it had:
 // a texture projected flat on to a 60° ravine wall arrives stretched by a factor of two. So every
 // layer is sampled on all three world planes and blended by the surface normal, which costs three
@@ -34,7 +41,9 @@ struct GroundRules {
     slope: array<vec4<f32>, 4>,
     // Height band in metres of world y: from, to, blend, w = metres one texture tile spans.
     height: array<vec4<f32>, 4>,
-    // Hollow band in metres below the surroundings: from, to, blend. w unused.
+    // Hollow band in metres below the surroundings: from, to, blend. w = 1 once the layer's
+    // packed detail texture has loaded — not merely once it has been asked for, because an image
+    // still loading is bound as white, and white unpacks to a normal lying on its side.
     dip: array<vec4<f32>, 4>,
     // How many of the four rows are real. The struct's tail is rounded up to sixteen bytes by both
     // WGSL and `ShaderType`, so this needs no padding written after it — and a `vec3` pad would
@@ -58,6 +67,15 @@ struct GroundRules {
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var sampler_2: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var texture_3: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var sampler_3: sampler;
+
+// The packed detail maps: rg = tangent normal xy, b = roughness, a = height. No samplers of their
+// own — a layer's two textures are read at the same uv with the same repeat and the same
+// anisotropy, so `sampler_i` serves both, and four samplers not spent here are four this pipeline
+// still has left against wgpu's floor of sixteen per stage.
+@group(#{MATERIAL_BIND_GROUP}) @binding(109) var packed_0: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(110) var packed_1: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(111) var packed_2: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(112) var packed_3: texture_2d<f32>;
 
 /// How sharply the triplanar blend favours the plane a surface faces.
 ///
@@ -115,14 +133,19 @@ fn hash2(at: vec2<f32>) -> vec2<f32> {
 ///
 /// Three samples where a plain lookup takes one. The tile break it replaces took two and did not
 /// work, so on flat ground this is one extra fetch, and on the wall it was written for it is two.
-fn planar(
-    tex: texture_2d<f32>,
-    samp: sampler,
-    uv: vec2<f32>,
-    ddx: vec2<f32>,
-    ddy: vec2<f32>,
-    mean: vec3<f32>,
-) -> vec3<f32> {
+/// The three cells a point is blended from, and how much each counts.
+struct Cell {
+    weights: vec3<f32>,
+    corners: mat3x2<f32>,
+}
+
+/// Which three lattice cells surround this uv.
+///
+/// Split out so that a layer's colour and its packed detail are shifted by the *same* offsets. The
+/// offsets are a function of the cell alone, so two textures read at one uv agree by construction —
+/// and they have to, because a normal fetched from a different part of the texture than the colour
+/// beside it is a surface lit as though it were somewhere else.
+fn lattice(uv: vec2<f32>) -> Cell {
     // The lattice, skewed so that its cells are equilateral triangles rather than right ones.
     let scaled = uv * 3.464;
     let skewed = vec2<f32>(scaled.x - 0.57735027 * scaled.y, 1.15470054 * scaled.y);
@@ -131,19 +154,32 @@ fn planar(
     // Which of the two triangles in this rhombus the point is in, and the barycentric weights of
     // whichever three corners those are.
     let z = 1.0 - f.x - f.y;
-    var weights: vec3<f32>;
-    var corners: mat3x2<f32>;
+    var out: Cell;
     if z > 0.0 {
-        weights = vec3<f32>(z, f.y, f.x);
-        corners = mat3x2<f32>(cell, cell + vec2<f32>(0.0, 1.0), cell + vec2<f32>(1.0, 0.0));
+        out.weights = vec3<f32>(z, f.y, f.x);
+        out.corners = mat3x2<f32>(cell, cell + vec2<f32>(0.0, 1.0), cell + vec2<f32>(1.0, 0.0));
     } else {
-        weights = vec3<f32>(-z, 1.0 - f.y, 1.0 - f.x);
-        corners = mat3x2<f32>(
+        out.weights = vec3<f32>(-z, 1.0 - f.y, 1.0 - f.x);
+        out.corners = mat3x2<f32>(
             cell + vec2<f32>(1.0, 1.0),
             cell + vec2<f32>(1.0, 0.0),
             cell + vec2<f32>(0.0, 1.0),
         );
     }
+    return out;
+}
+
+fn planar(
+    tex: texture_2d<f32>,
+    samp: sampler,
+    uv: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+    mean: vec3<f32>,
+) -> vec3<f32> {
+    let at = lattice(uv);
+    let weights = at.weights;
+    let corners = at.corners;
     // The gradients are the caller's and are the same for all three: the offsets are translations,
     // so every sample covers the same footprint and wants the same mip level.
     let a = textureSampleGrad(tex, samp, uv + hash2(corners[0]), ddx, ddy).rgb;
@@ -185,6 +221,103 @@ fn triplanar(
     return total;
 }
 
+/// One packed texel on one plane, tiled the same way its colour map is.
+///
+/// The variance-preserving step `planar` ends with is deliberately absent. That step restores the
+/// contrast of a *colour* histogram around a mean the uniform carries, and there is no mean here
+/// to restore around: a normal is a direction, and stretching a direction away from an average
+/// direction does not sharpen anything, it tilts it. Averaging three normals flattens them
+/// slightly, which is the same thing the mip chain does one level up and is what a blend of three
+/// overlapping patches of gravel should look like.
+fn planar_detail(
+    tex: texture_2d<f32>,
+    samp: sampler,
+    uv: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+) -> vec4<f32> {
+    let at = lattice(uv);
+    let a = textureSampleGrad(tex, samp, uv + hash2(at.corners[0]), ddx, ddy);
+    let b = textureSampleGrad(tex, samp, uv + hash2(at.corners[1]), ddx, ddy);
+    let c = textureSampleGrad(tex, samp, uv + hash2(at.corners[2]), ddx, ddy);
+    return at.weights.x * a + at.weights.y * b + at.weights.z * c;
+}
+
+/// The tangent-space normal a packed texel holds, with the component that was not stored.
+///
+/// z is dropped at bake time because a unit vector in the upper hemisphere does not carry anything
+/// in its third component — and the byte it frees is worth more as a height. `max` against zero
+/// because the two that were stored are eight-bit and their squares can just exceed one, where the
+/// square root would be a NaN that spreads through the blend and comes out as a black pixel.
+fn tangent(xy: vec2<f32>) -> vec3<f32> {
+    let n = xy * 2.0 - 1.0;
+    return vec3<f32>(n, sqrt(max(0.0, 1.0 - dot(n, n))));
+}
+
+/// What one layer's packed map says about this point: which way it faces, and how rough it is.
+struct Detail {
+    normal: vec3<f32>,
+    roughness: f32,
+}
+
+/// One layer's detail, sampled on whichever world planes the surface faces.
+///
+/// **A triplanar normal map needs no tangents, and that is why this can exist at all.** The usual
+/// way to read one is through a TBN basis the mesh carries per vertex, which the ground has never
+/// had: it is a height field with no uv set to build a tangent from. But a triplanar surface is
+/// already being read in three known frames — the world planes — and a tangent normal sampled on
+/// one of them can be rotated into world space by a swizzle, because the frame *is* a pair of
+/// world axes. Three of those, blended by the weights that are already computed, and the mesh is
+/// not asked for anything.
+///
+/// The blend is Golus' whiteout: each plane's tangent normal has the geometric normal's other two
+/// components added into its xy before the swizzle, so a detail normal perturbs the surface it sits
+/// on rather than replacing it. Without it a steep face reads its detail as though the face were
+/// flat, and the ravine walls light like vertical ground.
+fn triplanar_detail(
+    tex: texture_2d<f32>,
+    samp: sampler,
+    world: vec3<f32>,
+    dx: vec3<f32>,
+    dy: vec3<f32>,
+    weights: vec3<f32>,
+    tile_metres: f32,
+    geometric: vec3<f32>,
+) -> Detail {
+    let k = 1.0 / max(tile_metres, 0.01);
+    let n = geometric;
+    var out: Detail;
+    out.normal = vec3<f32>(0.0);
+    out.roughness = 0.0;
+    // The same three branches, in the same order and on the same thresholds, as the colour beside
+    // it: a plane that contributes too little to be worth a colour fetch is not worth a normal.
+    if weights.y > NEGLIGIBLE {
+        let p = planar_detail(tex, samp, world.xz * k, dx.xz * k, dy.xz * k);
+        let t = tangent(p.xy);
+        let w = vec3<f32>(t.xy + n.xz, abs(t.z) * n.y);
+        out.normal += weights.y * w.xzy;
+        out.roughness += weights.y * p.z;
+    }
+    if weights.x > NEGLIGIBLE {
+        let p = planar_detail(tex, samp, world.zy * k, dx.zy * k, dy.zy * k);
+        let t = tangent(p.xy);
+        let w = vec3<f32>(t.xy + n.zy, abs(t.z) * n.x);
+        out.normal += weights.x * w.zyx;
+        out.roughness += weights.x * p.z;
+    }
+    if weights.z > NEGLIGIBLE {
+        let p = planar_detail(tex, samp, world.xy * k, dx.xy * k, dy.xy * k);
+        let t = tangent(p.xy);
+        let w = vec3<f32>(t.xy + n.xy, abs(t.z) * n.z);
+        out.normal += weights.z * w.xyz;
+        out.roughness += weights.z * p.z;
+    }
+    // A sum of three perturbed normals is not a unit vector and the lighting wants one. It cannot
+    // be zero: every branch adds the geometric normal's own components, and the weights sum to one.
+    out.normal = normalize(out.normal);
+    return out;
+}
+
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
@@ -222,6 +355,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     var colour = vec3<f32>(0.0);
     var roughness = 0.0;
+    var shading = vec3<f32>(0.0);
     // Unrolled because the texture bindings cannot be indexed. A layer at zero weight is skipped
     // entirely, which on most of the map is three of the four.
     if weight.x > NEGLIGIBLE {
@@ -232,8 +366,21 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
                 rules.colour[0].rgb,
             );
         }
+        // Roughness from the map when there is one, and the layer's own number when there is
+        // not: the same relation `Layer::colour` has to a colour map, where the constant is what
+        // the ground wears until something better has loaded and is measured from it afterwards.
+        var n = normal;
+        var r = rules.colour[0].w;
+        if rules.dip[0].w > 0.5 {
+            let d = triplanar_detail(
+                packed_0, sampler_0, world, dx, dy, planes, rules.height[0].w, normal,
+            );
+            n = d.normal;
+            r = d.roughness;
+        }
         colour += weight.x * c;
-        roughness += weight.x * rules.colour[0].w;
+        roughness += weight.x * r;
+        shading += weight.x * n;
     }
     if weight.y > NEGLIGIBLE {
         var c = rules.colour[1].rgb;
@@ -243,8 +390,21 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
                 rules.colour[1].rgb,
             );
         }
+        // Roughness from the map when there is one, and the layer's own number when there is
+        // not: the same relation `Layer::colour` has to a colour map, where the constant is what
+        // the ground wears until something better has loaded and is measured from it afterwards.
+        var n = normal;
+        var r = rules.colour[1].w;
+        if rules.dip[1].w > 0.5 {
+            let d = triplanar_detail(
+                packed_1, sampler_1, world, dx, dy, planes, rules.height[1].w, normal,
+            );
+            n = d.normal;
+            r = d.roughness;
+        }
         colour += weight.y * c;
-        roughness += weight.y * rules.colour[1].w;
+        roughness += weight.y * r;
+        shading += weight.y * n;
     }
     if weight.z > NEGLIGIBLE {
         var c = rules.colour[2].rgb;
@@ -254,8 +414,21 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
                 rules.colour[2].rgb,
             );
         }
+        // Roughness from the map when there is one, and the layer's own number when there is
+        // not: the same relation `Layer::colour` has to a colour map, where the constant is what
+        // the ground wears until something better has loaded and is measured from it afterwards.
+        var n = normal;
+        var r = rules.colour[2].w;
+        if rules.dip[2].w > 0.5 {
+            let d = triplanar_detail(
+                packed_2, sampler_2, world, dx, dy, planes, rules.height[2].w, normal,
+            );
+            n = d.normal;
+            r = d.roughness;
+        }
         colour += weight.z * c;
-        roughness += weight.z * rules.colour[2].w;
+        roughness += weight.z * r;
+        shading += weight.z * n;
     }
     if weight.w > NEGLIGIBLE {
         var c = rules.colour[3].rgb;
@@ -265,8 +438,21 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
                 rules.colour[3].rgb,
             );
         }
+        // Roughness from the map when there is one, and the layer's own number when there is
+        // not: the same relation `Layer::colour` has to a colour map, where the constant is what
+        // the ground wears until something better has loaded and is measured from it afterwards.
+        var n = normal;
+        var r = rules.colour[3].w;
+        if rules.dip[3].w > 0.5 {
+            let d = triplanar_detail(
+                packed_3, sampler_3, world, dx, dy, planes, rules.height[3].w, normal,
+            );
+            n = d.normal;
+            r = d.roughness;
+        }
         colour += weight.w * c;
-        roughness += weight.w * rules.colour[3].w;
+        roughness += weight.w * r;
+        shading += weight.w * n;
     }
 
     // A point outside every band is possible and must not come out black: a gap should look like a
@@ -277,10 +463,17 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     } else {
         colour = vec3<f32>(0.5, 0.0, 0.5);
         roughness = 1.0;
+        shading = normal;
     }
 
     pbr_input.material.base_color = vec4<f32>(colour, 1.0);
     pbr_input.material.perceptual_roughness = clamp(roughness, 0.05, 1.0);
+    // The shading normal, and only the shading normal. `pbr_input.world_normal` stays the one the
+    // mesh gave, because that is what shadow biasing is measured against and a per-texel normal
+    // would make the bias jitter from pixel to pixel. It is the same split Bevy's own normal
+    // mapping makes. No division by `total`: normalising is about to make the scale irrelevant,
+    // and the sum cannot be zero — every term is a perturbation of the same geometric normal.
+    pbr_input.N = normalize(shading);
     pbr_input.material.base_color =
         alpha_discard(pbr_input.material, pbr_input.material.base_color);
 

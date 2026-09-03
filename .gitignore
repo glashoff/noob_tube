@@ -37,6 +37,15 @@
 !/assets/textures/Ground048_1K-PNG_Color.png
 !/assets/textures/Rock020_1K-PNG_Color.png
 
+# And the detail beside each of them: normal xy, roughness and height folded into one RGBA image by
+# `tools/bake_ground_maps`. Derived files, and the only derived files in this directory — but the
+# thing they are derived from is the twenty-megabyte pack in `downloads/`, which is not here and is
+# not going to be. Ten megabytes to check in against two gigabytes to fetch before the ground looks
+# right is not a close call. Same CC0 as the colour maps they were cut from.
+!/assets/textures/Grass001_1K-PNG_Packed.png
+!/assets/textures/Ground048_1K-PNG_Packed.png
+!/assets/textures/Rock020_1K-PNG_Packed.png
+
 # Shaders are the one thing under assets/ that is not an asset. They are this project's own source
 # code, written here, and they live in this directory only because that is where Bevy's asset server
 # looks — which is also what lets one be edited and reloaded without a rebuild. No licensing

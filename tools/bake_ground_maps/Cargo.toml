@@ -1,0 +1,15 @@
+[package]
+name = "bake_ground_maps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Not part of the game. This is the offline step that folds a ground pack's normal, roughness and
+# displacement maps into the one RGBA texture `assets/shaders/ground.wgsl` samples beside the
+# colour. A workspace member so that it keeps compiling and the one lockfile covers it; nothing in
+# the game depends on it, and it never runs at play time.
+[dependencies]
+# PNG in, PNG out, and nothing else. The same version and the same one-codec feature set the
+# client's test already pins — see client/Cargo.toml, where the reasoning is.
+image = { version = "0.25", default-features = false, features = ["png"] }
