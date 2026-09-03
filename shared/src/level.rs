@@ -536,6 +536,7 @@ mod tests {
         let mut app = played_level();
         app.add_message::<GroundPatched>();
         let before = ground_at(&mut app, 0.0, 0.0).expect("ground at the origin");
+        let away_before = ground_at(&mut app, 100.0, 100.0).expect("ground away from the stroke");
 
         let stroke = Stroke { at: Vec2::ZERO, radius: 12.0, brush: Brush::Lift { metres: 5.0 } };
         let patch = {
@@ -554,9 +555,17 @@ mod tests {
             "the ground went from {before:.2} to {after:.2}, which is not five metres",
         );
         // And the ground well outside the brush did not move with it.
+        //
+        // Against what the ray found *before* the stroke rather than against the height field,
+        // because the two are not the same thing any more: (100, 100) is a wall of the bowl, and
+        // what a ray finds on a wall is the rock standing on it — a metre and a half above the
+        // samples, which is exactly what `rock` is for. The claim here was never about the height
+        // field, it was that a stroke reaches this far and no further.
         let away = ground_at(&mut app, 100.0, 100.0).expect("ground away from the stroke");
-        let untouched = crate::terrain::default_terrain().height_over(100.0, 100.0);
-        assert!((away - untouched).abs() < 0.05, "ground 140 m away moved to {away:.2}");
+        assert!(
+            (away - away_before).abs() < 0.05,
+            "ground 140 m away went from {away_before:.2} to {away:.2}",
+        );
     }
 
     /// A hillside of the real map is ground a player stands on, and it faces the way it looks.

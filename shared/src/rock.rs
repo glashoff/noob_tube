@@ -35,73 +35,41 @@ use bevy::prelude::*;
 
 use crate::terrain::Terrain;
 
-/// Samples between the blocks — one every three metres of grid.
+/// Samples across one slab — the lattice the wall is broken into, three metres of it.
 const STRIDE: u32 = 3;
 
-/// How steep a place has to be before rock stands there.
-///
-/// Below the crossing rock is *painted* at, because the foot of a face is exactly where broken
-/// stone ends up and the paint should not be what decides that.
+/// How steep a cell has to be before it becomes rock.
 const NEEDS: f32 = 0.18;
 
-/// How far a block reaches, as a multiple of the distance to the next one.
+/// How far a slab is pushed off the surface, in metres, from least to most.
 ///
-/// **This is the whole difference between a wall and a wall with pebbles on it.** A block that does
-/// not reach its neighbour can only be an ornament, sitting on a surface that is still visibly the
-/// smooth one underneath — which is exactly what the first version of this looked like.
-///
-/// The number to clear is not one. A corner sits at `0.57735` of `size` along each axis, so a block
-/// is `1.155 * size` across, and two neighbours a step apart touch at `REACH = 0.866`. The half
-/// step of jitter that keeps them off the lattice can pull a pair `1.5` steps apart, and the size
-/// each one drew can be as little as four fifths — so the worst pair on a face still parts, and at
-/// `1.3` the ordinary pair overlaps by a third of itself.
-///
-/// The worst pair parting is not a defect. A crevice is what a rock face has; what it must not have
-/// is a window onto the smooth slope underneath, and
-/// `a_face_is_covered_rather_than_decorated` is what actually settles that — measured over the
-/// built-in map rather than argued from these numbers.
-const REACH: f32 = 1.3;
+/// This is what a wall's roughness *is* here. Neighbouring slabs draw their own numbers, so the one
+/// beside you stands at a different height, and the step between them is a face — vertical, because
+/// the sides run along the surface normal, and overhanging wherever the ground is past 45°.
+const LIFT_LOW: f32 = 0.35;
+const LIFT_HIGH: f32 = 1.5;
 
-/// The share of that reach a block has at the gentlest ground it appears on.
+/// How much of the lift survives on ground that has only just become steep.
 ///
-/// Not a probability. Thinning them out at the edge would leave gaps in the middle too — the same
-/// coin decides both — so instead every place gets a block and the ones on gentle ground are small.
-/// A face is solid, its shoulder is a scatter of stones, and the two are one rule.
-const SMALLEST: f32 = 0.34;
+/// Not zero, and that is a geometric requirement rather than a taste: a slab with no lift is eight
+/// points on a plane, which is not a solid, and `convex_hull` answers `None` to it. The rest fades
+/// with steepness so the wall grows out of the hillside instead of starting at a line.
+const LEAST_LIFT: f32 = 0.35;
 
-/// How far a block is pushed into the slope, as a fraction of its size.
+/// How far a slab's underside is buried below the surface it replaces, in metres.
 ///
-/// Deep enough that the row below shows through the gaps between the row above rather than a strip
-/// of smooth ground doing it.
-const SUNK: f32 = 0.5;
+/// Small, and not for looks. The underside would otherwise sit exactly on the ground mesh that is
+/// still drawn beneath it, and two coplanar surfaces at the same depth is z-fighting — a seam that
+/// flickers between two shades as the camera moves, on every slab on the map. Burying it also
+/// closes the sliver a slab's tilt would otherwise open along its lower edge.
+const BURY: f32 = 0.2;
 
-/// How far a corner may be pulled back towards the middle.
+/// How far a slab's top may slide sideways over its own footprint, as a fraction of the step.
 ///
-/// This is what makes a block angular rather than a box. Every corner is pulled in by its own
-/// amount, so the faces meet at unequal angles and no two blocks share a profile. At zero they are
-/// all the same tidy solid; near one they collapse into splinters.
-const RAGGED: f32 = 0.55;
-
-/// The eight directions a block's corners are pushed out along: a cube's, and nothing else.
-///
-/// **Eight rather than a rounder set, and the reason is the bill.** A face carries thousands of
-/// these now that they cover it, and eight corners hull into twelve triangles where fourteen make
-/// something nearer thirty. It is also the better shape: a cube pulled about at its corners is a
-/// slab with flat sides and hard edges, which is what fractured stone is, while adding the six
-/// axes rounds the middle of every face back out again.
-///
-/// Written out rather than normalised at run time — `0.57735026` is one over root three, and there
-/// is no reason to take that square root ten thousand times a map.
-const OUT: [Vec3; 8] = [
-    Vec3::new(0.57735026, 0.57735026, 0.57735026),
-    Vec3::new(-0.57735026, 0.57735026, 0.57735026),
-    Vec3::new(0.57735026, -0.57735026, 0.57735026),
-    Vec3::new(-0.57735026, -0.57735026, 0.57735026),
-    Vec3::new(0.57735026, 0.57735026, -0.57735026),
-    Vec3::new(-0.57735026, 0.57735026, -0.57735026),
-    Vec3::new(0.57735026, -0.57735026, -0.57735026),
-    Vec3::new(-0.57735026, -0.57735026, -0.57735026),
-];
+/// A slab pushed straight out has vertical sides. One whose top has also slid leans, and the edge
+/// it leans over is an overhang in the plain sense — something you can stand under, which is the
+/// thing a height field can never have and the whole reason this module exists.
+const LEAN: f32 = 0.3;
 
 /// One rock: where it stands, how it is turned, and the corners it is made of.
 #[derive(Clone, Debug)]
@@ -138,52 +106,80 @@ fn hash(ix: u32, iz: u32, slot: u32) -> f32 {
     (h >> 8) as f32 / (1u32 << 24) as f32
 }
 
-/// The rock standing at one candidate sample, if one does.
-fn rock_at(terrain: &Terrain, ix: u32, iz: u32) -> Option<Rock> {
-    let steep = terrain.steepness_at(ix, iz);
+/// The slab one cell of the lattice has become, if that cell is steep enough to be rock.
+///
+/// **This replaces the surface, it does not stand on it.** The four corners of the cell, taken off
+/// the ground itself, are the slab's underside; the same four pushed out along the cell's normal
+/// are its top. Neighbouring cells share their corner samples, so the undersides tile the wall
+/// exactly and there is no gap and no smooth ground left showing between them — which is the whole
+/// difference from scattering blocks onto a face, where the face is still there behind them.
+///
+/// **The lift is drawn per cell, not per corner sample.** That is the one decision that makes a
+/// wall rough rather than merely displaced: two cells that shared a lift would meet flush and the
+/// surface would be continuous again, only bumpier. Drawing separately, they meet at a step, and
+/// the step is a face — vertical, since the sides run along the normal, and overhanging wherever
+/// the ground itself is past 45°.
+///
+/// The top also slides sideways over its own footprint, which is what turns a straight-sided block
+/// into a leaning one. What it leans over is an overhang in the plain sense: something to stand
+/// under, and the thing `y = f(x, z)` can never have.
+fn slab_at(terrain: &Terrain, ix: u32, iz: u32) -> Option<Rock> {
+    let grid = terrain.grid;
+    let (jx, jz) = ((ix + STRIDE).min(grid.nx - 1), (iz + STRIDE).min(grid.nz - 1));
+    // A cell the rim of the map cut in half is not a cell. Dropping it costs one slab at the very
+    // edge and saves a degenerate footprint.
+    if jx == ix || jz == iz {
+        return None;
+    }
+    let corner = |x: u32, z: u32| {
+        let at = grid.world_of(x, z);
+        Vec3::new(at.x, terrain.surface_at(x, z), at.y)
+    };
+    let surface = [corner(ix, iz), corner(jx, iz), corner(ix, jz), corner(jx, jz)];
+
+    // The steepness of the whole footprint rather than of one of its corners: a slab is as steep as
+    // the ground it replaces, and asking a single sample would let a cell straddling the edge of a
+    // face come out at either answer depending which corner it was asked about.
+    let steep = 0.25
+        * (terrain.steepness_at(ix, iz)
+            + terrain.steepness_at(jx, iz)
+            + terrain.steepness_at(ix, jz)
+            + terrain.steepness_at(jx, jz));
     if steep < NEEDS {
         return None;
     }
-    let grid = terrain.grid;
-    let here = grid.world_of(ix, iz);
+
+    // Out of the wall, and the two ways along it. `normalize` is safe here and nowhere near zero:
+    // the two edges are a cell apart in x and in z, so their cross product is at least the cell's
+    // own area however the ground is tilted.
+    let along = surface[1] - surface[0];
+    let down = surface[2] - surface[0];
+    let mut normal = down.cross(along).normalize();
+    if normal.y < 0.0 {
+        normal = -normal;
+    }
+    let sideways = normal.cross(along.normalize());
+
+    // The cell's own index, so that the lift is a property of the slab and not of the samples it
+    // shares with the slab beside it.
+    let (cx, cz) = (ix / STRIDE, iz / STRIDE);
+    let fade = LEAST_LIFT + (1.0 - LEAST_LIFT) * steep;
     let step = STRIDE as f32 * grid.spacing;
-    // Off the lattice point, but by less than half the gap: enough that they do not stand in rows,
-    // not so much that two crowd into one place and leave a hole where one of them came from.
-    let x = here.x + (hash(ix, iz, 1) - 0.5) * step * 0.5;
-    let z = here.y + (hash(ix, iz, 2) - 0.5) * step * 0.5;
-    // Full size on a face, a fraction of it where the ground has only just become steep, and a
-    // spread of a third either way so that no two neighbours are the same block.
-    let grown = SMALLEST + (1.0 - SMALLEST) * steep;
-    let size = step * REACH * grown * (0.8 + 0.4 * hash(ix, iz, 3));
+    let lean = (hash(cx, cz, 1) - 0.5) * along.normalize() * step * LEAN
+        + (hash(cx, cz, 2) - 0.5) * sideways * step * LEAN;
+    // Below the surface, so that nothing of this is coplanar with the ground mesh under it.
+    let under = surface.map(|at| at - normal * BURY);
+    let over = surface.map(|at| {
+        let slot = (at.x.to_bits() ^ at.z.to_bits()) & 3;
+        let drawn = hash(cx, cz, 8 + slot);
+        at + normal * ((LIFT_LOW + (LIFT_HIGH - LIFT_LOW) * drawn) * fade) + lean
+    });
 
-    // A quaternion out of four hashes. `try_normalize` rather than `normalize` because four values
-    // that all land near zero is not impossible, only unlikely, and the unlikely one would be a
-    // NaN quaternion and a rock at no orientation at all.
-    let spin = Vec4::new(
-        hash(ix, iz, 4) * 2.0 - 1.0,
-        hash(ix, iz, 5) * 2.0 - 1.0,
-        hash(ix, iz, 6) * 2.0 - 1.0,
-        hash(ix, iz, 7) * 2.0 - 1.0,
-    );
-    let facing = spin.try_normalize().map_or(Quat::IDENTITY, Quat::from_vec4);
-
-    // Squashed along its own axes before it is turned, which is what makes slabs and wedges out of
-    // what would otherwise be a family of lumpy cubes.
-    let squash = Vec3::new(
-        0.62 + hash(ix, iz, 8) * 0.38,
-        0.40 + hash(ix, iz, 9) * 0.40,
-        0.62 + hash(ix, iz, 10) * 0.38,
-    );
-    let corners = OUT
-        .iter()
-        .enumerate()
-        .map(|(slot, out)| *out * squash * (size * (1.0 - RAGGED * hash(ix, iz, 16 + slot as u32))))
-        .collect();
-
-    // `height_over` is the surface including its relief, which is the ground the rock has to sit on
-    // rather than the authored field underneath it.
-    let at = Vec3::new(x, terrain.height_over(x, z) - size * SUNK, z);
-    Some(Rock { at, facing, corners })
+    // The middle of the eight, so that the corners are small numbers about their own origin rather
+    // than world coordinates a hull would lose precision on out at the rim of a kilometre of map.
+    let middle = (under.iter().chain(&over).copied().sum::<Vec3>()) / 8.0;
+    let corners = under.iter().chain(&over).map(|at| *at - middle).collect();
+    Some(Rock { at: middle, facing: Quat::IDENTITY, corners })
 }
 
 /// Every rock standing on one tile.
@@ -204,7 +200,7 @@ pub fn rocks_of_tile(terrain: &Terrain, tx: u32, tz: u32) -> Vec<Rock> {
     while iz < iz1 {
         let mut ix = first(ix0);
         while ix < ix1 {
-            rocks.extend(rock_at(terrain, ix, iz));
+            rocks.extend(slab_at(terrain, ix, iz));
             ix += STRIDE;
         }
         iz += STRIDE;
@@ -361,17 +357,20 @@ mod tests {
                     let hull = rock.collider().expect("a rock that is a solid");
                     let box_of = hull.aabb(Vec3::ZERO, Quat::IDENTITY);
                     let size = box_of.max - box_of.min;
-                    assert!(size.min_element() > 0.05, "a rock {size} across is a sheet of paper");
-                    largest = largest.max(size.max_element());
+                    assert!(size.min_element() > 0.05, "a slab {size} across is a sheet of paper");
+                    // Sideways only. A slab is as tall as the ground it replaces, and on a steep
+                    // face a three-metre cell drops five metres — that is the terrain's number and
+                    // not this module's, so bounding it here would be measuring the map.
+                    largest = largest.max(size.x.max(size.z));
                     count += 1;
                 }
             }
         }
-        // A corner sits at 0.57735 of `size`, `size` is at most `step * REACH * 1.2`, and the
-        // squash only ever shrinks. Anything past that is a block that grew in a way nothing here
-        // asked it to.
-        let bound = 1.1547 * 3.0 * REACH * 1.2;
-        assert!(largest <= bound, "a rock came out {largest:.2} m across, past {bound:.2}");
-        println!("{count} rocks, largest {largest:.2} m across");
+        // One cell across, plus the lean its top may slide either way, plus the lift — which on a
+        // wall points sideways, because the normal of a wall is horizontal.
+        let step = STRIDE as f32;
+        let bound = step * (1.0 + LEAN) + LIFT_HIGH;
+        assert!(largest <= bound, "a slab came out {largest:.2} m wide, past {bound:.2}");
+        println!("{count} slabs, widest {largest:.2} m");
     }
 }
