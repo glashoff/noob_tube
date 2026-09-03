@@ -18,6 +18,7 @@ mod placing;
 mod sculpting;
 mod shot_effects;
 mod vehicle;
+mod water;
 mod world;
 
 use bevy::app::{PluginGroupBuilder, ScheduleRunnerPlugin};
@@ -66,7 +67,8 @@ fn main() {
         // condition lives beside the reason for it rather than here.
         .add_plugins((bot::BotPlugin, map_menu::MapMenuPlugin, placing::PlacingPlugin,
             sculpting::SculptingPlugin, hotbar::HotbarPlugin,
-                      ground_material::GroundMaterialPlugin, recording::RecordingPlugin))
+                      ground_material::GroundMaterialPlugin, recording::RecordingPlugin,
+                      water::WaterPlugin))
         .add_plugins(client::ClientPlugins {
             tick_duration: net.tick_duration(),
         })
