@@ -20,7 +20,7 @@ use lightyear::prelude::*;
 use noob_tube_shared::protocol::TerrainChannel;
 use noob_tube_shared::terrain::{Ground, Marker, MarkerEdit, Palette};
 
-use crate::sculpting::{BRUSH_SLOTS, Chisel};
+use crate::sculpting::{BRUSH_SLOTS, Chisel, DIGITS};
 
 /// How many slots hold placeables: the ten keys, less the brushes.
 pub const PLACE_SLOTS: usize = 10 - BRUSH_SLOTS;
@@ -97,7 +97,8 @@ impl Plugin for PlacingPlugin {
 #[derive(Resource, Reflect)]
 #[reflect(Resource)]
 pub struct Placer {
-    /// Which placeable each slot holds, from key 5. An empty name is an empty slot.
+    /// Which placeable each slot holds, from the first digit the brushes leave. An empty name is
+    /// an empty slot.
     pub slots: Vec<String>,
     /// Which slot is in hand, or `None` when the hand holds a sculpting brush instead.
     pub held: Option<usize>,
@@ -167,7 +168,7 @@ fn hear_the_palette(offered: Option<Res<Palette>>, mut placer: ResMut<Placer>) {
     }
 }
 
-/// Update: keys 5 to 0 take a placeable into the hand.
+/// Update: the digits the brushes do not take put a placeable into the hand.
 fn take_the_digits(
     keys: Res<ButtonInput<KeyCode>>,
     chisel: Res<Chisel>,
@@ -179,18 +180,10 @@ fn take_the_digits(
     if !chisel.on || menu.open {
         return;
     }
-    for (slot, key) in [
-        KeyCode::Digit5,
-        KeyCode::Digit6,
-        KeyCode::Digit7,
-        KeyCode::Digit8,
-        KeyCode::Digit9,
-        KeyCode::Digit0,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        if keys.just_pressed(key) && slot < placer.slots.len() {
+    // The keys the brushes left, taken from the one list of ten rather than written out again:
+    // a second list is how key 5 came to select both the water brush and the first placeable.
+    for (slot, key) in DIGITS.iter().skip(BRUSH_SLOTS).enumerate() {
+        if keys.just_pressed(*key) && slot < placer.slots.len() {
             // An empty slot still takes the hand. Reaching for a slot you have not filled yet and
             // getting the brush back would read as the key not working.
             placer.held = Some(slot);

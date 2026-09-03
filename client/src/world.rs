@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use lightyear::prelude::{MessageReceiver, MessageSystems, Predicted};
 use noob_tube_shared::level::{self, CRATE_HALF_EXTENT, RAMP_HALF_EXTENTS};
 use noob_tube_shared::sculpt::{self, GroundPatched, PendingEdits, TerrainEdit};
-use noob_tube_shared::terrain::{Ground, MarkerChanged, Palette, Terrain, TerrainBaseline};
+use noob_tube_shared::terrain::{Ground, MarkerChanged, Palette, Terrain, TerrainBaseline, WaterLevel};
 use noob_tube_shared::types::Authored;
 
 pub struct WorldPlugin;
@@ -36,6 +36,7 @@ impl Plugin for WorldPlugin {
                     // the colliders and the picture follow from the map having changed, so a
                     // marker reaches the world through the same door a map switch does.
                     take_placements.run_if(resource_exists::<Ground>),
+                    take_the_water_level.run_if(resource_exists::<Ground>),
                     level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
                     level::build_the_props.run_if(resource_exists_and_changed::<Ground>),
                     draw_the_props.run_if(resource_exists_and_changed::<Ground>),
@@ -378,6 +379,29 @@ fn take_placements(
             // Through `ResMut` on purpose: touching it is what tells `build_the_props` and
             // `draw_the_props` there is something to rebuild.
             ground.0.apply(&change);
+        }
+    }
+}
+
+/// PreUpdate: puts the water where the server says it is.
+///
+/// Three lines and no queue, exactly like [`take_placements`] beside it and for the same reason:
+/// water has no collider, so nothing it does can change where a player may stand and there is no
+/// rollback window for it to straddle.
+///
+/// This client has usually put the water there already — see
+/// [`sculpting::work_the_brush`](crate::sculpting) — and this is what makes that guess the map's
+/// answer instead of one machine's. A refused level arrives as the *old* one being re-broadcast by
+/// nobody, so a guess the server would not take stands until the next edit; the client clamps to
+/// the same range the server checks, which is what keeps that from happening at all.
+fn take_the_water_level(
+    mut inbox: Query<&mut MessageReceiver<WaterLevel>>,
+    mut ground: ResMut<Ground>,
+) {
+    for mut receiver in inbox.iter_mut() {
+        for level in receiver.receive() {
+            // Through `ResMut` on purpose: touching it is what tells the surface to rebuild.
+            ground.0.water_y = level.0;
         }
     }
 }

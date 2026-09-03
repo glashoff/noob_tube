@@ -297,6 +297,8 @@ pub enum MapFault {
     NoSuchKind,
     /// Placing or turning things faster than [`MARKER_EDITS_PER_SECOND`].
     TooManyEdits,
+    /// A water level that is not a number, or one outside the map's own vertical range.
+    Water,
 }
 
 impl core::fmt::Display for MapFault {
@@ -330,6 +332,7 @@ impl core::fmt::Display for MapFault {
             Self::LastSpawn => write!(f, "a map needs somewhere for a player to come in"),
             Self::NoSuchKind => write!(f, "there is no placeable by that name"),
             Self::TooManyEdits => write!(f, "slow down: {MARKER_EDITS_PER_SECOND} placements a second"),
+            Self::Water => write!(f, "the water has to sit inside the map's own height range"),
             Self::Stroke => write!(f, "that is not a brush stroke this map will take"),
             Self::TooMuchGround => write!(f, "sculpting faster than the server will take it"),
         }
@@ -1534,6 +1537,38 @@ pub enum MarkerChanged {
 /// anybody placing things by hand could notice.
 pub const MARKER_EDITS_PER_SECOND: f32 = 8.0;
 pub const MARKER_EDIT_BURST: f32 = 24.0;
+
+/// Where the sea is, as somebody asks for it and as the server answers.
+///
+/// **One type in both directions**, which is the exception to the pair every other edit travels as.
+/// [`Stroke`](crate::sculpt::Stroke) becomes a [`TerrainEdit`](crate::sculpt::TerrainEdit) because
+/// the server adds the tick; a [`MarkerEdit`] becomes a [`MarkerChanged`] because the server adds
+/// the handle. Here it adds nothing at all: a water level is one number, and the server either
+/// takes it or refuses it. Two identical types would be ceremony, and the second of them would be
+/// the one somebody forgets to change.
+///
+/// `None` is a dry map, and it is a real value rather than a missing one — turning the water off is
+/// an edit like any other.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct WaterLevel(pub Option<f32>);
+
+impl WaterLevel {
+    /// Whether this is a level a map can hold.
+    ///
+    /// Inside the map's own vertical range, which is the only bound that means anything: water
+    /// above `max_y` floods everything and water below `min_y` is a dry map spelled the long way,
+    /// and both are states an author reaches by clicking rather than by asking for. What the check
+    /// is really for is the third case — a number that is not one. A `NaN` water level would reach
+    /// the mesh builder as a depth that compares false against everything, and the surface would
+    /// quietly stop being built with nothing anywhere saying why.
+    pub fn check(&self, grid: &Grid) -> Result<(), MapFault> {
+        match self.0 {
+            None => Ok(()),
+            Some(y) if y.is_finite() && y >= grid.min_y && y <= grid.max_y => Ok(()),
+            Some(_) => Err(MapFault::Water),
+        }
+    }
+}
 
 /// How near a rotation has to be to a pure yaw before the file writes it as one.
 ///

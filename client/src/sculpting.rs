@@ -11,6 +11,9 @@
 //! about a sixth of a second. That is deliberate: the commit has to reach everybody before the tick
 //! it names. The ring under the brush is what makes the wait legible, since it shows where the
 //! stroke is going the moment the button goes down.
+//!
+//! The fifth tool is the odd one and says so where it is defined: [`Tool::Water`] sets the map's
+//! water level, which is one number for the whole map rather than anything under the brush.
 
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
@@ -18,7 +21,7 @@ use lightyear::prelude::MessageSender;
 use noob_tube_shared::physics::Level;
 use noob_tube_shared::protocol::TerrainChannel;
 use noob_tube_shared::sculpt::{Brush, MAX_LIFT, MAX_RADIUS, Stroke};
-use noob_tube_shared::terrain::{Ground, Terrain};
+use noob_tube_shared::terrain::{Ground, Terrain, WaterLevel};
 
 /// How far a sculptor can reach, in metres. Past this the brush has nothing under it.
 const REACH: f32 = 200.0;
@@ -43,7 +46,7 @@ impl Plugin for SculptingPlugin {
             .init_resource::<Chisel>()
             .add_systems(
                 Update,
-                (turn_it_on, aim_the_brush, work_the_brush, hold_the_trigger)
+                (turn_it_on, aim_the_brush, work_the_brush, work_the_water, hold_the_trigger)
                     .chain()
                     // After the input has been sampled, because the brush *is* the trigger: it
                     // reads what the player asked for through the same door everything else does,
@@ -59,9 +62,28 @@ impl Plugin for SculptingPlugin {
 ///
 /// Shared with [`placing`](crate::placing), which fills the rest: the two read different digits and
 /// the offset between them has to be one number, not two that agree today.
-pub const BRUSH_SLOTS: usize = 4;
+pub const BRUSH_SLOTS: usize = 5;
 
-/// Which tool, of the four.
+/// The ten hotbar keys, in the order the bar shows them.
+///
+/// One list rather than two, and that is not tidiness: the brushes take the first [`BRUSH_SLOTS`]
+/// of it and [`placing`](crate::placing) takes the rest, so the two cannot start on the same digit.
+/// They did, the day the water brush was added — a fifth brush and a placeable palette that still
+/// began at key 5, both answering the same press.
+pub const DIGITS: [KeyCode; 10] = [
+    KeyCode::Digit1,
+    KeyCode::Digit2,
+    KeyCode::Digit3,
+    KeyCode::Digit4,
+    KeyCode::Digit5,
+    KeyCode::Digit6,
+    KeyCode::Digit7,
+    KeyCode::Digit8,
+    KeyCode::Digit9,
+    KeyCode::Digit0,
+];
+
+/// Which tool, of the five.
 ///
 /// In the order they earn their place rather than the order they are reached for. **Flatten first**:
 /// built structures have flat footprints and unsculpted ground does not, so without it every
@@ -73,7 +95,21 @@ pub enum Tool {
     Lift,
     Smooth,
     Ramp,
+    /// The sea, which is one number for the whole map and not a brush at all.
+    ///
+    /// It lives here because this is the hand that shapes the ground, and the waterline is a thing
+    /// an author sets by looking at the ground and clicking on it — the same gesture as the flatten
+    /// eyedropper, aimed at the same surface. What it is *not* is a stroke: it writes no samples,
+    /// covers no area and has no radius, so it travels as its own message and
+    /// [`work_the_water`] rather than [`work_the_brush`] has it.
+    Water,
 }
+
+/// Every tool, in the order the bar shows them and the digits select them.
+///
+/// One list, so that the keys, the bar and the wheel cannot disagree about how many there are.
+pub const TOOLS: [Tool; BRUSH_SLOTS] =
+    [Tool::Flatten, Tool::Lift, Tool::Smooth, Tool::Ramp, Tool::Water];
 
 impl Tool {
     fn name(self) -> &'static str {
@@ -82,6 +118,7 @@ impl Tool {
             Tool::Lift => "raise",
             Tool::Smooth => "smooth",
             Tool::Ramp => "ramp",
+            Tool::Water => "water",
         }
     }
 }
@@ -111,6 +148,13 @@ pub struct Chisel {
     pub at: Option<Vec3>,
     /// The first end of a ramp, once one has been put down.
     pub anchor: Option<Vec3>,
+    /// Where the sea is, mirrored from the map so the readout and the bar can say so.
+    ///
+    /// Not a second copy of the truth. [`work_the_water`] writes it from [`Ground`] every frame,
+    /// and the one place that moves the water writes both in the same breath — so this is the map's
+    /// own number, put where a `&Chisel` can reach it. The alternative was threading a `Ground`
+    /// through the recorder and the HUD to print one float.
+    pub water: Option<f32>,
     /// Seconds left before the held brush asks for another stroke.
     cooldown: f32,
     /// Whether the trigger was down last frame, for the tools that want an edge rather than a hold.
@@ -128,6 +172,7 @@ impl Default for Chisel {
             height: 0.0,
             at: None,
             anchor: None,
+            water: None,
             cooldown: 0.0,
             was_pressed: false,
         }
@@ -155,13 +200,8 @@ fn turn_it_on(
     if !chisel.on || menu.open {
         return;
     }
-    for (key, tool) in [
-        (KeyCode::Digit1, Tool::Flatten),
-        (KeyCode::Digit2, Tool::Lift),
-        (KeyCode::Digit3, Tool::Smooth),
-        (KeyCode::Digit4, Tool::Ramp),
-    ] {
-        if keys.just_pressed(key) {
+    for (key, tool) in DIGITS.iter().zip(TOOLS) {
+        if keys.just_pressed(*key) {
             chisel.tool = tool;
             chisel.anchor = None;
             // The hand holds one thing: reaching for a brush is putting the placeable down.
@@ -185,8 +225,10 @@ fn turn_it_on(
                 Tool::Lift => chisel.lift = (chisel.lift * factor).clamp(0.01, MAX_LIFT),
                 Tool::Smooth => chisel.smooth = (chisel.smooth * factor).clamp(0.02, 1.0),
                 // Flatten levels to a height picked off the ground, and a ramp runs between two
-                // ends that were clicked. Neither has a strength to turn up.
-                Tool::Flatten | Tool::Ramp => {}
+                // ends that were clicked. Neither has a strength to turn up. The water level has
+                // one — shift and the wheel raise and lower it — but it is a height in metres of
+                // world y rather than a factor, so `work_the_water` does it additively.
+                Tool::Flatten | Tool::Ramp | Tool::Water => {}
             }
         } else {
             chisel.radius = (chisel.radius * factor).clamp(MIN_RADIUS, MAX_RADIUS);
@@ -247,6 +289,11 @@ fn work_the_brush(
     chisel.cooldown = (chisel.cooldown - time.delta_secs()).max(0.0);
     // The trigger belongs to whatever is in the hand, and a placeable is not a brush.
     if !chisel.on || hand.menu.open || ground.is_none() || hand.placer.held.is_some() {
+        return;
+    }
+    // The water level is not a stroke — it moves one number in the map rather than the ground under
+    // the brush, and it goes out on a message of its own. [`work_the_water`] has it.
+    if chisel.tool == Tool::Water {
         return;
     }
     let Some(at) = chisel.at else {
@@ -311,11 +358,104 @@ fn work_the_brush(
             Brush::Lift { metres: (chisel.lift * sign).clamp(-MAX_LIFT, MAX_LIFT) }
         }
         Tool::Smooth => Brush::Smooth { amount: chisel.smooth.clamp(0.0, 1.0) },
-        Tool::Ramp => return,
+        Tool::Ramp | Tool::Water => return,
     };
     let stroke = Stroke { at: Vec2::new(at.x, at.z), radius: chisel.radius, brush };
     if let Some(sender) = sender {
         sender.into_inner().send::<TerrainChannel>(stroke);
+    }
+}
+
+/// How far one wheel notch moves the waterline, in metres.
+///
+/// Added rather than multiplied, unlike every other thing the wheel turns here. A brush radius is
+/// scale-free and a proportion means the same at one metre and at fifty; a water level is a place
+/// in the world, and scaling one either does nothing near zero or leaps by tens of metres away from
+/// it. A quarter of a metre is about the step that reads as "a bit deeper" on a shore.
+const WATER_STEP: f32 = 0.25;
+
+/// Update: puts the waterline where the sculptor clicks.
+///
+/// **The gesture is the flatten eyedropper's, aimed at the whole map.** You look at the ground, and
+/// where you click is where the sea comes up to — so a shore is found by looking at the slope you
+/// want a shore on rather than by typing a number into a box. Shift and the wheel then move it by
+/// [`WATER_STEP`] at a time, because the last quarter-metre of a waterline is the part you want to
+/// judge by eye, and there is not always a piece of ground at exactly the height you mean.
+/// The right button dries the map: a map with no sea is a state an author has to be able to reach,
+/// and the right button is where the second half of every tool in this file already lives.
+///
+/// **The click is an edge, not a hold.** A held button would be one broadcast a frame to every
+/// machine in the game, for a number that only ever ends up at whatever it was last set to.
+///
+/// **What this client asks for, it also applies.** Not prediction — there is nothing to roll back:
+/// water has no collider, and until it does it cannot move a player or a vehicle a millimetre. The
+/// server's answer arrives through [`take_the_water_level`](crate::world) a round trip later and
+/// overwrites this, which is what makes it the map's level rather than this machine's. Asking and
+/// then waiting to see it would put a fifth of a second between the click and the shore for no gain
+/// at all, on the one tool whose whole point is judging a height by eye.
+fn work_the_water(
+    input: Res<crate::local_player::CurrentInput>,
+    hand: Hand,
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    wheel: Res<AccumulatedMouseScroll>,
+    ground: Option<ResMut<Ground>>,
+    mut chisel: ResMut<Chisel>,
+    sender: Option<Single<&mut MessageSender<WaterLevel>>>,
+) {
+    let Some(mut ground) = ground else {
+        return;
+    };
+    if !chisel.on {
+        return;
+    }
+    // The map's own level, mirrored where a `&Chisel` can reach it — see the field. Written only
+    // when it differs, because this runs every frame and a `ResMut` written every frame is a
+    // resource that has changed every frame.
+    if chisel.water != ground.0.water_y {
+        chisel.water = ground.0.water_y;
+    }
+    if hand.menu.open || hand.placer.held.is_some() || chisel.tool != Tool::Water {
+        return;
+    }
+
+    let pressed = input.0.fire;
+    let edge = pressed && !chisel.was_pressed;
+    chisel.was_pressed = pressed;
+
+    let shifted = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let notches = if shifted { wheel.delta.y } else { 0.0 };
+    let asked = if edge {
+        // Wherever the aim landed. Off the map entirely — the sky — is not an answer, so nothing
+        // happens rather than the sea moving to the horizon.
+        chisel.at.map(|at| Some(at.y))
+    } else if mouse.just_pressed(MouseButton::Right) {
+        Some(None)
+    } else if notches != 0.0 {
+        // Nothing to nudge on a dry map: the wheel raises a waterline that exists, and the click is
+        // what makes one. Turning the wheel on a dry map putting a sea at the map's floor would be
+        // the tool inventing a level nobody asked for.
+        ground.0.water_y.map(|y| Some(y + WATER_STEP * notches.signum()))
+    } else {
+        None
+    };
+    let Some(asked) = asked else {
+        return;
+    };
+    // Clamped to the same range the server checks, which is what keeps a refusal off the wire: a
+    // nudge that walked off the top of the map would otherwise be answered by a refusal and leave
+    // the water where it was, with the shore having moved on this machine alone until the next
+    // edit.
+    let grid = ground.0.grid;
+    let asked = WaterLevel(asked.map(|y| y.clamp(grid.min_y, grid.max_y)));
+    if ground.0.water_y == asked.0 {
+        return;
+    }
+    // Through `ResMut`, which is what tells the surface to rebuild — see `dress_the_water`.
+    ground.0.water_y = asked.0;
+    chisel.water = asked.0;
+    if let Some(sender) = sender {
+        sender.into_inner().send::<TerrainChannel>(asked);
     }
 }
 
@@ -338,6 +478,7 @@ fn draw_the_brush(chisel: Res<Chisel>, ground: Option<Res<Ground>>, mut gizmos: 
         Tool::Lift => Color::srgb(1.0, 0.8, 0.3),
         Tool::Smooth => Color::srgb(0.6, 1.0, 0.6),
         Tool::Ramp => Color::srgb(1.0, 0.5, 0.9),
+        Tool::Water => Color::srgb(0.3, 0.7, 1.0),
     };
     ring_on_the_ground(&mut gizmos, &ground.0, Vec2::new(at.x, at.z), chisel.radius, colour);
     if let Some(anchor) = chisel.anchor {
@@ -399,14 +540,22 @@ pub fn readout(chisel: &Chisel) -> String {
         Tool::Ramp => {
             if chisel.anchor.is_some() { "click the far end".into() } else { "click one end".into() }
         }
+        Tool::Water => match chisel.water {
+            Some(y) => format!("at {y:.2} m   |   right button: dry"),
+            None => "dry   |   click the ground to flood it".into(),
+        },
     };
     // The two bindings spelled out, because a setting nobody can find is a setting that is not
     // there. The wheel is free of everything else while a brush is in hand, which is what lets one
     // wheel carry both.
-    format!(
-        "sculpt: {tool}, {extra}   |   wheel: {:.1} m brush   shift+wheel: strength",
-        chisel.radius,
-    )
+    let held = match chisel.tool {
+        // Not "strength": the water level is a place in the world, and the wheel moves it by a
+        // fixed step rather than by a proportion. A line that said strength here would be naming a
+        // number this tool does not have.
+        Tool::Water => format!("shift+wheel: {WATER_STEP} m"),
+        _ => "shift+wheel: strength".to_string(),
+    };
+    format!("sculpt: {tool}, {extra}   |   wheel: {:.1} m brush   {held}", chisel.radius)
 }
 
 /// Update: says what the number keys are bound to, for the bar that shows them.
@@ -428,7 +577,7 @@ pub fn name_the_slots(
     if !chisel.on || menu.open {
         return;
     }
-    for tool in [Tool::Flatten, Tool::Lift, Tool::Smooth, Tool::Ramp] {
+    for tool in TOOLS {
         let note = match tool {
             Tool::Flatten => format!("to {:.1} m", chisel.height),
             Tool::Lift => format!("{:.2} m", chisel.lift),
@@ -436,6 +585,10 @@ pub fn name_the_slots(
             Tool::Ramp => {
                 if chisel.anchor.is_some() { "far end".into() } else { "two clicks".into() }
             }
+            Tool::Water => match chisel.water {
+                Some(y) => format!("{y:.1} m"),
+                None => "dry".into(),
+            },
         };
         // Lit only when the brush is what the hand holds: two slots showing as in hand at once
         // would be the bar disagreeing with the game about a thing it exists to report.

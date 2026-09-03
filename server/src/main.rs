@@ -8,6 +8,7 @@
 mod maps;
 mod markers;
 mod sculpting;
+mod water;
 
 use bevy::prelude::*;
 use lightyear::prelude::*;
@@ -79,6 +80,7 @@ fn main() {
         .init_resource::<PendingEdits>()
         .init_resource::<sculpting::Budgets>()
         .init_resource::<markers::Placements>()
+        .init_resource::<water::WaterEdits>()
         .add_message::<GroundPatched>()
         // Map requests first, so a map that changes this frame is the one this frame's ticks run
         // against, and the ground is built from it in the same pass. Then strokes, which are
@@ -90,6 +92,7 @@ fn main() {
                 maps::serve_map_requests,
                 sculpting::serve_strokes,
                 markers::serve_marker_edits,
+                water::serve_water_edits,
                 level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
                 level::build_the_props.run_if(resource_exists_and_changed::<Ground>),
                 restock_the_fleet.run_if(resource_exists_and_changed::<Ground>),

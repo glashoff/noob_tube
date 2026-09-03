@@ -21,7 +21,7 @@ use crate::props::{Density, Prop};
 use crate::vehicle::{Controls, Driven, Driving, VehicleKind};
 use crate::shooting::{Health, ShotFired};
 use crate::sculpt::{Stroke, TerrainEdit};
-use crate::terrain::{MapList, MapRequest, MarkerChanged, MarkerEdit, TerrainBaseline};
+use crate::terrain::{MapList, MapRequest, MarkerChanged, MarkerEdit, TerrainBaseline, WaterLevel};
 use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
 
@@ -151,6 +151,11 @@ impl Plugin for ProtocolPlugin {
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<MarkerChanged>()
             .add_direction(NetworkDirection::ServerToClient);
+        // The water level, and the one map edit that travels as a single type in both directions:
+        // the server adds nothing to it — see [`WaterLevel`]. Bidirectional here is what installs
+        // the sender on both ends; without it one side has a message it can only receive.
+        app.register_message::<WaterLevel>()
+            .add_direction(NetworkDirection::Bidirectional);
 
         // Physics bodies, last: this registers `Position`, `Rotation`, `LinearVelocity` and
         // `AngularVelocity` for replication, prediction and interpolation, and it needs the
