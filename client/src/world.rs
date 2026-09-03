@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use lightyear::prelude::{MessageReceiver, MessageSystems, Predicted};
 use noob_tube_shared::level::{self, CRATE_HALF_EXTENT, RAMP_HALF_EXTENTS};
 use noob_tube_shared::sculpt::{self, GroundPatched, PendingEdits, TerrainEdit};
-use noob_tube_shared::terrain::{Ground, Terrain, TerrainBaseline};
+use noob_tube_shared::terrain::{Ground, MarkerChanged, Terrain, TerrainBaseline};
 use noob_tube_shared::types::Authored;
 
 pub struct WorldPlugin;
@@ -32,6 +32,10 @@ impl Plugin for WorldPlugin {
                 (
                     adopt_the_map,
                     take_strokes,
+                    // Before the ground is rebuilt, because that is what a placement changes: both
+                    // the colliders and the picture follow from the map having changed, so a
+                    // marker reaches the world through the same door a map switch does.
+                    take_placements.run_if(resource_exists::<Ground>),
                     level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
                     level::build_the_props.run_if(resource_exists_and_changed::<Ground>),
                     draw_the_props.run_if(resource_exists_and_changed::<Ground>),
@@ -335,6 +339,27 @@ struct GroundTile {
 ///
 /// Keeping the two separate is deliberate — real levels use a simplified collision mesh, and
 /// building that split in now means no rework when actual geometry arrives.
+/// PreUpdate: applies the placements the server has accepted.
+///
+/// Straight in, with no tick to wait for. Unlike a stroke, a marker has no collider and no per-tile
+/// rebuild, so there is no rollback window for it to straddle — terrain.md §7 exempts placement
+/// from §9's rule, and this is what that exemption looks like: three lines and no queue.
+///
+/// Nothing here judges the edit. Everything that could be refused was refused on the server, and a
+/// second opinion on this side would be a second rule to keep in step with the first.
+fn take_placements(
+    mut inbox: Query<&mut MessageReceiver<MarkerChanged>>,
+    mut ground: ResMut<Ground>,
+) {
+    for mut receiver in inbox.iter_mut() {
+        for change in receiver.receive() {
+            // Through `ResMut` on purpose: touching it is what tells `build_the_props` and
+            // `draw_the_props` there is something to rebuild.
+            ground.0.apply(&change);
+        }
+    }
+}
+
 /// PreUpdate: draws the props the map places, and takes down the last map's.
 ///
 /// The picture's half of [`level::build_the_props`], registered on the same condition and for the

@@ -100,6 +100,7 @@ pub fn default_markers() -> Vec<Marker> {
     let mut markers = Vec::new();
     for index in 0..DEFAULT_SPAWNS {
         markers.push(Marker {
+            id: 0,
             kind: PLAYER_SPAWN.into(),
             x: index as f32 * 2.0,
             z: 0.0,
@@ -109,6 +110,7 @@ pub fn default_markers() -> Vec<Marker> {
     }
     for (at, yaw) in VEHICLE_STARTS {
         markers.push(Marker {
+            id: 0,
             kind: VEHICLE.into(),
             x: at.x,
             z: at.y,
@@ -118,12 +120,18 @@ pub fn default_markers() -> Vec<Marker> {
     }
     for centre in CRATES {
         markers.push(Marker {
+            id: 0,
             kind: CRATE.into(),
             x: centre.x,
             z: centre.z,
             y: CRATE_HALF_EXTENT,
             rotation: Quat::IDENTITY,
         });
+    }
+    // Numbered in one place, at the end, rather than counted along the way: three loops each
+    // maintaining an index is three chances for two markers to share a handle.
+    for (index, marker) in markers.iter_mut().enumerate() {
+        marker.id = index as u32;
     }
     markers
 }

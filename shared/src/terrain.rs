@@ -223,6 +223,17 @@ pub enum MapFault {
     Marker,
     /// More markers on one map than [`MAX_MARKERS`].
     TooManyMarkers,
+    /// An edit naming a marker this map does not have.
+    NoSuchMarker,
+    /// A delete that would leave the map with nowhere for a player to come in.
+    ///
+    /// Not tidiness: a map with no spawn is unplayable, and the delete handler is the cheapest
+    /// place in the whole system to know that.
+    LastSpawn,
+    /// A kind no placeable answers to.
+    NoSuchKind,
+    /// Placing or turning things faster than [`MARKER_EDITS_PER_SECOND`].
+    TooManyEdits,
 }
 
 impl core::fmt::Display for MapFault {
@@ -252,6 +263,10 @@ impl core::fmt::Display for MapFault {
             }
             Self::Marker => write!(f, "that is not a place on this map a marker can stand"),
             Self::TooManyMarkers => write!(f, "a map may hold at most {MAX_MARKERS} markers"),
+            Self::NoSuchMarker => write!(f, "there is nothing on the map by that handle"),
+            Self::LastSpawn => write!(f, "a map needs somewhere for a player to come in"),
+            Self::NoSuchKind => write!(f, "there is no placeable by that name"),
+            Self::TooManyEdits => write!(f, "slow down: {MARKER_EDITS_PER_SECOND} placements a second"),
             Self::Stroke => write!(f, "that is not a brush stroke this map will take"),
             Self::TooMuchGround => write!(f, "sculpting faster than the server will take it"),
         }
@@ -579,6 +594,60 @@ impl Terrain {
     /// thing on both sides and across a restart.
     pub fn markers_of<'a>(&'a self, kind: &'a str) -> impl Iterator<Item = &'a Marker> + 'a {
         self.markers.iter().filter(move |marker| marker.kind == kind)
+    }
+
+    /// The handle the next marker placed on this map gets.
+    ///
+    /// One past the highest in use rather than the list's length, because removing does not
+    /// renumber: after two deletes the list is shorter and the handles are not, and reusing one
+    /// would hand a new crate the id somebody's client still thinks is the spawn it deleted.
+    pub fn next_marker_id(&self) -> u32 {
+        self.markers.iter().map(|marker| marker.id).max().map_or(0, |top| top.wrapping_add(1))
+    }
+
+    /// Applies an edit the server has already accepted.
+    ///
+    /// The one place a marker list changes, and deliberately infallible: everything that could be
+    /// refused was refused on the server, and a second opinion here would be a second rule to keep
+    /// in step with the first. What it does return is whether anything moved, so a caller can tell
+    /// an edit that arrived twice from one that did something.
+    ///
+    /// Mutating [`Ground`] is what makes the picture and the colliders follow: both are rebuilt on
+    /// the map having changed, so a placement reaches the world through the same door a map switch
+    /// does.
+    pub fn apply(&mut self, change: &MarkerChanged) -> bool {
+        match change {
+            MarkerChanged::Placed(marker) => {
+                self.markers.push(marker.clone());
+                true
+            }
+            MarkerChanged::Turned { id, rotation } => {
+                match self.markers.iter_mut().find(|marker| marker.id == *id) {
+                    Some(marker) => {
+                        marker.rotation = *rotation;
+                        true
+                    }
+                    None => false,
+                }
+            }
+            MarkerChanged::Removed { id } => {
+                let before = self.markers.len();
+                self.markers.retain(|marker| marker.id != *id);
+                self.markers.len() != before
+            }
+        }
+    }
+
+    /// Whether removing this marker would leave nobody anywhere to come in.
+    ///
+    /// Asked before the delete rather than repaired after it. A map with no player spawn is
+    /// unplayable, and this is the cheapest place in the system that can still say no.
+    pub fn is_the_last_spawn(&self, id: u32) -> bool {
+        let mut spawns = self
+            .markers
+            .iter()
+            .filter(|marker| marker.kind == crate::level::PLAYER_SPAWN);
+        spawns.next().is_some_and(|first| first.id == id) && spawns.next().is_none()
     }
 
     /// The height at one sample, in metres.
@@ -1165,6 +1234,15 @@ pub struct Marker {
     pub z: f32,
     /// Metres above the ground beneath, not world y.
     pub y: f32,
+    /// A handle, so that a delete can name *which* marker rather than a place.
+    ///
+    /// A position is ambiguous the moment two markers are close, and a delete that quietly removed
+    /// the wrong one is worse than one that misses. It is **not** in the file: the file has an
+    /// order, and the order is the numbering — assigned on the way in, at [`marker_file`], and
+    /// again on every machine that reads the same list, so both sides agree without it travelling.
+    /// Removing a marker does not renumber the rest; that is the whole point of a handle.
+    #[serde(default)]
+    pub id: u32,
     /// A full rotation, because a yaw cannot say "lying the way that hillside does".
     ///
     /// Not Euler angles as the representation, and not for gimbal lock: **a quaternion has no
@@ -1207,6 +1285,53 @@ impl Marker {
         Vec3::new(self.x, terrain.height_over(self.x, self.z) + self.y, self.z)
     }
 }
+
+/// What a placer asks for.
+///
+/// The client's half, and it carries no id for a placement: *which* marker a new one becomes is the
+/// server's to say, exactly as *when* a stroke lands is (see [`Stroke`](crate::sculpt::Stroke)). A
+/// type that let the client name the id would be a type somebody has to remember to overwrite.
+///
+/// Placement is **exempt from the rollback rule** that governs sculpting. A marker has no collider,
+/// so nothing it does can change where a player may stand, and there is no per-tile rebuild to make
+/// idempotent — so there is no commit tick here and nothing waits for one. Only spawning the live
+/// entity would need that discipline, and then it would need it for the entity.
+#[derive(Message, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum MarkerEdit {
+    /// Put one here. The position is absolute rather than an offset from anything, for the same
+    /// reason [`Turn`](Self::Turn) is: two placers in the same moment should land on one of the two
+    /// answers rather than on their composition.
+    Place(Marker),
+    /// Turn one, to **this** rotation and not by a step.
+    ///
+    /// Absolute, and it matters more for rotations than it would for a yaw: composing two deltas in
+    /// the other order gives a third answer again. The sender reads the current rotation, applies
+    /// its step, and sends the result, so two authors turning the same vehicle in the same moment
+    /// land on one of their two orientations.
+    Turn { id: u32, rotation: Quat },
+    /// Take one away, by handle. See [`Marker::id`].
+    Remove { id: u32 },
+}
+
+/// What the server decided, which is what every machine applies.
+///
+/// The other half, and separate for the one reason the pair exists: a placement comes back with the
+/// handle the server gave it. Sent to everybody including the placer, so there is no path where one
+/// machine holds a marker the rest do not.
+#[derive(Message, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum MarkerChanged {
+    Placed(Marker),
+    Turned { id: u32, rotation: Quat },
+    Removed { id: u32 },
+}
+
+/// How many marker edits a peer may make a second, and how many it may bank.
+///
+/// Far below sculpting's budget and measured in edits rather than area, because that is what a
+/// placement costs: one entry in a list. It is a guard against a client looping, not a pace
+/// anybody placing things by hand could notice.
+pub const MARKER_EDITS_PER_SECOND: f32 = 8.0;
+pub const MARKER_EDIT_BURST: f32 = 24.0;
 
 /// How near a rotation has to be to a pure yaw before the file writes it as one.
 ///
@@ -1264,7 +1389,15 @@ pub mod marker_file {
     pub fn deserialize<'de, D: Deserializer<'de>>(from: D) -> Result<Vec<Marker>, D::Error> {
         Vec::<MarkerFile>::deserialize(from)?
             .into_iter()
-            .map(|one| Marker::try_from(one).map_err(serde::de::Error::custom))
+            .enumerate()
+            .map(|(index, one)| {
+                // The file's own order is the numbering. Two machines reading the same file get
+                // the same handles without the file carrying any, which is what keeps the id an
+                // implementation detail of a session rather than a thing an author maintains.
+                Marker::try_from(one)
+                    .map(|marker| Marker { id: index as u32, ..marker })
+                    .map_err(serde::de::Error::custom)
+            })
             .collect()
     }
 }
@@ -1288,7 +1421,8 @@ impl TryFrom<MarkerFile> for Marker {
         if !rotation.is_finite() {
             return Err(MapFault::Marker);
         }
-        Ok(Marker { kind: file.kind, x: file.x, z: file.z, y: file.y, rotation })
+        // Numbered by the caller: a single marker has no position in a list to be numbered by.
+        Ok(Marker { id: 0, kind: file.kind, x: file.x, z: file.z, y: file.y, rotation })
     }
 }
 
@@ -1869,6 +2003,7 @@ mod tests {
     #[test]
     fn a_marker_that_is_only_turned_is_written_as_a_yaw() {
         let marker = Marker {
+            id: 0,
             kind: "crate".into(),
             x: 1.0,
             z: 2.0,
@@ -1888,6 +2023,7 @@ mod tests {
     #[test]
     fn a_marker_that_is_tilted_is_written_in_full() {
         let marker = Marker {
+            id: 0,
             kind: "crate".into(),
             x: 0.0,
             z: 0.0,
@@ -1935,6 +2071,7 @@ mod tests {
         let grid = default_terrain().grid;
         let (low, high) = grid.bounds();
         let good = Marker {
+            id: 0,
             kind: "crate".into(),
             x: 0.0,
             z: 0.0,
@@ -1967,7 +2104,7 @@ mod tests {
     fn a_marker_rides_the_ground_it_stands_on() {
         let mut terrain = default_terrain();
         let marker =
-            Marker { kind: "crate".into(), x: 4.0, z: 4.0, y: 1.5, rotation: Quat::IDENTITY };
+            Marker { id: 0, kind: "crate".into(), x: 4.0, z: 4.0, y: 1.5, rotation: Quat::IDENTITY };
         let before = marker.where_it_stands(&terrain);
         assert!(
             (before.y - terrain.height_over(4.0, 4.0) - 1.5).abs() < 1.0e-4,
@@ -1992,6 +2129,87 @@ mod tests {
         );
     }
 
+    /// A handle outlives the deletes around it.
+    ///
+    /// The reason a delete names an id rather than a place, and the reason the next id is one past
+    /// the highest rather than the list's length: reuse a handle and a new crate inherits the id
+    /// somebody's client still believes is the spawn it just deleted.
+    #[test]
+    fn a_handle_is_not_reused_after_a_delete() {
+        let mut terrain = default_terrain();
+        let last = terrain.markers.last().expect("markers").id;
+        assert_eq!(terrain.next_marker_id(), last + 1);
+
+        let doomed = terrain.markers[2].id;
+        assert!(terrain.apply(&MarkerChanged::Removed { id: doomed }));
+        assert_eq!(terrain.next_marker_id(), last + 1, "a delete freed a handle for reuse");
+        assert!(
+            !terrain.markers.iter().any(|marker| marker.id == doomed),
+            "the delete missed",
+        );
+        // And every other handle is where it was: removing does not renumber.
+        assert!(terrain.markers.iter().any(|marker| marker.id == last));
+    }
+
+    /// An edit that names nothing changes nothing, and says so.
+    #[test]
+    fn an_edit_for_a_marker_that_is_gone_does_nothing() {
+        let mut terrain = default_terrain();
+        let before = terrain.markers.clone();
+        assert!(!terrain.apply(&MarkerChanged::Removed { id: 9999 }));
+        assert!(!terrain.apply(&MarkerChanged::Turned { id: 9999, rotation: Quat::IDENTITY }));
+        assert_eq!(terrain.markers, before);
+    }
+
+    /// The map knows when it is down to its last way in.
+    ///
+    /// A map with no player spawn is unplayable, and the delete handler is the cheapest place in
+    /// the system that still knows enough to refuse. This is the half of that rule which can be
+    /// asked without a server.
+    #[test]
+    fn the_last_spawn_knows_that_it_is_the_last() {
+        let mut terrain = default_terrain();
+        let spawns: Vec<u32> =
+            terrain.markers_of(crate::level::PLAYER_SPAWN).map(|marker| marker.id).collect();
+        assert!(spawns.len() > 1, "the built-in map should lay out several");
+        assert!(!terrain.is_the_last_spawn(spawns[0]), "one of many is not the last");
+
+        for id in spawns.iter().skip(1) {
+            terrain.apply(&MarkerChanged::Removed { id: *id });
+        }
+        assert!(terrain.is_the_last_spawn(spawns[0]), "the only spawn left is not the last");
+        // And a crate is never the last spawn, whatever else has gone.
+        let crate_id = terrain.markers_of(crate::level::CRATE).next().expect("a crate").id;
+        assert!(!terrain.is_the_last_spawn(crate_id));
+    }
+
+    /// A placement lands on the map, and the map is what changed.
+    #[test]
+    fn a_placement_joins_the_map_with_the_handle_it_was_given() {
+        let mut terrain = default_terrain();
+        let id = terrain.next_marker_id();
+        let placed = Marker {
+            id,
+            kind: crate::level::CRATE.into(),
+            x: 20.0,
+            z: -30.0,
+            y: 1.0,
+            rotation: Quat::from_rotation_y(0.5),
+        };
+        assert!(terrain.apply(&MarkerChanged::Placed(placed.clone())));
+        assert_eq!(terrain.markers.last(), Some(&placed));
+
+        let turned = Quat::from_rotation_y(1.25);
+        assert!(terrain.apply(&MarkerChanged::Turned { id, rotation: turned }));
+        let back = terrain.markers.iter().find(|marker| marker.id == id).expect("still there");
+        assert!(same_turn(back.rotation, turned));
+        // And it stands on the ground rather than at the height it was authored against.
+        assert!(
+            (back.where_it_stands(&terrain).y - terrain.height_over(20.0, -30.0) - 1.0).abs()
+                < 1.0e-4,
+        );
+    }
+
     /// A baseline survives the format it is actually sent in.
     ///
     /// Not JSON, which is what every other round-trip test here uses and what made this necessary.
@@ -2008,6 +2226,7 @@ mod tests {
     fn a_baseline_survives_the_format_it_is_sent_in() {
         let mut terrain = default_terrain();
         terrain.markers.push(Marker {
+            id: 0,
             kind: "crate".into(),
             x: 3.0,
             z: -4.0,
@@ -2183,7 +2402,12 @@ mod tests {
         terrain.water_y = Some(-3.5);
         let mut manifest = terrain.manifest();
         manifest.layers = default_layers();
+        // The handles the file's own order will give them, so the round trip is an identity: the
+        // file carries no ids and numbers by position, which is only lossless if the list already
+        // agrees with its own order.
+        let next = manifest.markers.len() as u32;
         manifest.markers.push(Marker {
+            id: next,
             kind: "crate".into(),
             x: 1.5,
             z: -2.0,
@@ -2192,6 +2416,7 @@ mod tests {
         });
         // One that is tilted as well, so the round trip covers both forms the file may take.
         manifest.markers.push(Marker {
+            id: next + 1,
             kind: "vehicle".into(),
             x: -4.0,
             z: 6.0,

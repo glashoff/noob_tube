@@ -20,7 +20,7 @@ use crate::props::{Density, Prop};
 use crate::vehicle::{Controls, Driven, Driving, VehicleKind};
 use crate::shooting::{Health, ShotFired};
 use crate::sculpt::{Stroke, TerrainEdit};
-use crate::terrain::{MapList, MapRequest, TerrainBaseline};
+use crate::terrain::{MapList, MapRequest, MarkerChanged, MarkerEdit, TerrainBaseline};
 use crate::tuning::NetConfig;
 use crate::types::SharedTypesPlugin;
 
@@ -141,6 +141,14 @@ impl Plugin for ProtocolPlugin {
         app.register_message::<Stroke>()
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<TerrainEdit>()
+            .add_direction(NetworkDirection::ServerToClient);
+        // Placement, the same two-type shape and on the same ordered channel. Ordered matters here
+        // for a different reason than it does for strokes: a place and the delete that follows it
+        // do not commute, and an out-of-order pair leaves a marker on one machine and not on the
+        // others with nothing to notice the difference.
+        app.register_message::<MarkerEdit>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<MarkerChanged>()
             .add_direction(NetworkDirection::ServerToClient);
 
         // Physics bodies, last: this registers `Position`, `Rotation`, `LinearVelocity` and
