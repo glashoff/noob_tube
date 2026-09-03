@@ -437,6 +437,26 @@ impl NetConfig {
         Duration::from_secs_f64(1.0 / self.tick_hz)
     }
 
+    /// How long the server's main loop sleeps between frames.
+    ///
+    /// Without one it does not sleep at all. `MinimalPlugins` brings a `ScheduleRunnerPlugin` set
+    /// to `wait: None`, which is a loop that runs as fast as the machine allows — measured on this
+    /// one, a headless server with **nobody connected** sat at 99.9% of a core, doing thousands of
+    /// empty frames a second for a simulation that advances sixty-four times.
+    ///
+    /// That is not merely waste. A core spinning flat out is a core competing with everything else
+    /// on the machine, the game's own client included, and the price is paid where it is hardest to
+    /// read: as jitter in the moment each tick actually runs.
+    ///
+    /// **Twice the tick rate**, not once. At exactly the tick rate the loop and the fixed timestep
+    /// beat against each other — a frame that arrives a hair early runs no tick and the next runs
+    /// two, which is the same tick timing being unsteady, arrived at from the other side. At double
+    /// it, every tick lands within half a frame of when it is due, and a message waits at most
+    /// eight milliseconds to be looked at, against a send rate of thirty-two a second.
+    pub fn frame_duration(&self) -> Duration {
+        Duration::from_secs_f64(1.0 / (2.0 * self.tick_hz.max(f64::MIN_POSITIVE)))
+    }
+
     /// The netcode protocol id, with the tick rate mixed in.
     ///
     /// Netcode refuses a connect token whose protocol id does not match, which turns a tick-rate

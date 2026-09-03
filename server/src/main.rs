@@ -38,7 +38,11 @@ fn main() {
 
 
     App::new()
-        .add_plugins(MinimalPlugins)
+        // Sleeping between frames rather than spinning: see `NetConfig::frame_duration`, which is
+        // where the measurement and the choice of interval are written down.
+        .add_plugins(MinimalPlugins.set(bevy::app::ScheduleRunnerPlugin::run_loop(
+            net.frame_duration(),
+        )))
         // lightyear registers states; MinimalPlugins does not include StatesPlugin.
         .add_plugins(bevy::state::app::StatesPlugin)
         .add_plugins(bevy::log::LogPlugin::default())
