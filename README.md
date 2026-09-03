@@ -511,6 +511,65 @@ triplanar and tiles stochastically. Without it a layer still draws — in its ow
 constant roughness, lit by the height field's normal alone, which is what the ground looked like
 before any of this. The three packs that ship are baked and committed.
 
+### Importing a heightmap
+
+A map starts flat at half height, and sculpting a landscape out of that plane one brush stroke at a
+time is a week nobody has. `tools/import_heightmap` takes a heightmap image and writes the
+`maps/<name>.heights` + `maps/<name>.json` pair the server loads, which is terrain.md §14's
+*importing a height field* — a tool and not a button, because an import overwrites every height on
+a map at once and the game has no undo for that.
+
+```bash
+cargo run --release -p import_heightmap -- ~/Downloads/Terrain004_8K.exr
+cargo run --release -p import_heightmap -- terrain.exr --name "north ridge" --relief 80
+cargo run --release -p import_heightmap -- terrain.exr --samples 513 --dry-run
+```
+
+EXR, and 16-bit PNG is not offered as an alternative: eight bits over a 128 m range is 128 discrete
+heights, which is a half-metre terrace on every slope, and the whole reason a map stores `u16` is
+that those are visible. Free heightmaps come as EXR for the same reason —
+[ambientCG's Terrain category](https://ambientcg.com/list?type=Terrain) has them under CC0, one
+channel of `f32` at 8K, which is where `Terrain004_8K.exr` above comes from. Nothing it produces is
+committed: `.gitignore` closes `/maps/`, so an imported map is a local file, and the repository
+carries the importer rather than the landscape.
+
+**A heightmap has no metres in it.** It is a picture of relative heights with no footprint, no scale
+and nothing that says where anybody comes in, so three things are supplied on the way through:
+
+- **The footprint**, `--samples` and `--spacing`. The default is 1025² at 1 m — a 1024 m map, and
+  the largest canonical square that fits inside the 4 MiB baseline the map travels to every client
+  as. `--samples 513` is the 512 m map everything else in this repository has been.
+- **The relief**, `--relief`, peak-to-trough in metres, centred on y = 0 and stretched linearly from
+  the source's own range. The shape is the file's; the scale is yours. It deliberately does not fill
+  `--min-y`..`--max-y`, because a field pressed against both ends of its quantisation range cannot
+  be sculpted afterwards without clamping, and the range cannot be changed later without
+  requantising the map.
+- **Where the markers go.** `level::default_markers` puts eight spawns, two vehicles and three
+  crates in a thirty-metre huddle around the world origin, and on a real landscape the origin is as
+  likely to be a cliff face as a meadow. So the flattest place that will hold the huddle is searched
+  for and the whole set moved there in one piece — the layout somebody designed is kept, and only
+  the ground under it is chosen. `--spawn-at x,z` overrides it.
+
+Relief over footprint is the whole of how a map plays, so every run prints the slope profile of what
+it made. Over `Terrain004` at the default 1024 m footprint:
+
+| relief | median slope | 90th | over 35° |
+|--------|--------------|------|----------|
+| 45 m   | 6°           | 16°  | 0%       |
+| 60 m   | 8°           | 21°  | 1%       |
+| **90 m** (default) | **12°** | **30°** | **6%** |
+| 120 m  | 15°          | 38°  | 13%      |
+
+35° is where the layer rules start painting rock and roughly where a vehicle stops climbing, so that
+last column is at once how rocky the map looks and how much of it is closed to driving. Under 90 m
+the rock layer is a rule that never fires and a real landscape reads as upholstery; over it, the
+routes between the valleys start closing. Halving the map doubles every gradient — the same 90 m at
+`--samples 513` is 21% over 35° — so the default is right for its footprint and not for all of them.
+
+The run ends by reading both files back through `Manifest::check` and `Terrain::decode`, the three
+steps a load is made of, and comparing. Everything before that is the importer's opinion that it
+wrote a map.
+
 ### An inspector window
 
 `--features inspector` adds `bevy-inspector-egui`, an egui panel listing every entity and component
