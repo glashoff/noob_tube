@@ -150,7 +150,7 @@ pub(crate) fn falloff(distance_squared: f32, radius: f32) -> f32 {
 /// client with different numbers here would have different ground — not slightly different, but
 /// different in the place where one of them decides what a player may stand on. The knobs that may
 /// vary per process are network knobs, and these are not.
-pub const ROUGH_UPRIGHT: f32 = 0.55;
+pub const ROUGH_UPRIGHT: f32 = 1.0;//0.55;
 pub const ROUGH_SIDEWAYS: f32 = 0.30;
 
 /// Samples between the points that are displaced, with the ones between them interpolated.
