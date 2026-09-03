@@ -93,6 +93,7 @@ fn main() {
                 level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
                 level::build_the_props.run_if(resource_exists_and_changed::<Ground>),
                 restock_the_fleet.run_if(resource_exists_and_changed::<Ground>),
+                restock_the_crates.run_if(resource_exists_and_changed::<Ground>),
                 sculpt::apply_due_edits.run_if(resource_exists::<Ground>),
                 sculpt::lift_with_the_ground::<()>.run_if(resource_exists::<Ground>),
                 sculpt::lift_bodies_with_the_ground::<()>.run_if(resource_exists::<Ground>),
@@ -571,7 +572,7 @@ const REACH: f32 = 4.0;
 /// Server-side. A client tells the two apart by what it has been asked to do with them, which is
 /// the only difference that matters to it.
 #[derive(Component, Clone, Copy)]
-struct Loose;
+pub(crate) struct Loose;
 
 /// On a vehicle: who is driving it. Server-side; a client works it out from what it predicts.
 #[derive(Component, Clone, Copy)]
@@ -879,14 +880,17 @@ fn carry_drivers(
     }
 }
 
-/// Which marker a vehicle came off, so the fleet can be compared with the map.
+/// Which marker a body came off, so what stands on the map can be compared with what it asks for.
+///
+/// On vehicles and on placed crates alike; what tells the two apart is the rest of the entity, and
+/// the two systems that read this each say which they mean.
 ///
 /// The id rather than the position, because that is what a marker is identified by everywhere else
-/// — an author who drags a vehicle spawn ten metres has not made a different spawn, and a vehicle
-/// somebody has driven away is nowhere near the marker it came from. Handles are never reused, so
-/// a match here means *this* vehicle is that marker's.
+/// — an author who drags a spawn ten metres has not made a different spawn, and a vehicle somebody
+/// has driven away is nowhere near the marker it came from. Handles are never reused, so a match
+/// here means *this* body is that marker's.
 #[derive(Component, Clone, Copy)]
-struct FromMarker(u32);
+pub(crate) struct FromMarker(u32);
 
 /// One vehicle, standing where its marker says.
 ///
@@ -945,11 +949,13 @@ fn park_a_vehicle(commands: &mut Commands, ground: &terrain::Terrain, marker: &M
 fn restock_the_fleet(
     ground: Res<Ground>,
     net: Res<NetConfig>,
-    standing: Query<(Entity, &FromMarker, Option<&Driver>)>,
+    // `With<VehicleKind>` is load-bearing: a placed crate carries a `FromMarker` too, and without
+    // it this would read every crate as a vehicle whose marker had gone and despawn the lot.
+    standing: Query<(Entity, &FromMarker, Option<&Driver>), With<VehicleKind>>,
     mut commands: Commands,
 ) {
     let wanted: Vec<&Marker> = ground.0.markers_of(level::VEHICLE).collect();
-    let (to_park, to_clear) = fleet_orders(
+    let (to_park, to_clear) = stock_orders(
         &wanted.iter().map(|marker| marker.id).collect::<Vec<_>>(),
         &standing.iter().map(|(_, from, _)| from.0).collect::<Vec<_>>(),
     );
@@ -983,13 +989,97 @@ fn restock_the_fleet(
     }
 }
 
-/// Which markers want a vehicle, and which vehicles have outlived their marker.
+/// One crate a map placed, resting where its marker says.
+///
+/// Everything the built-in loose crates get, and for the same reasons — dynamic so the solver
+/// moves it, a [`Density`] on the wire so a client that predicts it weighs it the way the server
+/// does, a [`HitboxHistory`] so a shot at it is tested against the past everyone else sees it in.
+///
+/// Two differences from `spawn_props`, and both come from being *placed*:
+///
+/// - It carries [`Loose`], which is what puts it into a driver's prediction. That is not a detail:
+///   an unpredicted body is `RigidBody::Static` on the client, and static in Avian means immovable,
+///   so a crate left out of the prediction is a wall a buggy climbs instead of a box it shoves.
+/// - It carries a [`Rotation`], because a marker has one and a box that ignores it would make the
+///   turn wheel do nothing for this one kind.
+fn park_a_crate(commands: &mut Commands, ground: &terrain::Terrain, marker: &Marker, history: usize) {
+    let shape = props::heavy_prop();
+    // Its own half-height above whatever the marker stands on, so it starts resting on the ground
+    // rather than half buried in it — the same split `park_a_vehicle` makes with its ride height.
+    let at = marker.where_it_stands(ground) + Vec3::Y * props::HEAVY_HALF_EXTENT;
+    commands.spawn((
+        Name::from(format!("Heavy crate {}", marker.id)),
+        Authored,
+        FromMarker(marker.id),
+        Loose,
+        shape,
+        RigidBody::Dynamic,
+        shape.collider(),
+        ColliderDensity(props::LOOSE_DENSITY),
+        Density(props::LOOSE_DENSITY),
+        CollisionLayers::new(Layer::Body, LayerMask::ALL),
+        Position(at),
+        Rotation(marker.rotation),
+        HitboxHistory::with_capacity(history),
+        Replicate::to_clients(NetworkTarget::All),
+        // Interpolated by default and predicted by whoever is driving, which
+        // `the_world_follows_the_drivers` decides tick by tick. Nothing here fixes that choice.
+        InterpolationTarget::to_clients(NetworkTarget::All),
+    ));
+}
+
+/// PreUpdate: makes the placed crates the ones the map asks for.
+///
+/// [`restock_the_fleet`] for boxes, sharing its [`stock_orders`] and its rule: a marker with no
+/// crate on it gets one, and a crate whose marker has gone goes with it.
+///
+/// It does not move a crate that already exists, and that matters more here than it does for a
+/// vehicle. A shoved crate is somewhere its marker never said, and hauling it back every time
+/// anybody sculpted a hillside would undo the game in the middle of it. Putting them back where
+/// they started is a new round's business — [`maps::place_everything`] clears them and this
+/// rebuilds them.
+fn restock_the_crates(
+    ground: Res<Ground>,
+    net: Res<NetConfig>,
+    standing: Query<(Entity, &FromMarker), With<Loose>>,
+    mut commands: Commands,
+) {
+    let wanted: Vec<&Marker> = ground.0.markers_of(level::HEAVY_CRATE).collect();
+    let (to_park, to_clear) = stock_orders(
+        &wanted.iter().map(|marker| marker.id).collect::<Vec<_>>(),
+        &standing.iter().map(|(_, from)| from.0).collect::<Vec<_>>(),
+    );
+
+    for (crate_, from) in standing.iter() {
+        if to_clear.contains(&from.0) {
+            commands.entity(crate_).despawn();
+        }
+    }
+    for marker in &wanted {
+        if to_park.contains(&marker.id) {
+            park_a_crate(&mut commands, &ground.0, marker, net.lag_comp_history_ticks.into());
+        }
+    }
+    if !to_park.is_empty() || !to_clear.is_empty() {
+        info!(
+            "{} placed crates ({} new, {} gone)",
+            wanted.len(),
+            to_park.len(),
+            to_clear.len()
+        );
+    }
+}
+
+/// Which markers want a body, and which bodies have outlived their marker.
+///
+/// Shared by the fleet and the placed crates, because "the map says what stands on it" is one rule
+/// and the two differ only in what they build when the answer comes back.
 ///
 /// A set difference each way, by marker id. Its own function because it is the part of the rule
 /// worth testing on its own: putting a replicated body into a world takes half of lightyear's
 /// plumbing with it, and a test that stood all of that up to watch two lists be compared would be
 /// testing lightyear.
-fn fleet_orders(wanted: &[u32], standing: &[u32]) -> (Vec<u32>, Vec<u32>) {
+fn stock_orders(wanted: &[u32], standing: &[u32]) -> (Vec<u32>, Vec<u32>) {
     let park = wanted.iter().filter(|id| !standing.contains(id)).copied().collect();
     let clear = standing.iter().filter(|id| !wanted.contains(id)).copied().collect();
     (park, clear)
@@ -1254,11 +1344,60 @@ mod tests {
     #[test]
     fn the_fleet_follows_the_markers_both_ways() {
         // Nothing on the map yet: every marker wants a vehicle.
-        assert_eq!(fleet_orders(&[4, 7], &[]), (vec![4, 7], vec![]));
+        assert_eq!(stock_orders(&[4, 7], &[]), (vec![4, 7], vec![]));
         // The steady state, which is what almost every call is: nothing to do either way.
-        assert_eq!(fleet_orders(&[4, 7], &[4, 7]), (vec![], vec![]));
+        assert_eq!(stock_orders(&[4, 7], &[4, 7]), (vec![], vec![]));
         // One spawn added and one taken away, at once — a map switch, in other words.
-        assert_eq!(fleet_orders(&[4, 9], &[4, 7]), (vec![9], vec![7]));
+        assert_eq!(stock_orders(&[4, 9], &[4, 7]), (vec![9], vec![7]));
+    }
+
+    /// A crate the map placed is not part of the fleet, and the fleet is not part of the crates.
+    ///
+    /// Both reconcilers compare a `FromMarker` against the markers of *their own* kind, and they
+    /// share the component. A query that forgot to say which kind of body it meant would read every
+    /// placed crate as a vehicle whose spawn had gone — so placing a heavy crate would make one
+    /// appear and the very next map change would take it away, with nothing anywhere saying why.
+    #[test]
+    fn the_fleet_and_the_placed_crates_do_not_sweep_each_other_away() {
+        use bevy::ecs::system::RunSystemOnce;
+        use noob_tube_shared::terrain::default_terrain;
+
+        // No vehicle markers, so `restock_the_fleet` has nothing to park and cannot reach for the
+        // replication plumbing a real spawn needs. One heavy-crate marker, which is the crate that
+        // should survive both passes.
+        let mut ground = default_terrain();
+        ground.markers.retain(|marker| marker.kind != level::VEHICLE);
+        let id = ground.next_marker_id();
+        ground.markers.push(Marker {
+            id,
+            kind: level::HEAVY_CRATE.into(),
+            x: 4.0,
+            z: -4.0,
+            y: 0.0,
+            rotation: Quat::IDENTITY,
+        });
+
+        let mut app = App::new();
+        app.insert_resource(NetConfig::default());
+        app.insert_resource(Ground(ground));
+        let kept = app.world_mut().spawn((Loose, FromMarker(id))).id();
+        let orphan = app.world_mut().spawn((Loose, FromMarker(id + 1))).id();
+
+        app.world_mut().run_system_once(restock_the_fleet).expect("the fleet is stocked");
+        assert!(
+            app.world().get_entity(kept).is_ok() && app.world().get_entity(orphan).is_ok(),
+            "the fleet reconcile despawned crates it should never have looked at",
+        );
+
+        app.world_mut().run_system_once(restock_the_crates).expect("the crates are stocked");
+        assert!(
+            app.world().get_entity(kept).is_ok(),
+            "a crate whose marker is still on the map was taken away",
+        );
+        assert!(
+            app.world().get_entity(orphan).is_err(),
+            "a crate outlived the marker it came from",
+        );
     }
 
     /// A vehicle whose marker has gone takes its driver out of the seat on the way.

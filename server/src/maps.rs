@@ -187,6 +187,9 @@ type Switching<'w, 's> = (
     ResMut<'w, Ground>,
     Query<'w, 's, &'static mut PlayerState>,
     Query<'w, 's, (Entity, Option<&'static crate::Driver>), With<VehicleKind>>,
+    // Placed crates only. The built-in loose pile carries no `FromMarker`, so it is not the new
+    // map's to rebuild and is left alone here.
+    Query<'w, 's, Entity, (With<crate::Loose>, With<crate::FromMarker>)>,
     Commands<'w, 's>,
 );
 
@@ -352,7 +355,9 @@ fn act(
 ///
 /// The vehicles are **taken off the map rather than moved onto it**, and
 /// [`restock_the_fleet`](crate::restock_the_fleet) builds the new map's fleet from its own markers
-/// one system later. Moving them was the older answer and it could only move the ones that already
+/// one system later. The crates the map placed go the same way, for the extra reason that a crate
+/// somebody shoved into a corner is not where its marker says and a new round should not start with
+/// the last one's mess. Moving them was the older answer and it could only move the ones that already
 /// existed: a map with a vehicle spawn the last one did not have got nothing on it, which is the
 /// bug this pair of changes is about. Clearing the fleet also settles what to do with a map that
 /// has no vehicle spawn — nothing stands on it, which is what the map said.
@@ -373,9 +378,12 @@ fn place_everything(world: &mut Switching) {
     }
     for (vehicle, driver) in world.2.iter() {
         if let Some(driver) = driver {
-            world.3.entity(driver.0).remove::<Driving>();
+            world.4.entity(driver.0).remove::<Driving>();
         }
-        world.3.entity(vehicle).despawn();
+        world.4.entity(vehicle).despawn();
+    }
+    for crate_ in world.3.iter() {
+        world.4.entity(crate_).despawn();
     }
 }
 

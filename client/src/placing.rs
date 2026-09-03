@@ -50,13 +50,13 @@ const ARROW_LENGTH: f32 = 1.5;
 /// Degrees of hue between one placeable and the next.
 ///
 /// The golden angle, and the reason is that it spreads *any* number of kinds as far apart as they
-/// can be spread: the three this game ships with land eighty-five degrees apart, six leave thirty
-/// between the closest pair and ten leave twenty, with each new kind falling into the widest gap
-/// left rather than on top of something. Hashing the name instead would keep a kind's colour when
-/// the palette changed, but hashing spreads by luck — these three names come out thirty-one degrees
-/// apart, and a spawn the same colour as a crate is the one failure this drawing must not have. The
-/// cost is that a colour follows a kind's *place* in the palette, so a server that adds a placeable
-/// in the middle of its list restyles the ones after it.
+/// can be spread: the four this game ships with leave fifty-two degrees between the closest pair,
+/// six leave thirty and ten leave twenty, with each new kind falling into the widest gap left
+/// rather than on top of something. Hashing the name instead would keep a kind's colour when the
+/// palette changed, but hashing spreads by luck — `vehicle` and `crate` come out thirty-one degrees
+/// apart that way, and a spawn the same colour as a crate is the one failure this drawing must not
+/// have. The cost is that a colour follows a kind's *place* in the palette, so a server that adds
+/// a placeable in the middle of its list restyles the ones after it.
 const GOLDEN_ANGLE: f32 = 137.507_76;
 
 pub struct PlacingPlugin;
@@ -114,7 +114,7 @@ pub struct Placer {
 
 impl Default for Placer {
     fn default() -> Self {
-        // The three the game has, in the first three slots, so the feature is reachable before
+        // The ones the game has, in the first slots, so the feature is reachable before
         // anybody has opened the palette. The rest are empty rather than repeats.
         let mut slots = vec![String::new(); PLACE_SLOTS];
         for (slot, kind) in noob_tube_shared::level::PLACEABLES.iter().enumerate() {

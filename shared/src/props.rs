@@ -131,6 +131,29 @@ pub fn loose_prop() -> Prop {
 /// rather than firing it across the map. It reaches a client as [`Density`].
 pub const LOOSE_DENSITY: f32 = 40.0;
 
+/// Half the size of a crate a map places, in metres — so 2.5 m on a side.
+///
+/// Bigger than the built-in loose crates on purpose, and bigger than the static `crate` a map can
+/// also place. Two boxes of the same size, one that shoves and one that is part of the level, is a
+/// thing a player can only learn by driving into both; the biggest box on the map being the one
+/// that moves is a thing they can see. At [`LOOSE_DENSITY`] it comes out at 625 kg, half a buggy —
+/// heavy enough to be shunted rather than flicked away, light enough to be worth hitting.
+pub const HEAVY_HALF_EXTENT: f32 = 1.25;
+
+/// The crate a map places is the biggest box in the game, and that is what says which one moves.
+///
+/// A player cannot read a density off a screen. What they can read is size, so the rule the level
+/// leans on is "the biggest box is the one that shoves" — and it stops being true the moment
+/// somebody grows the static crate or shrinks this one without noticing the other. Checked at
+/// compile time, because both numbers are known then and a build is a cheaper place to find out.
+const _: () = assert!(HEAVY_HALF_EXTENT > crate::level::CRATE_HALF_EXTENT);
+const _: () = assert!(HEAVY_HALF_EXTENT > LOOSE_HALF_EXTENT);
+
+/// The shape every placed crate has. How heavy it is travels beside it, as [`Density`].
+pub fn heavy_prop() -> Prop {
+    Prop { half_extents: Vec3::splat(HEAVY_HALF_EXTENT) }
+}
+
 /// The moving crates the level starts with.
 ///
 /// They ride high enough that their lowest point clears a standing player, because a crate you can
@@ -223,4 +246,5 @@ mod tests {
         assert!((aabb.max - half_extents).length() < 1e-5, "{:?} vs {half_extents:?}", aabb.max);
         assert!((aabb.min + half_extents).length() < 1e-5, "{:?} vs {half_extents:?}", aabb.min);
     }
+
 }

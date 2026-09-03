@@ -72,13 +72,20 @@ pub const VEHICLE_STARTS: [(Vec2, f32); 2] = [
 
 /// The placeables this build knows, which is the palette a map may name kinds from.
 ///
-/// A `kind` is a palette id rather than an enum of the three that happen to exist, so adding a
+/// A `kind` is a palette id rather than an enum of the four that happen to exist, so adding a
 /// placeable becomes adding an asset rather than a code change (terrain.md §7). Today the palette
 /// is a constant here; when the server has more assets than the client, it is the server's to send.
 pub const PLAYER_SPAWN: &str = "player";
 pub const VEHICLE: &str = "vehicle";
 pub const CRATE: &str = "crate";
-pub const PLACEABLES: [&str; 3] = [PLAYER_SPAWN, VEHICLE, CRATE];
+/// A crate the solver moves, as against [`CRATE`], which is part of the level and never budges.
+///
+/// The two are one word apart on purpose: what a player needs to know about a box is whether it
+/// will move, and everything else about it — its size, its weight, whether it is replicated at all
+/// — follows from that one answer. A static crate is geometry both sides build from the marker; a
+/// heavy one is a body the server owns and sends, which is why only the server spawns it.
+pub const HEAVY_CRATE: &str = "heavy crate";
+pub const PLACEABLES: [&str; 4] = [PLAYER_SPAWN, VEHICLE, CRATE, HEAVY_CRATE];
 
 /// How many player spawns the built-in map lays out.
 ///

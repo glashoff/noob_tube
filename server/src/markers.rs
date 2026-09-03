@@ -187,6 +187,23 @@ mod tests {
         assert_eq!(judge(&terrain, &a_crate_at(&terrain, 20.0, -30.0)), Ok(()));
     }
 
+    /// Every kind the palette offers is one the server will actually take.
+    ///
+    /// The palette is what a client puts in its hotbar, and this is what decides whether a click
+    /// stands. They are two lists in two crates, and the day they disagree is the day a slot
+    /// refuses every placement with the refusal arriving from the far end of a network.
+    #[test]
+    fn the_palette_is_the_list_of_what_can_be_placed() {
+        let terrain = default_terrain();
+        for kind in level::PLACEABLES {
+            let MarkerEdit::Place(marker) = a_crate_at(&terrain, 10.0, -10.0) else {
+                unreachable!()
+            };
+            let asked = MarkerEdit::Place(Marker { kind: kind.into(), ..marker });
+            assert_eq!(judge(&terrain, &asked), Ok(()), "the palette offers {kind}");
+        }
+    }
+
     /// Every way a placement can be refused, side by side.
     ///
     /// Together rather than one test each, because the point is the *set*: each of these is a
