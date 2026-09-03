@@ -27,7 +27,7 @@ use noob_tube_shared::vehicle::{self, Controls, Driven, Driving, SEATED_FEET, Ve
 use noob_tube_shared::lag_compensation::HitboxHistory;
 use noob_tube_shared::shooting::{self, Health, ShotFired};
 use noob_tube_shared::sculpt::{self, GroundPatched, PendingEdits};
-use noob_tube_shared::terrain::{self, Ground, MapList, TerrainBaseline};
+use noob_tube_shared::terrain::{self, Ground, MapList, Marker, TerrainBaseline};
 use noob_tube_shared::protocol::{EffectsChannel, ProtocolPlugin, TerrainChannel};
 use noob_tube_shared::types::Authored;
 use noob_tube_shared::PLACEHOLDER_PRIVATE_KEY;
@@ -69,13 +69,7 @@ fn main() {
         // disagreed, every step near the difference would produce a correction the player sees.
         .add_systems(
             Startup,
-            (
-                start_listening,
-                publish_metadata,
-                level::spawn_level,
-                spawn_props,
-                spawn_vehicles,
-            ),
+            (start_listening, publish_metadata, level::spawn_level, spawn_props),
         )
         // The ground, whenever the map appears or changes. PreUpdate rather than Startup so that
         // the server and a client build it through the same path — see `level::build_the_ground`,
@@ -98,6 +92,7 @@ fn main() {
                 markers::serve_marker_edits,
                 level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
                 level::build_the_props.run_if(resource_exists_and_changed::<Ground>),
+                restock_the_fleet.run_if(resource_exists_and_changed::<Ground>),
                 sculpt::apply_due_edits.run_if(resource_exists::<Ground>),
                 sculpt::lift_with_the_ground::<()>.run_if(resource_exists::<Ground>),
                 sculpt::lift_bodies_with_the_ground::<()>.run_if(resource_exists::<Ground>),
@@ -580,7 +575,7 @@ struct Loose;
 
 /// On a vehicle: who is driving it. Server-side; a client works it out from what it predicts.
 #[derive(Component, Clone, Copy)]
-struct Driver(Entity);
+pub(crate) struct Driver(pub Entity);
 
 /// On a player: the connection they came in on.
 ///
@@ -875,7 +870,16 @@ fn carry_drivers(
     }
 }
 
-/// Startup: puts one vehicle in the world.
+/// Which marker a vehicle came off, so the fleet can be compared with the map.
+///
+/// The id rather than the position, because that is what a marker is identified by everywhere else
+/// — an author who drags a vehicle spawn ten metres has not made a different spawn, and a vehicle
+/// somebody has driven away is nowhere near the marker it came from. Handles are never reused, so
+/// a match here means *this* vehicle is that marker's.
+#[derive(Component, Clone, Copy)]
+struct FromMarker(u32);
+
+/// One vehicle, standing where its marker says.
 ///
 /// Replicated and interpolated by everyone, predicted by nobody — for now. There is no driver, so
 /// there is no input to predict from, and a body nobody steers is exactly the case where the server
@@ -886,28 +890,100 @@ fn carry_drivers(
 /// the past, so a shot at it has to be tested against the past. The hitbox itself needs no new code
 /// — a vehicle offers its collider and its pose, and `resolve_shots` never asks what kind of thing
 /// it hit.
-fn spawn_vehicles(ground: Res<Ground>, net: Res<NetConfig>, mut commands: Commands) {
+fn park_a_vehicle(commands: &mut Commands, ground: &terrain::Terrain, marker: &Marker, history: usize) {
     let kind = VehicleKind::Buggy;
-    let starts: Vec<_> = ground.0.markers_of(level::VEHICLE).cloned().collect();
-    for (index, marker) in starts.iter().enumerate() {
-        // Standing at its own ride height, so it starts resting on its springs rather than dropping
-        // on to them in front of everyone at the start of the round. The ride height is the
-        // vehicle's own and deliberately not the marker's: a marker says where, and how high above
-        // the ground — how tall the thing that lands there is, is the thing's business.
-        let at = marker.where_it_stands(&ground.0) + Vec3::Y * kind.spec().ride_height();
-        commands.spawn((
-            Name::from(format!("Buggy {index}")),
-            Authored,
-            vehicle::vehicle_body(kind, at, marker.rotation),
-            HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
-            Replicate::to_clients(NetworkTarget::All),
-            // Nobody predicts an empty vehicle: with no input behind it there is nothing to predict
-            // from. `use_vehicles` moves this the moment somebody climbs in, per vehicle, so a
-            // second one changes nothing here.
-            InterpolationTarget::to_clients(NetworkTarget::All),
-        ));
+    // Standing at its own ride height, so it starts resting on its springs rather than dropping on
+    // to them in front of everyone at the start of the round. The ride height is the vehicle's own
+    // and deliberately not the marker's: a marker says where, and how high above the ground — how
+    // tall the thing that lands there is, is the thing's business.
+    let at = marker.where_it_stands(ground) + Vec3::Y * kind.spec().ride_height();
+    commands.spawn((
+        // Named by the marker rather than by a counter, so the name says which spawn this is
+        // however many have come and gone since.
+        Name::from(format!("Buggy {}", marker.id)),
+        Authored,
+        FromMarker(marker.id),
+        vehicle::vehicle_body(kind, at, marker.rotation),
+        HitboxHistory::with_capacity(history),
+        Replicate::to_clients(NetworkTarget::All),
+        // Nobody predicts an empty vehicle: with no input behind it there is nothing to predict
+        // from. `use_vehicles` moves this the moment somebody climbs in, per vehicle, so a second
+        // one changes nothing here.
+        InterpolationTarget::to_clients(NetworkTarget::All),
+    ));
+}
+
+/// PreUpdate: makes the fleet the one the map asks for.
+///
+/// The bug this fixes: the fleet was built once, at startup, from whatever map the server booted
+/// on. Load a map with a vehicle spawn the old one did not have and nothing appeared on it — the
+/// switch moved the vehicles it already had and had no way to make another. A marker placed while
+/// playing had the same nothing happen, for the same reason.
+///
+/// So the fleet is *derived* from the markers instead of being built once: a vehicle marker with no
+/// vehicle on it gets one, and a vehicle whose marker has gone goes with it. Both directions are
+/// needed and it is the same one rule — "the map says what stands on it" — read forwards and
+/// backwards.
+///
+/// It runs whenever the map changes, which includes every sculpt tick, and does nothing on almost
+/// all of them: the work is one pass over a handful of markers against a handful of vehicles.
+///
+/// What it deliberately does *not* do is move a vehicle that already exists. A vehicle is a body
+/// somebody may be driving, and its marker is where it *started*, not where it belongs — hauling it
+/// back every time anybody placed a crate would be a rule nobody could play around. Putting the
+/// fleet back at the start of a round is [`maps::place_everything`]'s business, and it does that by
+/// clearing the fleet so this rebuilds it.
+fn restock_the_fleet(
+    ground: Res<Ground>,
+    net: Res<NetConfig>,
+    standing: Query<(Entity, &FromMarker, Option<&Driver>)>,
+    mut commands: Commands,
+) {
+    let wanted: Vec<&Marker> = ground.0.markers_of(level::VEHICLE).collect();
+    let (to_park, to_clear) = fleet_orders(
+        &wanted.iter().map(|marker| marker.id).collect::<Vec<_>>(),
+        &standing.iter().map(|(_, from, _)| from.0).collect::<Vec<_>>(),
+    );
+
+    for (vehicle, from, driver) in standing.iter() {
+        if !to_clear.contains(&from.0) {
+            continue;
+        }
+        // A driver must come out with the vehicle, or they keep a `Driving` that points at nothing
+        // and can never get out of it again. The same failure `on_player_gone` exists for, met from
+        // the other end.
+        if let Some(driver) = driver {
+            commands.entity(driver.0).remove::<Driving>();
+        }
+        commands.entity(vehicle).despawn();
     }
-    info!("{} vehicles", starts.len());
+    for marker in &wanted {
+        if to_park.contains(&marker.id) {
+            park_a_vehicle(&mut commands, &ground.0, marker, net.lag_comp_history_ticks.into());
+        }
+    }
+    // Said out loud only when the fleet actually changed, because the condition this runs under is
+    // "the map changed", which is true on every tick of a sculpt.
+    if !to_park.is_empty() || !to_clear.is_empty() {
+        info!(
+            "{} vehicles ({} new, {} gone)",
+            wanted.len(),
+            to_park.len(),
+            to_clear.len()
+        );
+    }
+}
+
+/// Which markers want a vehicle, and which vehicles have outlived their marker.
+///
+/// A set difference each way, by marker id. Its own function because it is the part of the rule
+/// worth testing on its own: putting a replicated body into a world takes half of lightyear's
+/// plumbing with it, and a test that stood all of that up to watch two lists be compared would be
+/// testing lightyear.
+fn fleet_orders(wanted: &[u32], standing: &[u32]) -> (Vec<u32>, Vec<u32>) {
+    let park = wanted.iter().filter(|id| !standing.contains(id)).copied().collect();
+    let clear = standing.iter().filter(|id| !wanted.contains(id)).copied().collect();
+    (park, clear)
 }
 
 /// FixedUpdate: advances every prop to where this tick says it should be.
@@ -1157,6 +1233,56 @@ mod tests {
             vehicle.get::<Controls>().map(|controls| controls.throttle),
             Some(0.0),
             "the wheel was left where the driver left it",
+        );
+    }
+
+    /// The fleet is what the map asks for, in both directions.
+    ///
+    /// This is the bug in one assertion each way. The fleet used to be built once, at startup, from
+    /// whatever map the server booted on: a vehicle spawn that appeared later — by loading a map
+    /// with one more, or by placing a marker — got no vehicle, because nothing anywhere could make
+    /// one after startup. Removing a spawn had the mirror of the same problem.
+    #[test]
+    fn the_fleet_follows_the_markers_both_ways() {
+        // Nothing on the map yet: every marker wants a vehicle.
+        assert_eq!(fleet_orders(&[4, 7], &[]), (vec![4, 7], vec![]));
+        // The steady state, which is what almost every call is: nothing to do either way.
+        assert_eq!(fleet_orders(&[4, 7], &[4, 7]), (vec![], vec![]));
+        // One spawn added and one taken away, at once — a map switch, in other words.
+        assert_eq!(fleet_orders(&[4, 9], &[4, 7]), (vec![9], vec![7]));
+    }
+
+    /// A vehicle whose marker has gone takes its driver out of the seat on the way.
+    ///
+    /// The failure otherwise is the one `on_player_gone` was written for, met from the other end: a
+    /// player left holding a `Driving` that points at nothing walks nowhere, drives nothing, and
+    /// cannot get out, because getting out means finding the vehicle whose driver you are.
+    #[test]
+    fn a_vehicle_that_loses_its_marker_lets_its_driver_out() {
+        use bevy::ecs::system::RunSystemOnce;
+        use noob_tube_shared::terrain::default_terrain;
+
+        let mut bare = default_terrain();
+        bare.markers.retain(|marker| marker.kind != level::VEHICLE);
+
+        let mut app = App::new();
+        app.insert_resource(NetConfig::default());
+        app.insert_resource(Ground(bare));
+        let driver = app.world_mut().spawn((Player { peer: 3 }, Driving)).id();
+        let vehicle = app
+            .world_mut()
+            .spawn((VehicleKind::Buggy, FromMarker(9), Driver(driver), Driven(3)))
+            .id();
+
+        app.world_mut().run_system_once(restock_the_fleet).expect("the fleet is stocked");
+
+        assert!(
+            app.world().get_entity(vehicle).is_err(),
+            "a vehicle outlived the marker it came from",
+        );
+        assert!(
+            !app.world().entity(driver).contains::<Driving>(),
+            "the driver kept a seat in a vehicle that no longer exists, and can never get out",
         );
     }
 

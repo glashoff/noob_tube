@@ -23,7 +23,6 @@
 //! and an accidental save over a good map with a half-finished experiment is unrecoverable without
 //! versioning this project does not have.
 
-use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
 use lightyear::prelude::*;
 use noob_tube_shared::level;
@@ -33,7 +32,7 @@ use noob_tube_shared::terrain::{
     CREATE_INTERVAL, Ground, MapFault, MapList, MapRequest, Manifest, Terrain,
     TerrainBaseline, VERSION, sanitise_name,
 };
-use noob_tube_shared::vehicle::{VehicleKind, Wheels};
+use noob_tube_shared::vehicle::{Driving, VehicleKind};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -187,7 +186,8 @@ fn erase(dir: &Path, name: &str) -> std::io::Result<()> {
 type Switching<'w, 's> = (
     ResMut<'w, Ground>,
     Query<'w, 's, &'static mut PlayerState>,
-    Query<'w, 's, (&'static VehicleKind, &'static mut Position, &'static mut Rotation, &'static mut LinearVelocity, &'static mut AngularVelocity, &'static mut Wheels)>,
+    Query<'w, 's, (Entity, Option<&'static crate::Driver>), With<VehicleKind>>,
+    Commands<'w, 's>,
 );
 
 /// PreUpdate: does what clients have asked of the maps, and tells them what came of it.
@@ -346,14 +346,23 @@ fn act(
 /// Puts everybody back on the ground after a map switch.
 ///
 /// A new map is flat at the middle of its own range, which is only y = 0 if the author chose a
-/// symmetric one — so the round starts again rather than leaving players and vehicles hanging in
-/// the air or buried. It reads the heights directly rather than casting rays, because the collider
-/// for the new map does not exist yet: it is built from the resource this has just written, one
-/// system later.
+/// symmetric one — so the round starts again rather than leaving players hanging in the air or
+/// buried. It reads the heights directly rather than casting rays, because the collider for the new
+/// map does not exist yet: it is built from the resource this has just written, one system later.
 ///
-/// The ramp and the crates are left where they are, and that is the rule rather than an oversight.
-/// Terrain is the ground; everything built is somebody else's geometry, and neither system asks the
-/// other what it contains. Markers, in step eight, are what will let them move with the map.
+/// The vehicles are **taken off the map rather than moved onto it**, and
+/// [`restock_the_fleet`](crate::restock_the_fleet) builds the new map's fleet from its own markers
+/// one system later. Moving them was the older answer and it could only move the ones that already
+/// existed: a map with a vehicle spawn the last one did not have got nothing on it, which is the
+/// bug this pair of changes is about. Clearing the fleet also settles what to do with a map that
+/// has no vehicle spawn — nothing stands on it, which is what the map said.
+///
+/// A driver in a seat that is about to go loses their [`Driving`](noob_tube_shared::vehicle::Driving)
+/// with it. They are being put back on a spawn point in the same breath, so there is nothing to
+/// place; what there is to avoid is a player left holding a seat in a vehicle that no longer exists.
+///
+/// The ramp is left where it is, and that is the rule rather than an oversight. Terrain is the
+/// ground; built geometry is somebody else's, and neither system asks the other what it contains.
 fn place_everything(world: &mut Switching) {
     let ground = world.0.0.clone();
     for (index, mut state) in world.1.iter_mut().enumerate() {
@@ -362,23 +371,11 @@ fn place_everything(world: &mut Switching) {
             ..PlayerState::default()
         };
     }
-    // Collected first: the query below borrows the world, and the markers are read from the same
-    // ground the players were just placed on.
-    let starts: Vec<_> = ground.markers_of(level::VEHICLE).cloned().collect();
-    for (index, (kind, mut position, mut rotation, mut velocity, mut spin, mut wheels)) in
-        world.2.iter_mut().enumerate()
-    {
-        // A map with no vehicle start leaves the vehicles where they were rather than stacking
-        // them at the origin: there is nowhere on this map they belong, and the middle of it is
-        // not a better answer than the last place somebody parked.
-        let Some(marker) = starts.get(index % starts.len().max(1)) else {
-            continue;
-        };
-        position.0 = marker.where_it_stands(&ground) + Vec3::Y * kind.spec().ride_height();
-        rotation.0 = marker.rotation;
-        velocity.0 = Vec3::ZERO;
-        spin.0 = Vec3::ZERO;
-        *wheels = Wheels::default();
+    for (vehicle, driver) in world.2.iter() {
+        if let Some(driver) = driver {
+            world.3.entity(driver.0).remove::<Driving>();
+        }
+        world.3.entity(vehicle).despawn();
     }
 }
 
