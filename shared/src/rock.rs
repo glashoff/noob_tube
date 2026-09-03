@@ -35,47 +35,64 @@ use bevy::prelude::*;
 
 use crate::terrain::Terrain;
 
-/// Samples between the places a rock may stand — one candidate every four metres of grid.
-const STRIDE: u32 = 4;
+/// Samples between the blocks — one every three metres of grid.
+const STRIDE: u32 = 3;
 
-/// How many candidates on fully steep ground get a rock. Scaled by steepness, so a face is a heap
-/// and the shoulder above it is a scatter.
-const DENSITY: f32 = 0.55;
-
-/// How steep a candidate has to be before it is considered at all.
+/// How steep a place has to be before rock stands there.
 ///
-/// Below the crossing rock is painted at, because a boulder at the foot of a face is exactly where
-/// boulders end up and the paint should not be what decides that.
-const NEEDS: f32 = 0.25;
+/// Below the crossing rock is *painted* at, because the foot of a face is exactly where broken
+/// stone ends up and the paint should not be what decides that.
+const NEEDS: f32 = 0.18;
 
-/// The half-size of a rock, in metres, from smallest to largest.
+/// How far a block reaches, as a multiple of the distance to the next one.
 ///
-/// The largest is a little over the drawn mesh's own two-metre triangle, which is the point: this
-/// is the detail the height field is too coarse to hold, so it has no reason to be smaller than a
-/// sample and every reason to be bigger.
-const SMALLEST: f32 = 0.9;
-const LARGEST: f32 = 3.4;
+/// **This is the whole difference between a wall and a wall with pebbles on it.** A block that does
+/// not reach its neighbour can only be an ornament, sitting on a surface that is still visibly the
+/// smooth one underneath — which is exactly what the first version of this looked like.
+///
+/// The number to clear is not one. A corner sits at `0.57735` of `size` along each axis, so a block
+/// is `1.155 * size` across, and two neighbours a step apart touch at `REACH = 0.866`. The half
+/// step of jitter that keeps them off the lattice can pull a pair `1.5` steps apart, and the size
+/// each one drew can be as little as four fifths — so the worst pair on a face still parts, and at
+/// `1.3` the ordinary pair overlaps by a third of itself.
+///
+/// The worst pair parting is not a defect. A crevice is what a rock face has; what it must not have
+/// is a window onto the smooth slope underneath, and
+/// `a_face_is_covered_rather_than_decorated` is what actually settles that — measured over the
+/// built-in map rather than argued from these numbers.
+const REACH: f32 = 1.3;
 
-/// How far a rock is pushed into the slope, as a fraction of its size.
+/// The share of that reach a block has at the gentlest ground it appears on.
 ///
-/// Deep enough that it reads as outcrop rather than as a ball dropped on a hill, and that the gap
-/// between the hull and a slope the hull does not follow stays under it.
-const SUNK: f32 = 0.45;
+/// Not a probability. Thinning them out at the edge would leave gaps in the middle too — the same
+/// coin decides both — so instead every place gets a block and the ones on gentle ground are small.
+/// A face is solid, its shoulder is a scatter of stones, and the two are one rule.
+const SMALLEST: f32 = 0.34;
+
+/// How far a block is pushed into the slope, as a fraction of its size.
+///
+/// Deep enough that the row below shows through the gaps between the row above rather than a strip
+/// of smooth ground doing it.
+const SUNK: f32 = 0.5;
 
 /// How far a corner may be pulled back towards the middle.
 ///
-/// This is what makes a rock angular rather than round. Every corner is pulled in by its own
-/// amount, so the faces between them come out at unequal angles and no two rocks share a profile.
-/// At zero every rock is the same tidy solid; near one they collapse into splinters.
-const RAGGED: f32 = 0.5;
+/// This is what makes a block angular rather than a box. Every corner is pulled in by its own
+/// amount, so the faces meet at unequal angles and no two blocks share a profile. At zero they are
+/// all the same tidy solid; near one they collapse into splinters.
+const RAGGED: f32 = 0.55;
 
-/// The fourteen directions a rock's corners are pushed out along: a cube's eight, and the six axes.
+/// The eight directions a block's corners are pushed out along: a cube's, and nothing else.
+///
+/// **Eight rather than a rounder set, and the reason is the bill.** A face carries thousands of
+/// these now that they cover it, and eight corners hull into twelve triangles where fourteen make
+/// something nearer thirty. It is also the better shape: a cube pulled about at its corners is a
+/// slab with flat sides and hard edges, which is what fractured stone is, while adding the six
+/// axes rounds the middle of every face back out again.
 ///
 /// Written out rather than normalised at run time — `0.57735026` is one over root three, and there
-/// is no reason to take that square root a thousand times a map. The eight corners are what give
-/// the flat, slabby faces; the six axes push the middles of those faces out and turn a cube into
-/// something with more angles than a box has.
-const OUT: [Vec3; 14] = [
+/// is no reason to take that square root ten thousand times a map.
+const OUT: [Vec3; 8] = [
     Vec3::new(0.57735026, 0.57735026, 0.57735026),
     Vec3::new(-0.57735026, 0.57735026, 0.57735026),
     Vec3::new(0.57735026, -0.57735026, 0.57735026),
@@ -84,12 +101,6 @@ const OUT: [Vec3; 14] = [
     Vec3::new(-0.57735026, 0.57735026, -0.57735026),
     Vec3::new(0.57735026, -0.57735026, -0.57735026),
     Vec3::new(-0.57735026, -0.57735026, -0.57735026),
-    Vec3::X,
-    Vec3::NEG_X,
-    Vec3::Y,
-    Vec3::NEG_Y,
-    Vec3::Z,
-    Vec3::NEG_Z,
 ];
 
 /// One rock: where it stands, how it is turned, and the corners it is made of.
@@ -130,16 +141,20 @@ fn hash(ix: u32, iz: u32, slot: u32) -> f32 {
 /// The rock standing at one candidate sample, if one does.
 fn rock_at(terrain: &Terrain, ix: u32, iz: u32) -> Option<Rock> {
     let steep = terrain.steepness_at(ix, iz);
-    if steep < NEEDS || hash(ix, iz, 0) > DENSITY * steep {
+    if steep < NEEDS {
         return None;
     }
     let grid = terrain.grid;
     let here = grid.world_of(ix, iz);
-    // Anywhere in the cell this candidate speaks for, so the rocks do not stand in rows.
-    let spread = STRIDE as f32 * grid.spacing;
-    let x = here.x + (hash(ix, iz, 1) - 0.5) * spread;
-    let z = here.y + (hash(ix, iz, 2) - 0.5) * spread;
-    let size = SMALLEST + hash(ix, iz, 3) * (LARGEST - SMALLEST);
+    let step = STRIDE as f32 * grid.spacing;
+    // Off the lattice point, but by less than half the gap: enough that they do not stand in rows,
+    // not so much that two crowd into one place and leave a hole where one of them came from.
+    let x = here.x + (hash(ix, iz, 1) - 0.5) * step * 0.5;
+    let z = here.y + (hash(ix, iz, 2) - 0.5) * step * 0.5;
+    // Full size on a face, a fraction of it where the ground has only just become steep, and a
+    // spread of a third either way so that no two neighbours are the same block.
+    let grown = SMALLEST + (1.0 - SMALLEST) * steep;
+    let size = step * REACH * grown * (0.8 + 0.4 * hash(ix, iz, 3));
 
     // A quaternion out of four hashes. `try_normalize` rather than `normalize` because four values
     // that all land near zero is not impossible, only unlikely, and the unlikely one would be a
@@ -283,6 +298,53 @@ mod tests {
         }
     }
 
+    /// A face comes out covered, not sprinkled.
+    ///
+    /// This is the claim the whole shape of the thing rests on, and the one the first version got
+    /// wrong: blocks smaller than the gap between them are ornaments on a surface that is still
+    /// visibly the smooth one underneath. Measured rather than argued — every steep place on the
+    /// map, counted against the footprints of the blocks standing near it.
+    ///
+    /// A footprint is the hull's bounding box, which overstates a rotated block a little. That is
+    /// why the bar is not one: what it is really watching for is the number falling back towards
+    /// the half it was at when a coin decided which places got a block at all.
+    #[test]
+    fn a_face_is_covered_rather_than_decorated() {
+        let terrain = default_terrain();
+        let grid = terrain.grid;
+        let (wide, deep) = terrain.grid.tiles();
+        let mut prints: Vec<(Vec3, Vec3)> = Vec::new();
+        for tz in 0..deep {
+            for tx in 0..wide {
+                for rock in rocks_of_tile(&terrain, tx, tz) {
+                    let hull = rock.collider().expect("a solid");
+                    let box_of = hull.aabb(rock.at, rock.facing);
+                    prints.push((box_of.min, box_of.max));
+                }
+            }
+        }
+        let (mut steep, mut under) = (0usize, 0usize);
+        for iz in (0..grid.nz).step_by(STRIDE as usize) {
+            for ix in (0..grid.nx).step_by(STRIDE as usize) {
+                // The ground a player would call a face, rather than the shoulder either side of
+                // it: what is meant to be solid is the part that is fully rock.
+                if terrain.steepness_at(ix, iz) < 0.95 {
+                    continue;
+                }
+                steep += 1;
+                let here = grid.world_of(ix, iz);
+                if prints.iter().any(|(low, high)| {
+                    here.x >= low.x && here.x <= high.x && here.y >= low.z && here.y <= high.z
+                }) {
+                    under += 1;
+                }
+            }
+        }
+        let covered = under as f32 / steep as f32;
+        println!("{under} of {steep} places on a face are under a block ({:.0}%)", covered * 100.0);
+        assert!(covered > 0.9, "only {:.0}% of a face is covered", covered * 100.0);
+    }
+
     /// Every rock closes into a solid, and the solid is the size it was asked to be.
     ///
     /// A hull of fourteen points can fail — pull enough corners in and they fall onto a plane, and
@@ -305,7 +367,11 @@ mod tests {
                 }
             }
         }
-        assert!(largest <= 2.0 * LARGEST, "a rock came out {largest:.2} m across");
+        // A corner sits at 0.57735 of `size`, `size` is at most `step * REACH * 1.2`, and the
+        // squash only ever shrinks. Anything past that is a block that grew in a way nothing here
+        // asked it to.
+        let bound = 1.1547 * 3.0 * REACH * 1.2;
+        assert!(largest <= bound, "a rock came out {largest:.2} m across, past {bound:.2}");
         println!("{count} rocks, largest {largest:.2} m across");
     }
 }
