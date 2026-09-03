@@ -43,6 +43,11 @@
 # question, so no per-file decision: the whole directory is in.
 !/assets/shaders/
 
+# ambientCG packs, as `tools/fetch-ground-textures` leaves them. Two gigabytes of zip for the
+# hundred-odd Ground materials, kept rather than thrown away because the site sells nothing smaller
+# than a whole pack: unpacking a normal map later has to be a local decision, not another download.
+/downloads/
+
 # Input traces. Written beside the binary by default, one a session, and none of them belongs in
 # the history — a recording is evidence about one afternoon, not a fact about the game.
 /*.jsonl

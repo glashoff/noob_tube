@@ -3,27 +3,32 @@
 
 The three textures this repository ships were picked by hand out of ambientCG's Ground category,
 which has grown to well over a hundred packs. Picking the fourth means looking at them, and looking
-at them means having them on disk — but a hundred colour maps is a third of a gigabyte, which is
-not something to commit to keep one of them. So this brings them down instead, and `.gitignore`
-leaves them where they land: `/assets/textures/*` is ignored, and each file that ships is let
-through by name.
+at them means having them on disk — but a hundred packs is two gigabytes, which is not something to
+commit in order to keep one of them. So this brings them down instead, and `.gitignore` leaves them
+where they land: `/downloads/` for the packs, and `/assets/textures/*` for what is unpacked out of
+them, where each file that ships is let through by name.
 
     tools/fetch-ground-textures                    # 1K PNG colour maps, the whole Ground category
     tools/fetch-ground-textures --dry-run          # what it would fetch, and how much traffic
-    tools/fetch-ground-textures --category Grass   # any other ambientCG category
     tools/fetch-ground-textures --maps all         # normal, roughness, displacement, AO as well
+    tools/fetch-ground-textures --category Grass   # any other ambientCG category
 
 The defaults are chosen so a fetched pack is usable without renaming anything:
 `client/src/ground_material.rs` builds its path as `textures/{name}_Color.png`, so a 1K PNG colour
 map landing as `assets/textures/Ground108_1K-PNG_Color.png` is reached by putting `Ground108_1K-PNG`
-in a layer's `texture` field and nothing else. Colour maps only, for the same reason the shipped
-ones are colour only: the ground mesh carries no tangents, so a normal map has nothing to hang on.
+in a layer's `texture` field and nothing else.
 
-ambientCG serves whole packs and nothing smaller — one zip per resolution, every map inside it — so
-a colour map costs the download of its five siblings whether they are kept or not. That is where
-the traffic goes, and why this runs slowly on purpose: a pause between packs, a backoff when the
-server says to slow down, and every pack already on disk skipped, so an interrupted run continues
-where it stopped rather than starting over.
+**The zips are kept, and that is the point of the layout.** ambientCG serves whole packs and
+nothing smaller — one zip per resolution, every map inside it — so a colour map costs the download
+of its five siblings whether they are unpacked or not. Throwing them away would mean paying that
+traffic again the day the ground mesh grows tangents and a normal map becomes worth having. With
+the packs in `downloads/`, changing your mind is local: a second run with `--maps all` re-opens what
+is already on disk, downloads nothing, and does not pause. `--no-packs` discards them if the disk
+matters more than the choice.
+
+Downloading runs slowly on purpose: a jittered pause between packs, a backoff when the server says
+to slow down, and any pack already in `downloads/` taken from there, so an interrupted run
+continues where it stopped rather than starting over.
 
 Everything on ambientCG is CC0 — a public-domain dedication, no conditions. Should one of these end
 up shipping, add it to `.gitignore` by name and give it an entry in `assets/CREDITS.md` beside the
@@ -37,7 +42,6 @@ import json
 import random
 import shutil
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -61,20 +65,29 @@ def die(message: str) -> None:
     sys.exit(1)
 
 
-def get(url: str, tries: int = 5) -> bytes:
+def get(url: str, into: Path | None = None, tries: int = 5) -> bytes:
     """One GET, retried with a growing wait — and a longer one when the server asks for it.
 
-    A run of this is a hundred-odd requests for ten megabytes each, which is exactly the shape of
-    traffic a rate limiter exists to stop. 429 and 503 are the polite forms of "slow down" and are
-    answered by waiting, honouring `Retry-After` when it is sent; a 404 is a fact about the file
-    and is not retried.
+    A run of this is a hundred-odd requests for twenty megabytes each, which is exactly the shape
+    of traffic a rate limiter exists to stop. 429 and 503 are the polite forms of "slow down" and
+    are answered by waiting, honouring `Retry-After` when it is sent; a 404 is a fact about the
+    file and is not retried.
+
+    With `into`, the body is streamed to that path through a `.part` beside it, so a download cut
+    off halfway leaves nothing that a later run could mistake for a whole pack.
     """
     wait = 30.0
     for attempt in range(1, tries + 1):
         request = urllib.request.Request(url, headers={"User-Agent": AGENT})
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
-                return response.read()
+                if into is None:
+                    return response.read()
+                part = into.with_suffix(into.suffix + ".part")
+                with open(part, "wb") as sink:
+                    shutil.copyfileobj(response, sink)
+                part.replace(into)
+                return b""
         except urllib.error.HTTPError as error:
             if error.code in (404, 410):
                 raise
@@ -88,7 +101,7 @@ def get(url: str, tries: int = 5) -> bytes:
             pause, reason = wait, str(error)
         if attempt == tries:
             raise RuntimeError(f"{reason}, and that was attempt {tries} of {tries}")
-        print(f"    {reason} — waiting {pause:.0f}s, then attempt {attempt + 1} of {tries}")
+        print(f"\n    {reason} — waiting {pause:.0f}s, then attempt {attempt + 1} of {tries}")
         time.sleep(pause)
         wait *= 2
     raise AssertionError("unreachable")
@@ -135,6 +148,27 @@ def zip_for(asset: dict, attribute: str) -> dict | None:
     return next(walk(asset.get("downloadFolders") or {}), None)
 
 
+def unpack(archive: Path, name: str, wanted: list[str], suffix: str, out: Path) -> list[Path]:
+    """Copies the wanted maps out of one pack, and says which it could not find.
+
+    A pack that does not hold a map it was fetched for is worth saying out loud rather than passing
+    over: it means ambientCG's naming has moved, and every later run would go looking again.
+    """
+    written = []
+    with zipfile.ZipFile(archive) as pack:
+        inside = {Path(n).name: n for n in pack.namelist()}
+        for wants in wanted:
+            member = inside.get(f"{name}_{wants}.{suffix}")
+            if member is None:
+                print(f"\n    no {wants} map inside — pack holds: {', '.join(sorted(inside))}")
+                continue
+            target = out / f"{name}_{wants}.{suffix}"
+            with pack.open(member) as source, open(target, "wb") as sink:
+                shutil.copyfileobj(source, sink)
+            written.append(target)
+    return written
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -147,16 +181,29 @@ def main() -> None:
     parser.add_argument(
         "--maps",
         default="Color",
-        help="comma-separated maps to keep, or `all` (default: Color; known: " + ", ".join(MAPS) + ")",
+        help="comma-separated maps to unpack, or `all` (default: Color; known: "
+        + ", ".join(MAPS)
+        + "). Re-running with more costs no traffic while the packs are kept.",
     )
     parser.add_argument(
         "--out", type=Path, default=ROOT / "assets" / "textures", help="default: assets/textures"
     )
     parser.add_argument(
+        "--packs",
+        type=Path,
+        default=ROOT / "downloads" / "ambientcg",
+        help="where the zips are kept (default: downloads/ambientcg)",
+    )
+    parser.add_argument(
+        "--no-packs",
+        action="store_true",
+        help="delete each zip once unpacked — then a later --maps costs the traffic again",
+    )
+    parser.add_argument(
         "--pause",
         type=float,
         default=8.0,
-        help="seconds between packs, jittered by a quarter either way (default: 8)",
+        help="seconds between downloads, jittered by a quarter either way (default: 8)",
     )
     parser.add_argument("--limit", type=int, help="stop after this many packs (the most popular)")
     parser.add_argument(
@@ -182,76 +229,83 @@ def main() -> None:
         assets = assets[: args.limit]
 
     args.out.mkdir(parents=True, exist_ok=True)
+    if not args.no_packs:
+        args.packs.mkdir(parents=True, exist_ok=True)
 
-    # Three buckets, decided before anything is downloaded so the plan can be printed: packs to
-    # fetch, packs already on disk, and packs the site has nothing to give at this attribute.
-    todo, have, missing = [], [], []
+    # Four buckets, decided before anything is downloaded so the plan can be printed. The pack on
+    # disk is what "already have it" means, not the unpacked maps: a run that keeps its zips has to
+    # end with every zip there, or the next `--maps` would have to pay for the ones it is missing.
+    # A zip of the wrong size is a download that was cut off before `.part` existed, and is fetched
+    # again.
+    fetch, local, done, missing = [], [], [], []
     for asset in assets:
         name = f"{asset['assetId']}_{attribute}"
-        if all((args.out / f"{name}_{m}.{suffix}").exists() for m in wanted):
-            have.append(name)
-            continue
+        unpacked = all((args.out / f"{name}_{m}.{suffix}").exists() for m in wanted)
         download = zip_for(asset, attribute)
-        (todo if download else missing).append((asset["assetId"], name, download))
+        if download is None:
+            missing.append(asset["assetId"])
+            continue
+        archive = args.packs / download["fileName"]
+        held = archive.exists() and archive.stat().st_size == download["size"]
+        if held or (args.no_packs and unpacked):
+            (done if unpacked else local).append((name, archive, download))
+        else:
+            fetch.append((name, archive, download))
 
-    traffic = sum(d["size"] for _, _, d in todo)
+    traffic = sum(d["size"] for _, _, d in fetch)
     print(
-        f"{len(assets)} materials: {len(todo)} to fetch ({traffic / 1e9:.2f} GB of zips), "
-        f"{len(have)} already here, {len(missing)} with no {attribute} download."
+        f"{len(assets)} materials: {len(fetch)} to download ({traffic / 1e9:.2f} GB), "
+        f"{len(local)} to unpack from {args.packs.name}/, {len(done)} already done, "
+        f"{len(missing)} with no {attribute} download."
     )
     if missing:
-        print("  no download: " + ", ".join(i for i, _, _ in missing))
+        print("  no download: " + ", ".join(missing))
     if args.dry_run:
-        for _, name, download in todo:
+        for name, _, download in fetch:
             print(f"  {name}  {download['size'] / 1e6:6.1f} MB")
         return
-    if not todo:
+    if not fetch and not local:
         print("Nothing to do.")
         return
-    minutes = (len(todo) * args.pause) / 60
-    print(f"Keeping {', '.join(wanted)} from each. At least {minutes:.0f} min of pauses alone.\n")
+    print(f"Keeping {', '.join(wanted)} out of each.")
+    if fetch:
+        print(f"At least {(len(fetch) * args.pause) / 60:.0f} min of pauses alone.")
+    print()
 
-    kept = 0
-    with tempfile.TemporaryDirectory(prefix="ambientcg-") as scratch:
-        archive = Path(scratch) / "pack.zip"
-        for index, (asset_id, name, download) in enumerate(todo, 1):
-            head = f"[{index}/{len(todo)}] {name}  ({download['size'] / 1e6:.1f} MB)"
-            print(head, end="", flush=True)
+    kept, todo = 0, local + fetch
+    for index, (name, archive, download) in enumerate(todo, 1):
+        held = archive.exists() and archive.stat().st_size == download["size"]
+        head = f"[{index}/{len(todo)}] {name}"
+        if held:
+            print(f"{head}  (have the pack)", end="", flush=True)
+        else:
+            print(f"{head}  ({download['size'] / 1e6:.1f} MB)", end="", flush=True)
             try:
-                archive.write_bytes(get(download["downloadLink"]))
+                get(download["downloadLink"], into=archive)
             except (urllib.error.HTTPError, RuntimeError) as error:
                 print(f"\n    skipped: {error}")
                 continue
 
-            # A pack whose zip does not hold the maps it was fetched for is worth saying out loud
-            # rather than counting as done: it means ambientCG's naming has moved, and the next run
-            # would fetch it all over again.
-            written = []
-            with zipfile.ZipFile(archive) as pack:
-                inside = {Path(n).name: n for n in pack.namelist()}
-                for wants in wanted:
-                    member = inside.get(f"{name}_{wants}.{suffix}")
-                    if member is None:
-                        print(f"\n    no {wants} map inside — pack holds: {', '.join(sorted(inside))}")
-                        continue
-                    target = args.out / f"{name}_{wants}.{suffix}"
-                    with pack.open(member) as source, open(target, "wb") as sink:
-                        shutil.copyfileobj(source, sink)
-                    written.append(target)
-            kept += len(written)
-            print(f" -> {', '.join(p.name for p in written) or 'nothing'}")
+        written = unpack(archive, name, wanted, suffix, args.out)
+        kept += len(written)
+        print(f" -> {', '.join(p.name for p in written) or 'nothing'}")
+        if args.no_packs:
+            archive.unlink(missing_ok=True)
 
-            if index < len(todo):
-                time.sleep(args.pause * random.uniform(0.75, 1.25))
+        if not held and index < len(todo):
+            time.sleep(args.pause * random.uniform(0.75, 1.25))
 
     print(f"\nDone: {kept} files in {args.out}.")
-    print("All CC0. A layer reads one by name, without the _Color suffix, e.g. "
-          f"texture = \"{todo[0][1]}\".")
+    if not args.no_packs:
+        on_disk = sum(p.stat().st_size for p in args.packs.glob("*.zip"))
+        print(f"The packs stay in {args.packs} ({on_disk / 1e9:.2f} GB) — re-run with --maps all to "
+              f"unpack more of\nwhat is in them without downloading anything again.")
+    print(f"All CC0. A layer reads one by name, without the map suffix: texture = \"{todo[0][0]}\".")
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nStopped. Re-run to continue: what is on disk is skipped.")
+        print("\nStopped. Re-run to continue: the packs already downloaded are not fetched again.")
         sys.exit(130)
