@@ -19,6 +19,7 @@
 //! [`WaterLevel`](noob_tube_shared::terrain::WaterLevel).
 
 use bevy::asset::uuid_handle;
+use bevy::light::NotShadowCaster;
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
@@ -180,6 +181,17 @@ fn dress_the_water(
         WaterSurfaceMesh,
         Mesh3d(meshes.add(mesh)),
         MeshMaterial3d(WATER_MATERIAL),
+        // **The sea casts no shadow.** A shadow map has no idea this surface is transparent: it
+        // records the sheet as solid, so the lake shadowed its own bed, and the fringe quads —
+        // the ones the fragment shader cuts away because the ground under them is dry — shadowed
+        // the beach beyond the waterline. What that looked like is black steps along the shore, at
+        // the resolution of the water grid rather than of anything in the world.
+        //
+        // Casting nothing rather than casting it properly: the depth already darkens the water
+        // from clear shallows to dark deeps, which is the same effect a physical shadow would be
+        // reaching for, and it is per-pixel where a shadow map is per-texel. The sheet still
+        // *receives* shadows, so a hill across the water still falls on it.
+        NotShadowCaster,
         Transform::IDENTITY,
         ChildOf(*root),
     ));
@@ -301,6 +313,32 @@ mod tests {
         map.heights.fill(sample);
         map.water_y = level;
         map
+    }
+
+    /// The sea is drawn, and it casts nothing.
+    ///
+    /// A shadow map cannot tell that a surface is transparent: before this, the sheet was recorded
+    /// as solid, so the lake shadowed its own bed and the fringe quads — the ones the fragment
+    /// shader cuts away where the ground under them is dry — laid black steps along the beach at
+    /// the resolution of the water grid. It is one component in a spawn and there is nothing about
+    /// leaving it out that would fail to compile or fail to draw, so it is worth a test.
+    #[test]
+    fn the_sea_is_spawned_and_casts_no_shadow() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .insert_resource(Ground::of(default_terrain()))
+            .add_systems(Update, dress_the_water);
+        app.world_mut().spawn((crate::world::LevelRoot, Transform::IDENTITY));
+        app.update();
+
+        let mut water = app.world_mut().query_filtered::<Entity, With<WaterSurfaceMesh>>();
+        let drawn: Vec<Entity> = water.iter(app.world()).collect();
+        assert_eq!(drawn.len(), 1, "the built-in map's lake was not drawn");
+        assert!(
+            app.world().get::<NotShadowCaster>(drawn[0]).is_some(),
+            "the sea is casting a shadow onto its own bed",
+        );
     }
 
     /// A dry map has no surface at all, and neither has one whose water is under the ground.
