@@ -16,7 +16,8 @@
 //!
 //! **A cell at a time, near the camera only.** A 512 m map at eight tufts a square metre is two
 //! million tufts, which is not a thing to build. The lawn is grown in eight-metre cells within
-//! [`REACH`] of the eye, a couple of cells a frame, and each one is a single mesh with its tufts
+//! [`Setting::GrassReach`](crate::settings::Setting) of the eye, a couple of cells a frame, and
+//! each one is a single mesh with its tufts
 //! baked into it — so a cell is one draw call rather than five hundred entities, and the ECS never
 //! sees a blade of grass.
 
@@ -28,6 +29,8 @@ use bevy::prelude::*;
 use noob_tube_shared::sculpt::GroundPatched;
 use noob_tube_shared::terrain::{Ground, Installed, Terrain, slope_degrees};
 use noob_tube_shared::types::Authored;
+
+use crate::settings::Settings;
 
 pub struct GrassPlugin;
 
@@ -50,25 +53,30 @@ impl Plugin for GrassPlugin {
 /// lawn is a few dozen meshes rather than a few thousand.
 const CELL: f32 = 8.0;
 
-/// How far from the eye grass is grown, in metres, and where it fades out.
+/// How far from the eye grass is grown when nobody has said otherwise, in metres, and where it
+/// fades out.
 ///
 /// The fade is chosen by how *big* a tuft still is when it goes rather than by how far away it is.
 /// Past twenty-odd metres a tuft covers a pixel or two, and a lawn of one-pixel specks does not
 /// read as grass — it reads as noise crawling over the ground, which is worse than the ground's own
 /// texture, which is a photograph of grass. So it ends while the blades are still blades.
 ///
-/// [`REACH`] has to sit outside the end of the fade, or the fade would be cut off by a cell
-/// appearing and the point of it lost.
+/// The fade is a fraction of the reach rather than a distance of its own, which is what keeps it
+/// inside it: a fade that ended past where cells stop being grown would be cut off by a cell
+/// appearing, and the point of it lost.
 ///
-/// **This is the knob that costs.** The lawn is triangles, and how many of them there are goes with
-/// the square of this: sixteen metres against twenty-six is a third of the grass. It was set by
-/// measuring — twenty-six metres at eight tufts a square metre was 18 frames a second on the
-/// machine this game is aimed at, against 45 with no grass at all — and by then spending what was
-/// left on density instead of distance, because a hole in the lawn at your feet is what you see and
-/// a lawn that ends twenty-six metres away is not.
-const REACH: f32 = 16.0;
-const FADE_FROM: f32 = 11.0;
-const FADE_TO: f32 = 15.0;
+/// **This is the knob that costs**, which is why it is the one that became a setting. The lawn is
+/// triangles, and how many of them there are goes with the square of the reach: sixteen metres
+/// against twenty-six is a third of the grass. Sixteen was measured — twenty-six at eight tufts a
+/// square metre was 18 frames a second on the machine this game is aimed at, against 45 with no
+/// grass at all — and what was saved went into density rather than distance, because a hole in the
+/// lawn at your feet is what you see and a lawn that ends twenty-six metres away is not.
+/// **This is a setting**, and one of the first, because it is the knob that costs — see
+/// [`Setting::GrassReach`](crate::settings::Setting). What is here is where it starts, and the
+/// fade is derived from wherever it ends up: the last third of the reach, so that turning the
+/// distance down moves the fade with it rather than leaving it stranded past the edge of the lawn.
+const FADE_FROM: f32 = 0.70;
+const FADE_TO: f32 = 0.95;
 
 /// How many cells may be grown in one frame.
 ///
@@ -122,6 +130,8 @@ struct Lawn {
     grown: HashMap<(i32, i32), Option<Entity>>,
     /// The map the cells above were grown from, so that a different one takes them with it.
     map: Option<Installed>,
+    /// And the distance they were grown for, for the same reason.
+    reach: f32,
 }
 
 /// Update: throws the whole lawn away when the map underneath it is a different one.
@@ -129,11 +139,21 @@ struct Lawn {
 /// A map switch changes every height on the field, so there is nothing to keep: this is the one
 /// case where growing it all again is right. [`Installed`] is what tells a new map from an edited
 /// one — see the note on it, and `build_the_ground` for the same question asked about colliders.
-fn turn_over_the_lawn(ground: Res<Ground>, mut lawn: ResMut<Lawn>, mut commands: Commands) {
-    if lawn.map == Some(ground.installed()) {
+fn turn_over_the_lawn(
+    ground: Res<Ground>,
+    settings: Res<Settings>,
+    mut lawn: ResMut<Lawn>,
+    mut commands: Commands,
+) {
+    // The reach as well as the map, because the fade is baked into each cell when it is spawned:
+    // a lawn grown for twenty-six metres and then asked for eight would keep fading where it used
+    // to, which is past where it now ends. Cheaper than it looks — the cells regrow two a frame,
+    // and a setting is changed once and then not again.
+    if lawn.map == Some(ground.installed()) && lawn.reach == settings.grass_reach {
         return;
     }
     lawn.map = Some(ground.installed());
+    lawn.reach = settings.grass_reach;
     for (_, entity) in lawn.grown.drain() {
         if let Some(entity) = entity {
             commands.entity(entity).despawn();
@@ -182,6 +202,7 @@ fn mow_what_moved(
 /// before the one at the edge of sight.
 fn grow_the_lawn(
     ground: Res<Ground>,
+    settings: Res<Settings>,
     camera: Option<Single<&GlobalTransform, With<Camera3d>>>,
     root: Single<Entity, With<crate::world::LevelRoot>>,
     mut lawn: ResMut<Lawn>,
@@ -192,11 +213,12 @@ fn grow_the_lawn(
         return;
     };
     let eye = camera.translation();
+    let reach = settings.grass_reach;
 
     // Gone from under your feet: a cell is thrown away as soon as it is out of reach, which is
     // past the end of the fade, so nothing ever vanishes while it can still be seen.
     lawn.grown.retain(|cell, entity| {
-        let keep = flat_distance(centre(*cell), eye) <= REACH + CELL;
+        let keep = flat_distance(centre(*cell), eye) <= reach + CELL;
         if !keep && let Some(entity) = entity {
             commands.entity(*entity).despawn();
         }
@@ -204,7 +226,7 @@ fn grow_the_lawn(
     });
 
     let mut wanted: Vec<((i32, i32), f32)> = Vec::new();
-    let span = (REACH / CELL).ceil() as i32;
+    let span = (reach / CELL).ceil() as i32;
     let (here_x, here_z) = ((eye.x / CELL).floor() as i32, (eye.z / CELL).floor() as i32);
     for cz in here_z - span..=here_z + span {
         for cx in here_x - span..=here_x + span {
@@ -212,7 +234,7 @@ fn grow_the_lawn(
                 continue;
             }
             let away = flat_distance(centre((cx, cz)), eye);
-            if away <= REACH {
+            if away <= reach {
                 wanted.push(((cx, cz), away));
             }
         }
@@ -249,7 +271,7 @@ fn grow_the_lawn(
                     // through the hill.
                     VisibilityRange {
                         start_margin: 0.0..0.0,
-                        end_margin: FADE_FROM..FADE_TO,
+                        end_margin: (reach * FADE_FROM)..(reach * FADE_TO),
                         use_aabb: false,
                     },
                     ChildOf(*root),

@@ -17,6 +17,7 @@ mod recording;
 mod remote_players;
 mod placing;
 mod sculpting;
+mod settings;
 mod shot_effects;
 mod vehicle;
 mod water;
@@ -69,7 +70,7 @@ fn main() {
         .add_plugins((bot::BotPlugin, map_menu::MapMenuPlugin, placing::PlacingPlugin,
             sculpting::SculptingPlugin, hotbar::HotbarPlugin,
                       ground_material::GroundMaterialPlugin, recording::RecordingPlugin,
-                      water::WaterPlugin, grass::GrassPlugin))
+                      water::WaterPlugin, grass::GrassPlugin, settings::SettingsPlugin))
         .add_plugins(client::ClientPlugins {
             tick_duration: net.tick_duration(),
         })

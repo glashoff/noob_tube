@@ -24,13 +24,15 @@
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
-use bevy::ui::ScrollPosition;
+use bevy::ui::{RelativeCursorPosition, ScrollPosition};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use lightyear::prelude::{MessageReceiver, MessageSender, MessageSystems};
 use noob_tube_shared::protocol::TerrainChannel;
 use noob_tube_shared::terrain::{
     Grid, MAX_BASELINE_BYTES, MapList, MapRequest, sanitise_name,
 };
+
+use crate::settings::{Setting, Settings};
 
 /// How the dialog is drawn.
 const FONT_SIZE: f32 = 15.0;
@@ -39,6 +41,9 @@ const PADDING: f32 = 20.0;
 const DIALOG_WIDTH: f32 = 460.0;
 /// How many rows the list shows before it starts scrolling under the selection.
 const VISIBLE_ROWS: f32 = 14.0;
+/// How wide the bar of a slider is. Wide enough that a drag has somewhere to go, narrow enough
+/// that the value beside it is still on the same line.
+const SLIDER_WIDTH: f32 = 180.0;
 
 pub struct MapMenuPlugin;
 
@@ -70,6 +75,7 @@ pub enum Page {
     #[default]
     Main,
     Map,
+    Settings,
     New,
     Load,
     SaveAs,
@@ -84,6 +90,7 @@ impl Page {
         match self {
             Page::Main => "NOOB TUBE",
             Page::Map => "MAP",
+            Page::Settings => "SETTINGS",
             Page::New => "NEW MAP",
             Page::Load => "LOAD MAP",
             Page::SaveAs => "SAVE MAP AS",
@@ -95,7 +102,7 @@ impl Page {
     fn parent(self) -> Option<Page> {
         match self {
             Page::Main => None,
-            Page::Map => Some(Page::Main),
+            Page::Map | Page::Settings => Some(Page::Main),
             Page::New | Page::Load | Page::SaveAs | Page::Delete => Some(Page::Map),
             Page::Confirm => Some(Page::Delete),
         }
@@ -137,7 +144,7 @@ enum Action {
 }
 
 /// One line of a page.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Row {
     /// A command.
     Do(Action, &'static str),
@@ -145,6 +152,9 @@ enum Row {
     Field(usize, &'static str),
     /// A map to load, by its index into the server's list.
     Map(usize),
+    /// A number to slide, which is the whole of what a setting is. See
+    /// [`Setting`](crate::settings::Setting), which is where every question about one is answered.
+    Slide(Setting),
 }
 
 /// The menu, and everything it is showing.
@@ -211,7 +221,13 @@ impl MapMenu {
             Page::Main => vec![
                 Row::Do(Action::Resume, "Resume"),
                 Row::Do(Action::Go(Page::Map), "Map"),
+                Row::Do(Action::Go(Page::Settings), "Settings"),
             ],
+            Page::Settings => Setting::ALL
+                .iter()
+                .map(|setting| Row::Slide(*setting))
+                .chain([Row::Do(Action::Back, "Back")])
+                .collect(),
             Page::Map => vec![
                 Row::Do(Action::Go(Page::New), "New map"),
                 Row::Do(Action::Go(Page::Load), "Load map"),
@@ -333,7 +349,10 @@ impl MapMenu {
     /// Does whatever the selected row does. Returns what the server has to be told, if anything.
     fn activate(&mut self) -> Option<MapRequest> {
         match self.row(self.selected)? {
-            Row::Field(..) => None,
+            // A slider is worked with the arrows, the wheel or a drag — there is nothing for
+            // Enter to *do* to a number, and a row that swallowed it would be a row where the key
+            // that means "yes" everywhere else means nothing here.
+            Row::Field(..) | Row::Slide(_) => None,
             Row::Map(index) => {
                 let name = self.known.maps.get(index)?.clone();
                 if self.page == Page::Delete {
@@ -411,6 +430,18 @@ struct RowList;
 /// One row, by its index into the page.
 #[derive(Component)]
 struct MenuRow(usize);
+
+/// The bar of a slider row: the thing a pointer drags.
+///
+/// A node rather than a bar drawn out of characters, and that is not decoration. A slider made of
+/// hashes can be read and cannot be *taken hold of* — where the pointer is inside it is the whole
+/// interaction, and `RelativeCursorPosition` answers that about a node and about nothing else.
+#[derive(Component)]
+struct SliderTrack(Setting);
+
+/// The filled part of one, whose width is the value.
+#[derive(Component)]
+struct SliderFill(Setting);
 
 /// Everything under the rows: what the form adds up to, and what the server said about it.
 #[derive(Component)]
@@ -539,8 +570,15 @@ fn operate(
     mut typed: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    wheel: Res<bevy::input::mouse::AccumulatedMouseScroll>,
     rows: Query<(&MenuRow, &Interaction)>,
+    tracks: Query<(&SliderTrack, &RelativeCursorPosition)>,
     mut menu: ResMut<MapMenu>,
+    mut settings: ResMut<Settings>,
+    // Which slider the pointer has hold of, if it has hold of one. Local rather than a field on
+    // the menu because it lasts exactly as long as a button is down: it is the drag, not a state
+    // of the dialog.
+    mut dragging: Local<Option<Setting>>,
     cursor: Option<Single<&mut CursorOptions, With<PrimaryWindow>>>,
     sender: Option<Single<&mut MessageSender<MapRequest>>>,
 ) {
@@ -565,9 +603,35 @@ fn operate(
     let mut ask: Option<MapRequest> = None;
     let mut resume = false;
 
+    // A slider the pointer has taken hold of, before anything else looks at the mouse. The grab is
+    // on the press and lasts until the button comes up, which is what lets a drag run off the end
+    // of a 180-pixel bar and keep working — the alternative is a slider that lets go the moment the
+    // pointer strays six pixels above it.
+    if !mouse.pressed(MouseButton::Left) {
+        *dragging = None;
+    } else if mouse.just_pressed(MouseButton::Left) {
+        *dragging = tracks
+            .iter()
+            .find(|(_, place)| place.cursor_over)
+            .map(|(track, _)| track.0);
+    }
+    if let Some(setting) = *dragging
+        && let Some((_, place)) = tracks.iter().find(|(track, _)| track.0 == setting)
+        && let Some(at) = place.normalized
+    {
+        let (low, high, _) = setting.range();
+        setting.set(&mut settings, low + at.x.clamp(0.0, 1.0) * (high - low));
+    }
+
     // The pointer first, so a click and a keypress in the same frame agree about the row: hovering
     // moves the selection, and Enter and a click then mean the same thing.
     for (row, interaction) in rows.iter() {
+        // …except while a slider is being dragged, when the row under the pointer is not what the
+        // hand is on: a drag that wandered up a line would otherwise move the selection off the
+        // very thing it is moving.
+        if dragging.is_some() {
+            break;
+        }
         match interaction {
             Interaction::Hovered => menu.selected = row.0,
             Interaction::Pressed => {
@@ -583,6 +647,16 @@ fn operate(
         }
     }
 
+    // The wheel, on whichever slider is selected. Free to mean this because the row list scrolls
+    // itself to keep the selection in view rather than following the wheel.
+    if wheel.delta.y != 0.0
+        && let Some(Row::Slide(setting)) = menu.row(menu.selected)
+    {
+        let (_, _, step) = setting.range();
+        let moved = setting.read(&settings) + step * wheel.delta.y.signum();
+        setting.set(&mut settings, moved);
+    }
+
     let held = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     for event in typed.read() {
         if event.state != ButtonState::Pressed {
@@ -596,6 +670,15 @@ fn operate(
         match event.key_code {
             KeyCode::ArrowDown => menu.step(true),
             KeyCode::ArrowUp => menu.step(false),
+            // Across rather than down, which is the one thing a slider needs the keyboard to do.
+            KeyCode::ArrowLeft | KeyCode::ArrowRight => {
+                if let Some(Row::Slide(setting)) = menu.row(menu.selected) {
+                    let (_, _, step) = setting.range();
+                    let way = if event.key_code == KeyCode::ArrowRight { 1.0 } else { -1.0 };
+                    let moved = setting.read(&settings) + step * way;
+                    setting.set(&mut settings, moved);
+                }
+            }
             KeyCode::Tab => {
                 let back = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
                 menu.step(!back);
@@ -667,7 +750,11 @@ fn rebuild(
 
     let list = list.into_inner();
     commands.entity(list).despawn_related::<Children>();
-    for index in 0..rows.len() {
+    for (index, row) in rows.iter().enumerate() {
+        let slider = match row {
+            Row::Slide(setting) => Some(*setting),
+            _ => None,
+        };
         commands.entity(list).with_children(|list| {
             list.spawn((
                 MenuRow(index),
@@ -678,18 +765,44 @@ fn rebuild(
                     align_items: AlignItems::Center,
                     justify_content: JustifyContent::SpaceBetween,
                     padding: UiRect::horizontal(Val::Px(8.0)),
+                    column_gap: Val::Px(10.0),
                     ..default()
                 },
                 BackgroundColor(Color::NONE),
             ))
             .with_children(|row| {
-                for _ in 0..2 {
+                // Label, then the bar if this row has one, then the value. `paint` writes the
+                // first child and the last and steps over whatever is between them, which is what
+                // lets a slider row and a plain one be painted by the same loop.
+                row.spawn((
+                    Text::new(String::new()),
+                    TextFont { font_size: bevy::text::FontSize::Px(FONT_SIZE), ..default() },
+                    TextColor(Color::WHITE),
+                ));
+                if let Some(setting) = slider {
                     row.spawn((
-                        Text::new(String::new()),
-                        TextFont { font_size: bevy::text::FontSize::Px(FONT_SIZE), ..default() },
-                        TextColor(Color::WHITE),
-                    ));
+                        SliderTrack(setting),
+                        RelativeCursorPosition::default(),
+                        Node {
+                            width: Val::Px(SLIDER_WIDTH),
+                            height: Val::Px(6.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.5, 0.55, 0.6, 0.35)),
+                    ))
+                    .with_children(|track| {
+                        track.spawn((
+                            SliderFill(setting),
+                            Node { width: Val::Percent(0.0), height: Val::Percent(100.0), ..default() },
+                            BackgroundColor(Color::srgb(0.55, 0.72, 0.95)),
+                        ));
+                    });
                 }
+                row.spawn((
+                    Text::new(String::new()),
+                    TextFont { font_size: bevy::text::FontSize::Px(FONT_SIZE), ..default() },
+                    TextColor(Color::WHITE),
+                ));
             });
         });
     }
@@ -717,11 +830,13 @@ type RowTexts<'w, 's> = Query<
 /// [`rebuild`] this same frame, and there is no change flag on an entity that did not exist yet.
 fn paint(
     menu: Res<MapMenu>,
+    settings: Res<Settings>,
     dialog: Option<Single<&mut Visibility, With<Dialog>>>,
     mut headings: Titles,
     mut list: Query<&mut ScrollPosition, With<RowList>>,
     mut rows: Query<(&MenuRow, &Children, &mut BackgroundColor)>,
     mut texts: RowTexts,
+    mut fills: Query<(&SliderFill, &mut Node)>,
 ) {
     if let Some(dialog) = dialog {
         *dialog.into_inner() =
@@ -748,11 +863,12 @@ fn paint(
         let chosen = row.0 == menu.selected;
         background.0 =
             if chosen { Color::srgba(0.35, 0.45, 0.6, 0.55) } else { Color::NONE };
-        let (label, value) = describe(&menu, what, chosen);
+        let (label, value) = describe(&menu, &settings, what, chosen);
+        let last = children.len().saturating_sub(1);
         for (slot, child) in children.iter().enumerate() {
             let Ok((mut text, mut colour)) = texts.get_mut(child) else { continue };
             match slot {
-                0 => {
+                _ if slot != last => {
                     text.0 = label.clone();
                     colour.0 = if chosen {
                         Color::srgb(1.0, 1.0, 1.0)
@@ -768,6 +884,12 @@ fn paint(
         }
     }
 
+    // The filled part of every slider. A width rather than a colour, because the bar is what says
+    // where in its range a number sits and a number is exactly what a page of settings is short of.
+    for (fill, mut node) in fills.iter_mut() {
+        node.width = Val::Percent(fill.0.fraction(&settings) * 100.0);
+    }
+
     // Keeps the selection inside the window when the list is longer than the box. Rows are a fixed
     // height on purpose: it is what makes this arithmetic rather than a measurement.
     if let Ok(mut scroll) = list.single_mut() {
@@ -778,9 +900,11 @@ fn paint(
 }
 
 /// What a row says on the left and on the right.
-fn describe(menu: &MapMenu, row: &Row, chosen: bool) -> (String, String) {
+fn describe(menu: &MapMenu, settings: &Settings, row: &Row, chosen: bool) -> (String, String) {
     match *row {
-        Row::Do(Action::Go(_), label) => (label.to_string(), "›".to_string()),
+        // A plain angle bracket, not "›": the dialog's font has no glyph for that one and draws
+        // an empty box in its place, which is what every page with a submenu on it was showing.
+        Row::Do(Action::Go(_), label) => (label.to_string(), ">".to_string()),
         Row::Do(_, label) => (label.to_string(), String::new()),
         Row::Field(index, label) => {
             // The caret only where the typing is going, which on a page of six fields is the only
@@ -788,6 +912,10 @@ fn describe(menu: &MapMenu, row: &Row, chosen: bool) -> (String, String) {
             let caret = if chosen { "_" } else { "" };
             (label.to_string(), format!("{}{caret}", menu.values[index]))
         }
+        // The number, in words. The bar between the two is a node rather than text — see
+        // [`SliderTrack`] — because a bar drawn out of hashes can be read and cannot be taken hold
+        // of.
+        Row::Slide(setting) => (setting.label().to_string(), setting.say(settings)),
         Row::Map(index) => {
             let name = menu.known.maps.get(index).cloned().unwrap_or_default();
             let playing = menu.known.current.as_ref() == Some(&name);
@@ -810,6 +938,17 @@ fn footer(menu: &MapMenu) -> String {
     let mut out = match menu.page {
         Page::Main => "Arrows to choose, Enter or a click to take it.".to_string(),
         Page::Map => "Saving is what keeps sculpted ground.".to_string(),
+        // Whichever setting the selection is on, because a page of settings is a page of things
+        // nobody can guess the cost of. The arrows are spelled out for the same reason the map
+        // page spells out Tab: a control nobody can find is a control that is not there.
+        Page::Settings => {
+            let mut out = match menu.row(menu.selected) {
+                Some(Row::Slide(setting)) => setting.note().to_string(),
+                _ => "These are this machine's own. Nothing here reaches the server.".to_string(),
+            };
+            out.push_str("\nLeft and right, or the wheel, or drag the bar.");
+            out
+        }
         Page::New => {
             let mut out = match menu.described() {
                 Ok(grid) => {
@@ -937,6 +1076,10 @@ mod tests {
     fn menu_app() -> App {
         let mut app = App::new();
         app.init_resource::<MapMenu>()
+            // The settings the dialog now shows a page of, and the wheel that slides them. Both
+            // come from plugins the real client adds and a bare test app does not.
+            .init_resource::<Settings>()
+            .init_resource::<bevy::input::mouse::AccumulatedMouseScroll>()
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<ButtonInput<MouseButton>>()
             .add_message::<KeyboardInput>()
@@ -1071,9 +1214,16 @@ mod tests {
     /// player behind a dialog with the pointer released and the game unreachable.
     #[test]
     fn every_page_leads_back_to_the_root() {
-        for page in
-            [Page::Main, Page::Map, Page::New, Page::Load, Page::SaveAs, Page::Delete, Page::Confirm]
-        {
+        for page in [
+            Page::Main,
+            Page::Map,
+            Page::Settings,
+            Page::New,
+            Page::Load,
+            Page::SaveAs,
+            Page::Delete,
+            Page::Confirm,
+        ] {
             let mut at = page;
             for _ in 0..8 {
                 match at.parent() {
@@ -1092,8 +1242,8 @@ mod tests {
         menu.known.maps = vec!["ridge".to_string(), "valley".to_string()];
         menu.known.current = Some("valley".to_string());
 
-        // Main: resume first, map second.
-        assert_eq!(menu.rows().len(), 2);
+        // Main: resume first, then the map page, then the settings.
+        assert_eq!(menu.rows().len(), 3);
         menu.step(true);
         assert_eq!(menu.activate(), None, "opening the map page asked the server for something");
         assert_eq!(menu.page, Page::Map);
@@ -1118,6 +1268,45 @@ mod tests {
         assert_eq!(menu.values[SAVE_AS], "valley");
         menu.selected = 1;
         assert_eq!(menu.activate(), Some(MapRequest::Save { name: "valley".into() }));
+    }
+
+    /// The settings page shows one row per setting and a way back, and every one of them slides.
+    ///
+    /// The claim is about the *list*, not about grass: a setting added to
+    /// [`Setting::ALL`](crate::settings::Setting::ALL) has to appear here with nothing else
+    /// touched, which is the whole reason a setting is declared in one place.
+    #[test]
+    fn every_setting_is_a_row_that_slides() {
+        let mut menu = MapMenu::default();
+        menu.go(Page::Settings);
+        let rows = menu.rows();
+        assert_eq!(rows.len(), Setting::ALL.len() + 1, "a setting is missing from the page");
+        for (index, setting) in Setting::ALL.iter().enumerate() {
+            assert_eq!(rows[index], Row::Slide(*setting));
+        }
+        assert_eq!(rows[Setting::ALL.len()], Row::Do(Action::Back, "Back"));
+    }
+
+    /// A slider is worked from both ends of its range and never leaves it.
+    ///
+    /// The clamp and the step live on the setting rather than in the dialog, and this is what says
+    /// so: turning one down past its floor leaves it on the floor rather than at some number the
+    /// grass would have to defend itself against.
+    #[test]
+    fn a_slider_stays_inside_its_own_range() {
+        let mut settings = Settings::default();
+        for setting in Setting::ALL {
+            let (low, high, step) = setting.range();
+            setting.set(&mut settings, low - 1000.0);
+            assert_eq!(setting.read(&settings), low, "{} went under its floor", setting.label());
+            assert_eq!(setting.fraction(&settings), 0.0);
+            setting.set(&mut settings, high + 1000.0);
+            assert_eq!(setting.read(&settings), high, "{} went over its ceiling", setting.label());
+            assert_eq!(setting.fraction(&settings), 1.0);
+            // And one step down from the top is a step, not a nudge nobody can see.
+            setting.set(&mut settings, high - step);
+            assert!(setting.read(&settings) < high, "{} does not move by its step", setting.label());
+        }
     }
 
     /// Saving a map that has no file asks for a name instead of writing one under a guess.
