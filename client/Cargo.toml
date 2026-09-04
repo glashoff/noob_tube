@@ -16,6 +16,9 @@ lightyear = { workspace = true }
 # nothing has to be written to read one.
 serde = { workspace = true }
 serde_json = { workspace = true }
+# What a player's own settings are written in, the same format `noob_tube.toml` is: a settings file
+# is one somebody may open and edit, and it already comes with the workspace for `shared`.
+toml = { workspace = true }
 # In-process inspector window. Its egui and bevy_egui versions are tied to this exact release,
 # so it moves in lockstep with Bevy just as bevy_remote does.
 bevy-inspector-egui = { version = "0.37", optional = true }

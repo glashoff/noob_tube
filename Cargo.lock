@@ -5861,6 +5861,7 @@ dependencies = [
  "noob_tube_shared",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

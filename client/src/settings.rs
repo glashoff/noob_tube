@@ -14,23 +14,172 @@
 //! machine's picture, and a second player's grass distance is none of this client's business. What
 //! is decided here can never change what a player may stand on — see
 //! [`grass`](crate::grass), which is a picture with no collider in it.
+//!
+//! **They are kept in a file, and the file follows the player rather than the directory.** See
+//! [`settings_path`]. That is the one thing that separates them from `noob_tube.toml`, which is
+//! about a *session* and is read by both binaries and written by neither: these belong to whoever
+//! is at this keyboard, and the game writes them itself whenever the dialog changes one. What comes
+//! back out of the file goes through the same clamp the slider does, because a file can be edited
+//! by hand and can be older than the game reading it.
+
+use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
+
+/// How long the settings have to sit still before they are written.
+///
+/// A slider under the pointer changes the value every frame, and a file written sixty times a
+/// second is a file written for nobody. Long enough that a drag across the whole bar is one write,
+/// short enough that nothing is lost by quitting straight after letting go.
+const WRITE_AFTER: f32 = 0.5;
+
+/// Where the settings are kept when `NOOB_TUBE_SETTINGS` does not say.
+///
+/// Under the player's config directory rather than beside `noob_tube.toml` in the working
+/// directory, and the difference is what the two files are *about*. `noob_tube.toml` describes a
+/// session — both binaries read it, neither writes it, and it belongs to the checkout it sits in.
+/// These are one person's preferences about their own picture, and following them from one
+/// directory to the next is the whole point: a game launched from somewhere else is still their
+/// game.
+///
+/// `NOOB_TUBE_SETTINGS` overrides it, in the same spirit as `NOOB_TUBE_CONFIG` and for a sharper
+/// reason: two clients on one machine share this file otherwise, and the second one to write wins.
+/// A harness, a bot, or an agent testing beside somebody playing wants its own.
+pub fn settings_path() -> PathBuf {
+    if let Some(named) = std::env::var_os("NOOB_TUBE_SETTINGS") {
+        return PathBuf::from(named);
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("noob_tube")
+        .join("settings.toml")
+}
 
 pub struct SettingsPlugin;
 
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
-        app.register_type::<Settings>().init_resource::<Settings>();
+        // Read before the app runs rather than in a Startup system, because the first frame already
+        // uses them: the lawn is grown from `grass_reach` immediately, and a client that started on
+        // the defaults would grow a lawn and throw it away again.
+        let path = settings_path();
+        let said = read_from(&path);
+        app.register_type::<Settings>()
+            .insert_resource(said.clone().unwrap_or_default())
+            .insert_resource(Kept { path, said })
+            .add_systems(Update, keep_the_settings);
     }
+}
+
+/// What is already on disk, so that a launch does not write the file it has just read.
+///
+/// `None` means there was nothing usable there, and the first write will make it — a first run
+/// leaves a settings file behind on purpose, so that it is something a player can find and open
+/// rather than something they have to be told the path of.
+///
+/// A file that would not *parse* counts as kept, holding the defaults the game fell back to. It is
+/// somebody's own text with a mistake in it, and overwriting it the moment they start the game
+/// takes away both the mistake and any chance of seeing what it was. It goes when they change a
+/// setting, which is when they have asked for the file to say something else.
+#[derive(Resource)]
+struct Kept {
+    /// Where the file is. Worked out once, when the plugin is built, rather than on every write:
+    /// the answer cannot change while the game runs, and reading the environment sixty times a
+    /// second to be told the same thing is sixty chances to be told something else.
+    path: PathBuf,
+    /// What it already says, or `None` for a file that is not there yet.
+    said: Option<Settings>,
+}
+
+/// Update: writes the settings once they have stopped changing.
+///
+/// The delay is on the *change*, not on the difference from the file: a slider under the pointer
+/// changes the value every frame, and a deadline pushed forward by every frame that differs from
+/// the file is a deadline that never arrives. That is exactly how the first version of this failed
+/// — silently, since a file that is never written looks the same as one that cannot be.
+fn keep_the_settings(
+    time: Res<Time>,
+    settings: Res<Settings>,
+    mut kept: ResMut<Kept>,
+    mut due: Local<Option<f32>>,
+) {
+    if settings.is_changed() {
+        *due = Some(time.elapsed_secs() + WRITE_AFTER);
+    }
+    let Some(at) = *due else {
+        return;
+    };
+    if time.elapsed_secs() < at {
+        return;
+    }
+    *due = None;
+    // A drag that ended where it started, or the frame the resource was inserted on: changed, and
+    // with nothing to say that the file does not already say.
+    if kept.said.as_ref() == Some(&*settings) {
+        return;
+    }
+    kept.said = Some(settings.clone());
+    let path = kept.path.clone();
+    match write_to(&path, &settings) {
+        // Down at debug: this happens whenever a slider is let go, and a line a player cannot act
+        // on is a line in the way of the ones they can.
+        Ok(()) => debug!("settings written to {}", path.display()),
+        // A warning and no more. Nothing here is worth interrupting a game over — the settings are
+        // in effect either way, they are simply not kept.
+        Err(trouble) => warn!("the settings could not be written to {}: {trouble}", path.display()),
+    }
+}
+
+/// Reads the settings, or `None` when there is no file to read.
+///
+/// The distinction is [`Kept`]'s: `None` is a first run and a file to be made, and anything else is
+/// a file that already exists and is not to be written over until somebody asks for it to be. A
+/// file that will not parse is `Some(defaults)` for that reason, and it is worth a word in the log
+/// — somebody edited it, and would otherwise watch their changes quietly do nothing.
+///
+/// Either way the game starts. Nothing in here is worth refusing to play over.
+fn read_from(path: &Path) -> Option<Settings> {
+    let text = std::fs::read_to_string(path).ok()?;
+    match toml::from_str::<Settings>(&text) {
+        Ok(settings) => Some(settings.tidied()),
+        Err(trouble) => {
+            warn!("{} is not settings I can read ({trouble}); using the defaults", path.display());
+            Some(Settings::default())
+        }
+    }
+}
+
+/// Writes them, making the directory if it is not there yet.
+///
+/// Written beside and moved into place. A rename is atomic where a write is not: a crash, or a
+/// second client writing at the same moment, would otherwise be able to leave half a file where the
+/// settings used to be — and the half-file is what the next run would read.
+fn write_to(path: &Path, settings: &Settings) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = toml::to_string_pretty(settings).map_err(std::io::Error::other)?;
+    let beside = path.with_extension("toml.new");
+    std::fs::write(&beside, text)?;
+    std::fs::rename(&beside, path)
 }
 
 /// Everything a player has set.
 ///
 /// Registered for reflection so it can be read and written over BRP while the game runs, which is
 /// how a setting gets tested from outside without a hand on the mouse.
-#[derive(Resource, Reflect, Clone, Debug)]
+/// `serde(default)` on the whole struct rather than on each field, and that is the difference
+/// between a settings file that survives the next version and one that does not: a field this game
+/// knows and the file does not mention comes from [`Default`], with the value that setting was
+/// designed around, rather than from `f32`'s idea of a default, which is zero and which for
+/// `grass_reach` means "off". A field the *file* has and the game does not is ignored, which is
+/// what lets a setting be taken away without stranding everyone's file.
+#[derive(Resource, Reflect, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[reflect(Resource)]
+#[serde(default)]
 pub struct Settings {
     /// How far from the eye grass is drawn, in metres. Zero is no grass at all.
     pub grass_reach: f32,
@@ -39,6 +188,21 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self { grass_reach: 16.0 }
+    }
+}
+
+impl Settings {
+    /// Puts every value back inside what its own [`Setting`] allows.
+    ///
+    /// Through [`Setting::set`], which is the clamp and the rounding the slider already uses. One
+    /// rule about what a setting may be — not one for the dialog and a second for the file, which
+    /// is how a hand-typed `grass_reach = 5000` becomes a lawn nobody can draw.
+    fn tidied(mut self) -> Self {
+        for setting in Setting::ALL {
+            let value = setting.read(&self);
+            setting.set(&mut self, value);
+        }
+        self
     }
 }
 
@@ -84,8 +248,14 @@ impl Setting {
     /// three chances to be spelled differently.
     pub fn set(self, settings: &mut Settings, value: f32) {
         let (low, high, step) = self.range();
-        let value = (value / step).round() * step;
-        let value = value.clamp(low, high);
+        // A number that is not one cannot be clamped into anything — `f32::clamp` hands NaN
+        // straight back — and one can reach here from a hand-edited file or over BRP. What this
+        // setting was designed around is the honest answer to a value that is not a value.
+        let value = match value.is_finite() {
+            true => value,
+            false => self.read(&Settings::default()),
+        };
+        let value = ((value / step).round() * step).clamp(low, high);
         match self {
             Setting::GrassReach => settings.grass_reach = value,
         }
@@ -119,6 +289,152 @@ impl Setting {
                  than the square of it, but it is still the most expensive thing on the page. Off \
                  is off."
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("noob_tube_{name}_{}.toml", std::process::id()))
+    }
+
+    /// What is written comes back, which is the whole promise of keeping a file at all.
+    #[test]
+    fn settings_survive_being_written_and_read() {
+        let path = scratch("round_trip");
+        let mut settings = Settings::default();
+        Setting::GrassReach.set(&mut settings, 34.0);
+        write_to(&path, &settings).expect("the settings could not be written");
+        assert_eq!(read_from(&path), Some(settings));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file the game has never seen, and one it cannot read, both start the game on the defaults.
+    ///
+    /// The first is every first run there will ever be; the second is somebody who opened the file
+    /// and left a bracket behind, and who should get their game rather than a refusal to start.
+    #[test]
+    fn a_missing_or_broken_file_is_not_a_reason_not_to_play() {
+        assert_eq!(read_from(Path::new("/nowhere/at/all/settings.toml")), None, "a missing file was read");
+
+        let path = scratch("broken");
+        std::fs::write(&path, "grass_reach = [this is not toml").expect("the scratch file");
+        assert_eq!(read_from(&path), Some(Settings::default()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file that says nothing about a setting leaves it at what it was designed around.
+    ///
+    /// This is what `serde(default)` on the struct buys, and it is the whole of how a settings file
+    /// survives a new version: the field added next month is not in anybody's file yet, and the
+    /// value it wants is the one in `Default` and not `f32`'s zero — which for the grass would mean
+    /// every existing player's lawn silently switching off.
+    #[test]
+    fn a_file_from_an_older_game_keeps_the_defaults_it_does_not_mention() {
+        let path = scratch("older");
+        std::fs::write(&path, "# nothing here yet\n").expect("the scratch file");
+        assert_eq!(read_from(&path), Some(Settings::default()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A hand-typed file cannot ask for a setting the dialog would not have allowed.
+    ///
+    /// The file is the one way into these values that does not go through a slider, so it is the
+    /// one way a lawn could be asked for at five kilometres or at a distance that is not a number.
+    /// Both come back inside the range, and by the same rule the slider is held to.
+    #[test]
+    fn a_hand_written_file_is_held_to_the_same_range_as_the_dialog() {
+        let path = scratch("silly");
+        let (low, high, _) = Setting::GrassReach.range();
+
+        std::fs::write(&path, "grass_reach = 5000.0\n").expect("the scratch file");
+        assert_eq!(Setting::GrassReach.read(&read_from(&path).expect("the scratch file is there")), high, "a lawn to the horizon");
+
+        std::fs::write(&path, "grass_reach = -20.0\n").expect("the scratch file");
+        assert_eq!(Setting::GrassReach.read(&read_from(&path).expect("the scratch file is there")), low, "a lawn behind you");
+
+        std::fs::write(&path, "grass_reach = nan\n").expect("the scratch file");
+        assert_eq!(read_from(&path), Some(Settings::default()), "a distance that is not a number");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Changing a setting reaches the file, and only once the changing has stopped.
+    ///
+    /// An app rather than a pair of calls, because what failed here was neither the reading nor the
+    /// writing but the *waiting*: the deadline was pushed forward on every frame whose settings
+    /// differed from the file, and a deadline pushed forward every frame never arrives. Nothing was
+    /// ever written, and that looks exactly like a file that cannot be written — no error, no line
+    /// in the log, no file. The unit tests either side of this one were green throughout.
+    #[test]
+    fn a_changed_setting_reaches_the_file_once_it_has_settled() {
+        use core::time::Duration;
+
+        let path = scratch("settling");
+        let _ = std::fs::remove_file(&path);
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .insert_resource(Settings::default())
+            // As a launch that found a file saying exactly the defaults: there is nothing to write
+            // until something actually changes.
+            .insert_resource(Kept { path: path.clone(), said: Some(Settings::default()) })
+            .add_systems(Update, keep_the_settings);
+
+        let tick = |app: &mut App, seconds: f32| {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_secs_f32(seconds));
+            app.update();
+        };
+
+        tick(&mut app, 0.1);
+        assert!(!path.exists(), "a launch that changed nothing wrote the file anyway");
+
+        Setting::GrassReach.set(&mut app.world_mut().resource_mut::<Settings>(), 30.0);
+        tick(&mut app, WRITE_AFTER * 0.4);
+        assert!(!path.exists(), "the file was written while the slider was still moving");
+
+        // And moving again pushes it out again, which is the whole point of waiting.
+        Setting::GrassReach.set(&mut app.world_mut().resource_mut::<Settings>(), 32.0);
+        tick(&mut app, WRITE_AFTER * 0.8);
+        assert!(!path.exists(), "a second change did not put the write off");
+
+        tick(&mut app, WRITE_AFTER);
+        assert_eq!(
+            read_from(&path).map(|kept| Setting::GrassReach.read(&kept)),
+            Some(32.0),
+            "the settling settings never reached the file",
+        );
+
+        // Settling on what the file already says writes nothing more.
+        let written = std::fs::metadata(&path).expect("the file is there").modified().ok();
+        Setting::GrassReach.set(&mut app.world_mut().resource_mut::<Settings>(), 30.0);
+        Setting::GrassReach.set(&mut app.world_mut().resource_mut::<Settings>(), 32.0);
+        tick(&mut app, WRITE_AFTER * 2.0);
+        assert_eq!(std::fs::metadata(&path).expect("still there").modified().ok(), written);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Where the file lives, and that saying so overrides it.
+    ///
+    /// The override is what lets two clients share a machine without the second one to write
+    /// deciding what the first one's settings are.
+    #[test]
+    fn the_settings_live_under_the_player_and_can_be_pointed_elsewhere() {
+        // SAFETY: single-threaded within this test, and both variables are put back.
+        unsafe {
+            std::env::set_var("NOOB_TUBE_SETTINGS", "/tmp/somewhere/else.toml");
+        }
+        assert_eq!(settings_path(), PathBuf::from("/tmp/somewhere/else.toml"));
+        unsafe {
+            std::env::remove_var("NOOB_TUBE_SETTINGS");
+            std::env::set_var("XDG_CONFIG_HOME", "/home/nobody/.config");
+        }
+        assert_eq!(settings_path(), PathBuf::from("/home/nobody/.config/noob_tube/settings.toml"));
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
         }
     }
 }
