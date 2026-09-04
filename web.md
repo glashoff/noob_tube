@@ -1,7 +1,10 @@
 # Web plan — Noob Tube
 
-Design notes for running the client in a browser. Written 2026-09-04. **Nothing here is built.**
-This is a plan.
+Design notes for running the client in a browser. Written 2026-09-04, and **most of it is built**
+since — the commits from *Speak the transport a browser can speak* onwards. What is still a plan is
+marked where it appears; §4's asset work and §8's deployment are the two large pieces left. Where a
+decision below turned out differently once it met a browser, the section says so rather than being
+quietly rewritten.
 
 The simulation is not the problem. The server stays exactly what it is — a native headless binary —
 and the shared crate already keeps the client from reading anything the server owns: the map arrives
@@ -190,6 +193,19 @@ requirements overlap almost perfectly.
 **The one real gap is Firefox on Linux**, which has had WebTransport since 2023 and still has no
 WebGPU. That is not a hypothetical audience for this project. It is also, for now, a temporary one:
 Mozilla expects to ship it during 2026.
+
+**Measured, and it is closer than it looked.** The ground material asks for 18 sampled textures in
+the fragment stage, and WebGPU only *guarantees* 16 — so a headless Chromium, whose software adapter
+reports exactly the guaranteed minimum, refuses to build the PBR pipeline and the client quits. On
+real hardware there is room (this laptop's Intel UHD offers 32 texture units and the client renders),
+which is why this is a warning rather than a bug report. But 18 against a floor of 16 is not a margin
+anybody chose, and it is the same eight bindings — four colour maps and four packed maps at 101–112 —
+that would sink a WebGL2 build outright.
+
+The fix, when it is wanted, is to make those eight bindings two: one `texture_2d_array` for the
+colour maps and one for the packed maps, built when the layers are loaded. That takes the fragment
+stage to 12, puts a floor-limit device back in range, and is the prerequisite for §3's fallback
+bundle. It is not built.
 
 So: **WebGPU only**, and Chromium is the browser to develop against. If Firefox on Linux is still
 without WebGPU when this ships and somebody actually wants to play there, the fallback is a second
