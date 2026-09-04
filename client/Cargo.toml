@@ -27,8 +27,15 @@ bevy-inspector-egui = { version = "0.37", optional = true }
 bevy_brp_extras = { version = "0.22.5", optional = true }
 
 # The renderer, and it has to be said explicitly: Bevy's default features contain neither `webgpu`
-# nor `webgl2`, so a wasm build with neither draws nothing at all. WebGPU rather than WebGL2 —
-# web.md §3 has the browser table and the one gap it leaves, which is Firefox on Linux.
+# nor `webgl2`, so a wasm build with neither draws nothing at all.
+#
+# **WebGL2, and only WebGL2.** Not a fallback behind WebGPU but the one renderer the browser build
+# has. Two bundles would be two of everything: two builds, two cached Bevy trees,
+# two browsers to test every renderer change in, and a fallback that rots because almost nobody
+# takes it. What WebGL2 costs was measured rather than guessed: no compute shaders and no storage
+# buffers, so SSAO, the atmosphere, order-independent transparency and GPU-driven batching are all
+# out. This game uses none of them. What it buys is every browser that has WebTransport at all,
+# Firefox on Linux included, which WebGPU does not reach.
 # `noob_tube_client server` runs the dedicated server out of this binary, so that one build
 # produces both sides of a local round and they cannot drift apart between two compiles.
 #
@@ -39,7 +46,7 @@ bevy_brp_extras = { version = "0.22.5", optional = true }
 noob_tube_server = { workspace = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-bevy = { workspace = true, features = ["default", "jpeg", "webgpu"] }
+bevy = { workspace = true, features = ["default", "jpeg", "webgl2"] }
 # The browser's side of `platform.rs`: the query parameters that stand in for environment
 # variables, the storage the settings live in, and the clock. Versions pinned to what Bevy and
 # lightyear already pull in — `wasm-bindgen` in particular has to match the CLI that generates the
