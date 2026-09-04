@@ -19,6 +19,7 @@ mod placing;
 mod platform;
 mod sculpting;
 mod settings;
+mod sight;
 mod shot_effects;
 mod vehicle;
 mod water;
@@ -87,7 +88,8 @@ fn main() {
         .add_plugins((bot::BotPlugin, map_menu::MapMenuPlugin, placing::PlacingPlugin,
             sculpting::SculptingPlugin, hotbar::HotbarPlugin,
                       ground_material::GroundMaterialPlugin, recording::RecordingPlugin,
-                      water::WaterPlugin, grass::GrassPlugin, settings::SettingsPlugin))
+                      water::WaterPlugin, grass::GrassPlugin, settings::SettingsPlugin,
+                      sight::SightPlugin))
         .add_plugins(client::ClientPlugins {
             tick_duration: net.tick_duration(),
         })
