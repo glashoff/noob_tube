@@ -239,7 +239,23 @@ impl PlayerState {
             self.velocity.y = JUMP_VELOCITY;
             self.on_ground = false;
         } else if self.on_ground {
-            self.velocity.y = -GROUND_STICK_SPEED;
+            // **Standing does not fall, at all.** Not a slow fall, not a nudge toward the floor —
+            // nothing. A grounded player's height is decided below, by snapping to what the probe
+            // reports, so there is no gap for a downward velocity to close and nothing for it to
+            // do but leak sideways.
+            //
+            // That leak was the bug. Two metres a second of downward stick, meant to keep the
+            // capsule pressed to the floor, met the same sweep that slides a player along a wall,
+            // and on any slope at all the sweep turned most of it into motion *down the hill*:
+            // 35 cm in two seconds on a bank of five degrees, standing perfectly still with the
+            // keys untouched. It was worst where it was least wanted, since the shallower the
+            // slope the more of the stick the surface converts rather than stops.
+            //
+            // What the stick really bought was reach on the way *down* a hill, and the probe has
+            // that on its own: a tick of walking down the steepest walkable slope drops the ground
+            // 8.8 cm against the 11 cm the probe looks through. See
+            // `a_hillside_can_be_walked_down_without_losing_the_ground`.
+            self.velocity.y = 0.0;
         } else {
             self.velocity.y += GRAVITY * dt;
         }
@@ -269,13 +285,15 @@ impl PlayerState {
             self.velocity.y = 0.0;
         }
 
-        // Hold the capsule one skin above the surface while grounded, never on it and never in
-        // it. A sweep leaves it a fraction of a millimetre low each tick and never puts that back,
-        // which compounds into centimetres over a minute of walking, and `standing_does_not_drift_
-        // downward` holds that to account. Snapping to a height the ground probe reports exactly
-        // cannot accumulate at all, whatever the sweep did.
-        if let Some(rest) = footing.filter(|_| self.on_ground) {
-            self.position.y = rest + SKIN;
+        // Hold the capsule where the probe says it belongs — one skin clear of the surface, never
+        // on it and never in it. A sweep leaves it a fraction of a millimetre low each tick and
+        // never puts that back, which compounds into centimetres over a minute of walking, and
+        // `standing_does_not_drift_downward` holds that to account. Snapping to a height the ground
+        // probe reports exactly cannot accumulate at all, whatever the sweep did.
+        //
+        // The skin is `footing_below`'s to add, and on a slope it is not `SKIN` — see there.
+        if let Some(stand) = footing.filter(|_| self.on_ground) {
+            self.position.y = stand;
         }
     }
 
@@ -552,6 +570,76 @@ mod tests {
         let input = PlayerInput { forward: true, ..default_input() };
         let start = PlayerState { position: Vec3::new(0.0, 0.01, 0.0), ..PlayerState::default() };
         run(&mut app, start, input, 128)
+    }
+
+    /// Standing on a hillside is standing, not sliding.
+    ///
+    /// The failure this exists for: a player who let go of the keys on a gentle slope crept
+    /// downhill for as long as they were left there — half a metre a second on a bank of fifteen
+    /// degrees, which over the time it takes to look around is the difference between standing on
+    /// a shore and standing in a lake. Nothing was pushing them: the ground stick, two metres a
+    /// second of downward velocity meant to keep the capsule pressed to the floor, was being
+    /// turned into motion *along* the surface by the same sweep that stops a player walking into a
+    /// wall.
+    ///
+    /// Every walkable angle, because the drift grew with the slope and the limit is where it would
+    /// have been worst. A centimetre over two seconds is the sweep's own noise; half a metre is a
+    /// player leaving.
+    #[test]
+    fn standing_on_a_hillside_is_not_sliding_down_it() {
+        for degrees in [5.0f32, 15.0, 30.0, 45.0] {
+            let mut app = crate::physics::test_support::slope_app(degrees.to_radians());
+            // Dropped on rather than placed: the test starts the feet at the height of a slope
+            // that passes through the origin, which on a hill is inside it. The first tick is the
+            // capsule being put where it belongs, and it is not what this is about — so the drift
+            // is measured from where that leaves it.
+            let start = PlayerState { position: Vec3::new(0.0, 0.01, 0.0), ..PlayerState::default() };
+            let settled = run(&mut app, start, default_input(), 1);
+            let state = run(&mut app, settled, default_input(), 128);
+            let drift = (state.position - settled.position).xz().length();
+            assert!(state.on_ground, "standing still on a {degrees}° slope came off the ground");
+            assert!(
+                drift < 0.005,
+                "standing still on a {degrees}° slope slid {drift:.3} m in two seconds",
+            );
+        }
+    }
+
+    /// And walking *down* one keeps the ground on every single tick, which is what the stick was
+    /// really buying.
+    ///
+    /// The reason it could go rather than be re-aimed: a grounded player's height is decided by the
+    /// probe below and snapped to it, so what has to survive without the stick is the *probe's*
+    /// reach. A tick of walking down the steepest walkable slope drops the ground under the feet by
+    /// 8.6 cm against the 11 cm the probe looks through — and a player who lost it for even one tick
+    /// would stutter between walking and falling the whole way down.
+    ///
+    /// Every tick rather than the last one, because losing the ground and finding it again a tick
+    /// later is exactly the failure and would leave no trace at the end of the run.
+    #[test]
+    fn a_hillside_can_be_walked_down_without_losing_the_ground() {
+        for degrees in [15.0f32, 30.0, 45.0] {
+            let mut app = crate::physics::test_support::slope_app(degrees.to_radians());
+            // The slab climbs toward −Z, so backward is downhill.
+            let input = PlayerInput { backward: true, ..default_input() };
+            let mut state = PlayerState { position: Vec3::new(0.0, 0.01, 0.0), ..PlayerState::default() };
+            let state = ask(&mut app, move |level| {
+                for tick in 0..128 {
+                    state.apply_input(&input, level, DT);
+                    assert!(state.on_ground, "tick {tick} of a {degrees}° descent came off the ground");
+                }
+                state
+            });
+            // Walking down, not falling down. The feet are put where the probe says, so a tick
+            // covers `MAX_SPEED * dt` horizontally and drops by the slope's tangent — where a fall
+            // under gravity would have covered forty metres in the same two seconds.
+            let walked = 2.0 * MAX_SPEED * degrees.to_radians().tan();
+            assert!(
+                (state.position.y + walked).abs() < 1.0,
+                "at {degrees}° the descent was {:.2} m where walking it is {walked:.2} m",
+                state.position.y,
+            );
+        }
     }
 
     /// A hillside is walked up, and a cliff is not. That is the whole of the slope limit as a

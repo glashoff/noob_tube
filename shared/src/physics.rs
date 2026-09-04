@@ -190,13 +190,24 @@ impl Level<'_, '_> {
     /// it. Putting the feet on the surface itself would drive the capsule into the hill for the
     /// next sweep to push back out — visible as a jitter, and the reason this returns a resting
     /// height rather than a ground height.
+    ///
+    /// **And one skin clear of the surface, measured the way the sweep measures it.** The sweep
+    /// keeps `SKIN` *perpendicular* to whatever it touches; this returns a height along *y*. On
+    /// flat ground the two are the same distance and it does not matter. On a slope they are not,
+    /// and a skin added straight up leaves the capsule nearer the hill than the sweep wants it —
+    /// so every tick the sweep pushed it out along the normal and the snap pulled it back down,
+    /// and the pair of them walked a standing player downhill at 13 cm a second on a 45° bank.
+    /// Dividing by `normal.y` is what turns a perpendicular clearance into a vertical one.
+    ///
+    /// The reach is still measured to the resting height itself: how far the probe looks is a
+    /// question about the ground, and the clearance is a question about the capsule.
     pub fn footing_below(&self, feet: Vec3) -> Option<f32> {
         let (ground, normal) = self.ground_below(feet)?;
         if normal.y < WALKABLE_NORMAL_Y {
             return None;
         }
         let rest = ground + slope_lift(normal.y);
-        (feet.y - rest <= GROUND_SNAP_DIST).then_some(rest)
+        (feet.y - rest <= GROUND_SNAP_DIST).then(|| rest + SKIN / normal.y)
     }
 
     /// Height of the ground directly beneath `feet`, searched from a little above and a little
@@ -537,23 +548,32 @@ mod tests {
     ///
     /// Checked against the arithmetic rather than a measured constant, because the arithmetic is
     /// what `slope_lift` claims to be.
+    ///
+    /// **And the skin on top of it is `SKIN / normal.y`, not `SKIN`.** That is the second half of
+    /// the same idea and it is the one that was got wrong: the sweep keeps its skin perpendicular
+    /// to the surface, so a clearance added straight up is short by the slope's own cosine, and
+    /// short by exactly the amount the sweep then spends every tick pushing back out. What that
+    /// cost is in `standing_on_a_hillside_is_not_sliding_down_it`.
     #[test]
     fn the_feet_rest_above_a_slope_by_the_capsules_own_roundness() {
         let angle: f32 = 0.6;
         let mut app = slope_app(angle);
-        let rest = ask(&mut app, |level| level.footing_below(Vec3::new(0.0, 0.01, 0.0)))
+        let stand = ask(&mut app, |level| level.footing_below(Vec3::new(0.0, 0.01, 0.0)))
             .expect("no footing on a 34° slope");
-        let want = slope_lift(angle.cos());
-        assert!((rest - want).abs() < 1e-3, "the feet rest at {rest:.4}, not {want:.4}");
+        let want = slope_lift(angle.cos()) + SKIN / angle.cos();
+        assert!((stand - want).abs() < 1e-3, "the feet stand at {stand:.4}, not {want:.4}");
     }
 
-    /// And on the flat it is zero, which is what keeps this from changing anything that already
-    /// worked.
+    /// And on the flat the lift is zero and the skin is the skin, which is what keeps this from
+    /// changing anything that already worked.
     #[test]
-    fn on_the_flat_the_feet_rest_on_the_ground() {
+    fn on_the_flat_the_feet_rest_one_skin_over_the_ground() {
         let mut app = floor_app();
-        let rest = ask(&mut app, |level| level.footing_below(Vec3::new(0.0, 0.01, 0.0)));
-        assert!(rest.is_some_and(|y| y.abs() < 1e-4), "the feet rest at {rest:?}, not at 0");
+        let stand = ask(&mut app, |level| level.footing_below(Vec3::new(0.0, 0.01, 0.0)));
+        assert!(
+            stand.is_some_and(|y| (y - SKIN).abs() < 1e-4),
+            "the feet stand at {stand:?}, not one skin over 0",
+        );
     }
 
     #[test]

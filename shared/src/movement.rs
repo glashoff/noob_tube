@@ -75,14 +75,16 @@ pub fn slope_lift(normal_y: f32) -> f32 {
 /// The most [`slope_lift`] can return, and so how far below the feet the ground probe has to reach.
 pub const MAX_SLOPE_LIFT: f32 = CAPSULE_RADIUS * (1.0 / WALKABLE_NORMAL_Y - 1.0);
 
-/// Downward speed applied while grounded, instead of gravity.
-///
-/// Gravity accumulates: each tick it drives the capsule further into the floor for the sweep to
-/// cancel, and the fraction the sweep fails to cancel adds up until the player has sunk
-/// centimetres into the ground. A constant bias cannot accumulate, still holds the capsule against
-/// the floor, and pulls it down the last few centimetres after a landing — `is_grounded` reaches
-/// GROUND_SNAP_DIST, so without it the player would hover wherever the ground probe first caught.
-pub const GROUND_STICK_SPEED: f32 = 2.0;
+// There was a `GROUND_STICK_SPEED` here — two metres a second of downward velocity applied while
+// grounded, in place of gravity, to hold the capsule against the floor. It went, because the thing
+// it was holding the capsule against is now decided by the probe rather than by a velocity: a
+// grounded player is snapped to the height `Level::footing_below` reports, so there is no gap left
+// for a stick to close.
+//
+// It was not merely redundant. A downward velocity on a slope meets the same sweep that slides a
+// player along a wall, and the sweep turns most of it into motion *down the hill* — a player
+// standing perfectly still on a five-degree bank crept 35 cm in two seconds. See
+// `player::tests::standing_on_a_hillside_is_not_sliding_down_it`.
 
 /// Camera height above the feet, standing and crouched. Derived from the posed model in `webgame`:
 /// the eyes sit about 40% up from the Head joint toward HeadTop.
