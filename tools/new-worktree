@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# A second checkout of this repository, in its own directory, sharing what must not be copied.
+#
+# Usage:  tools/new-worktree NAME [START-POINT]        (default start point: HEAD)
+#
+# Makes `../<this-checkout>-NAME` a git worktree on a branch NAME — a full working tree with its
+# own files and its own HEAD, backed by the one object store, so a second editor and a second agent
+# can work on a second branch without cloning anything. Git does all of that on its own. What it
+# does not do is the part that costs disk:
+#
+#   target/     47 GB of compiled Bevy, and the reason this script exists. A fresh checkout would
+#               build its own copy, which neither fits on this disk nor is worth the hour. Made a
+#               symlink rather than a `build.target-dir` setting so that every relative `target/…`
+#               path — deploy.sh, the README's `./target/debug/noob_tube_client` — keeps working.
+#
+#   downloads/  two gigabytes of ambientCG zips that `tools/fetch-ground-textures` would otherwise
+#               fetch a second time from a site that sells nothing smaller than a whole pack.
+#
+#   assets/…    every file under assets/ that is not committed: the Mixamo soldier and its clips
+#               from `tools/setup-assets`, the mounted gun, and the ground textures unpacked out of
+#               downloads/. All of them are produced by a tool or a licence decision, none of them
+#               by editing, so pointing at the originals is both cheaper and honest about it.
+#
+# Not shared, deliberately:
+#
+#   maps/       a running server writes here, and two servers writing one directory is a corrupted
+#               map rather than a shared one. A new tree starts on the built-in map. To play in the
+#               same world instead, point one server at the other's:
+#                   NOOB_TUBE_MAPS=<main>/maps cargo run -p noob_tube_server
+#
+#   noob_tube.toml   copied, not linked, because the second session is the one that wants different
+#               numbers — a different port most of all. See the end of this script's output.
+#
+# The one cost of a shared target/: cargo takes a lock on it, so a build in one tree waits for a
+# build in the other ("Blocking waiting for file lock on build directory"). And `target/debug/…`
+# holds whichever tree built last — cargo re-links it on every build, so `cargo build` (or
+# `cargo run`) before running the binary is what keeps you honest about which one you are running.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The main checkout, even when this is run from inside a worktree the script itself made: the
+# common git dir is the one every worktree shares, and it sits in the checkout that owns it.
+main="$(cd "$(dirname "$(git -C "$here" rev-parse --path-format=absolute --git-common-dir)")" && pwd)"
+
+fail() { printf '\n\033[31m%s\033[0m\n\n' "$1" >&2; exit 1; }
+step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
+
+name="${1:-}"
+start="${2:-HEAD}"
+[ -n "$name" ] || fail "Usage: tools/new-worktree NAME [START-POINT]"
+[[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || fail "NAME becomes a branch and a directory: letters, digits, . _ - only."
+
+dest="$(dirname "$main")/$(basename "$main")-$name"
+if [ -e "$dest" ] || [ -L "$dest" ]; then fail "$dest already exists."; fi
+
+step "Worktree $dest on branch $name"
+if git -C "$main" show-ref --verify --quiet "refs/heads/$name"; then
+    # The branch is already there — check it out rather than refusing. Git still refuses if some
+    # other worktree has it checked out, which is the case worth refusing.
+    git -C "$main" worktree add "$dest" "$name"
+else
+    git -C "$main" worktree add -b "$name" "$dest" "$start"
+fi
+
+step "Sharing the build directory and the downloaded assets"
+# `target` first and on its own: it is ignored by name rather than by being untracked, so it never
+# shows up in the list below.
+ln -s "$main/target" "$dest/target"
+printf '  target -> %s\n' "$main/target"
+
+# Every ignored path under assets/ and downloads/, with whole ignored directories collapsed to one
+# entry — `assets/anims/` as itself rather than as its 49 clips.
+while IFS= read -r path; do
+    path="${path%/}"
+    mkdir -p "$dest/$(dirname "$path")"
+    ln -s "$main/$path" "$dest/$path"
+done < <(git -C "$main" ls-files --others --ignored --exclude-standard --directory assets downloads)
+printf '  %s more symlinks under assets/ and downloads/\n' \
+    "$(git -C "$main" ls-files --others --ignored --exclude-standard --directory assets downloads | wc -l)"
+
+step "Local settings"
+if [ -f "$main/noob_tube.toml" ]; then
+    cp "$main/noob_tube.toml" "$dest/noob_tube.toml"
+    printf '  noob_tube.toml copied from the main checkout\n'
+else
+    cp "$main/noob_tube.example.toml" "$dest/noob_tube.toml"
+    printf '  noob_tube.toml started from the example\n'
+fi
+
+cat <<EOF
+
+$(printf '\033[1mReady.\033[0m') Open it with:
+
+    code $dest
+
+Give this tree's session its own ports, so it does not take the other one's:
+
+    NOOB_TUBE_PORT=6100 cargo run -p noob_tube_server
+    NOOB_TUBE_PORT=6100 cargo run -p noob_tube_client       # BRP_EXTRAS_PORT=15720 with --features remote
+
+The metadata endpoint follows the game port, one above it. Both binaries read the variable, and it
+beats whatever noob_tube.toml in this tree says — which is the point of it being a variable.
+EOF

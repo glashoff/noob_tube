@@ -247,6 +247,38 @@ cargo run -p noob_tube_server
 cargo run -p noob_tube_client
 ```
 
+### A second checkout, without a second build
+
+Two branches at once — an editor and an agent on each — wants two working trees, and a second
+`git clone` is the wrong way to get one here. `target/` is 47 GB of compiled Bevy and `downloads/`
+is two more of ambientCG zips; neither fits twice on this disk, and the assets that are not
+committed would have to be produced again by hand.
+
+```bash
+tools/new-worktree spikes          # ../my_bevy_game-spikes, on a new branch `spikes`
+```
+
+A git worktree, so it has its own files and its own HEAD against the one object store, plus
+symlinks for the three things that must not be copied: `target/`, `downloads/`, and every file
+under `assets/` that is not committed — the Mixamo soldier and its clips, the mounted gun, the
+unpacked ground textures. `noob_tube.toml` is copied rather than linked, because the second session
+is the one that wants different numbers.
+
+`target/` is a symlink rather than a `build.target-dir` setting so that every relative path in the
+scripts and in this README keeps working. Sharing it costs two things and they are worth knowing:
+
+- Cargo locks the build directory, so a build in one tree waits for a build in the other. It says
+  so — *Blocking waiting for file lock on build directory* — rather than doing anything surprising.
+- Each tree's own crates are compiled separately (their manifest path is part of the fingerprint,
+  and it is baked into the asset and map roots), but `target/debug/noob_tube_client` is relinked to
+  whichever tree built last. `cargo run`, or a `cargo build` before running the binary, is what
+  keeps that honest.
+
+Maps are **not** shared: a running server writes them, and two servers writing one directory is a
+corrupted map rather than a shared one. A new tree starts on the built-in map; to play in the same
+world, point one server at the other's with `NOOB_TUBE_MAPS=…`. Nor are ports — give the second
+session its own with `NOOB_TUBE_PORT`, or the two sessions are one session.
+
 ---
 
 ## Looking inside a running build
