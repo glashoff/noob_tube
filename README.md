@@ -279,6 +279,19 @@ corrupted map rather than a shared one. A new tree starts on the built-in map; t
 world, point one server at the other's with `NOOB_TUBE_MAPS=…`. Nor are ports — give the second
 session its own with `NOOB_TUBE_PORT`, or the two sessions are one session.
 
+Only ignored files are linked, never a committed one — the Quaternius character beside the Mixamo
+soldier in `assets/characters/` is the picture: everything in the commit is a real file, `swat.glb`
+is the link. So git sees nothing unusual, and the three ways a link could plausibly be walked into
+turn out not to bite:
+
+- **A file that is ignored today gets committed tomorrow.** Git replaces the link with the real
+  file on the next checkout — it never writes *through* one — and the original in the main checkout
+  is untouched. The two copies simply diverge from then on, which is what committing it asked for.
+- **`git clean -xdff` in the linked tree.** Removes the links and not what they point at.
+- **`cargo clean` in the linked tree.** Removes the `target` symlink and reports one file of 117
+  bytes; the shared build directory survives. `ln -s ../<main>/target target` puts it back. In the
+  *main* checkout it does what it says, and then the build is gone for both trees.
+
 ---
 
 ## Looking inside a running build
