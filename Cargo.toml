@@ -56,6 +56,24 @@ opt-level = 1
 # carries its own copy, which is how `target/` reached 113 GB and filled the disk twice.
 debug = "line-tables-only"
 
+# What the browser client is built with, and it is a third profile rather than `release` because
+# the two want opposite things. A native release is optimised for speed on a machine that has
+# already downloaded it; a wasm bundle is downloaded *every time somebody opens the page*, and
+# 165 MB of plain `release` is not a bundle, it is a refusal to load.
+#
+# `opt-level = "s"` costs a few percent of frame time and saves far more than a few percent of size.
+# Fat LTO and a single codegen unit are what actually collapse it: this tree instantiates an
+# enormous number of generics across Bevy, Avian and lightyear, and nothing but whole-program
+# optimisation can see that most of them are dead. `panic = "abort"` is free here — wasm has no
+# unwinding to give up, and the panic hook still prints before it stops.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
 # Dependencies stay optimised in dev builds — physics and networking are unusable otherwise.
 [profile.dev.package."*"]
 opt-level = 3

@@ -2,11 +2,13 @@
 #
 # Builds the browser client into `web/dist`: cargo, then wasm-bindgen, then the page beside them.
 #
-#   ./web/build.sh              release — what you serve, and the only thing worth loading
+#   ./web/build.sh              the `web` profile — what you serve, and the only thing worth loading
 #   ./web/build.sh --debug      the dev profile, for a quick "does it boot" on this machine
 #
-# Release is the default and it is not a preference. A dev-profile wasm build of this tree is over
-# two hundred megabytes, which a browser will compile eventually and nobody will wait for twice.
+# The `web` profile is the default and it is not a preference. A dev-profile wasm build of this tree
+# is over two hundred megabytes, which a browser will compile eventually and nobody will wait for
+# twice; see the profile in the workspace `Cargo.toml` for what it does about that and why plain
+# `release` is not it either.
 #
 # What comes out is a directory of static files, plus one thing that is not static: `net-config`,
 # which the page fetches from its own origin and which has to be proxied to the server's metadata
@@ -17,8 +19,8 @@ set -euo pipefail
 
 cd "$(dirname "$(readlink -f "$0")")/.."
 
-profile=release
-target_dir=release
+profile=web
+target_dir=web
 for arg in "$@"; do
     case "$arg" in
         --debug) profile=dev; target_dir=debug ;;

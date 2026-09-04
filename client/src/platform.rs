@@ -165,6 +165,20 @@ fn query() -> Option<web_sys::UrlSearchParams> {
     web_sys::UrlSearchParams::new_with_str(&search).ok()
 }
 
+/// Whether the browser has actually given this page the pointer.
+///
+/// Bevy's `CursorGrabMode` is a *request*. A browser may refuse it — a lock asked for without a
+/// recent click, or within the cooldown it enforces after Escape — and it may end one without being
+/// asked, which is what Escape is. Neither shows up in the field the game set, so this is where the
+/// answer comes from. See `local_player::follow_the_pointer_lock`, which is the only caller and the
+/// place the difference is written back.
+#[cfg(target_family = "wasm")]
+pub fn pointer_locked() -> bool {
+    web_sys::window()
+        .and_then(|window| window.document())
+        .is_some_and(|document| document.pointer_lock_element().is_some())
+}
+
 /// This browser's local storage, or `None` when it is switched off.
 ///
 /// It is switched off more often than it looks: a private window, a browser set to block site data,
