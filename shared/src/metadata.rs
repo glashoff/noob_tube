@@ -1,8 +1,10 @@
 //! What a client needs to know *before* it can connect.
 //!
-//! The tick rate is the problem this exists for. The server owns it and the client must build its
-//! whole app around the same value — `tick_duration` goes into the lightyear plugin group, before
-//! any connection exists — so it cannot be learned from the connection itself.
+//! **The server owns every setting the two ends have to agree on**, and this is how a client is
+//! told: see [`NetConfig::adopt_from_server`](crate::tuning::NetConfig::adopt_from_server), which
+//! is the list. All of them have to be settled before `App::new` — the tick rate goes into the
+//! lightyear plugin group and into `Time<Fixed>`, and the link conditioner goes onto the transport
+//! — so none of them can be learned from the connection itself.
 //!
 //! Nor can it be learned afterwards. Lightyear 0.29 never puts the tick duration on the wire:
 //! `SenderMetadata` carries the send interval *in ticks*, which is circular. And its
@@ -13,8 +15,12 @@
 //! the server's [`NetConfig`] as TOML — the same language the config file speaks, parsed by the
 //! same code. A client fetches it in `main`, before `App::new`.
 //!
-//! It is a convenience, not a safety net. The safety net is the tick rate baked into the netcode
-//! protocol id, which rejects a mismatched peer whether or not this endpoint was reachable.
+//! For the tick rate it is a convenience rather than a safety net: that one is baked into the
+//! netcode protocol id and rejects a mismatched peer whether or not this endpoint was reachable.
+//! For the rest there is no net at all. A client and a server simulating different links, or
+//! disagreeing about lag compensation, connect perfectly happily and produce a session whose
+//! numbers mean nothing — which is exactly the failure this endpoint now exists to prevent, and
+//! why a client that could not reach it says so in as many words.
 
 use tracing::{debug, info, warn};
 use std::io::{Read, Write};

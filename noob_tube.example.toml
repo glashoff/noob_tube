@@ -1,18 +1,31 @@
 # Network settings. Copy to `noob_tube.toml` and edit; that name is gitignored, so local
-# experiments stay local.
+# experiments stay local. Every field may be left out, in which case the default applies. A
+# misspelled key is refused at startup rather than ignored: a typo that silently reads as "no
+# latency" makes a run look like a netcode success when nothing was being tested.
 #
-# Read by both binaries — each takes the fields it needs, so one file describes a whole session.
-# Every field may be left out, in which case the default below applies. A misspelled key is refused
-# at startup rather than ignored: a typo that silently reads as "no latency" makes a run look like a
-# netcode success when nothing was being tested.
+# A NAME SAYS WHO THE SETTING BELONGS TO.
+#
+#   cl_        the client's own. Two clients on one server may disagree about all of them.
+#   srv_       the server's own. A client reading one would be reading somebody else's business.
+#   no prefix  both ends must agree, AND THE SERVER DECIDES. A client fetches these from the
+#              metadata endpoint before it builds its app and takes them over whatever its own
+#              file said. `port` and `meta_port` are the two exceptions, for the obvious reason:
+#              they are how a client finds a server in the first place.
+#
+# So the unprefixed settings below are worth setting on the SERVER. Setting them on a client is
+# not wrong, it is simply overwritten the moment the server answers. And a client that could not
+# reach the endpoint says so, in as many words, before it connects.
+#
+# The link conditioner is why the rule is worth the letters. It delays only what a process
+# RECEIVES — the server's copy delays inputs coming in, each client's copy delays snapshots coming
+# in — so 100 ms set on the server alone is a 50 ms half-duplex link that behaves like nothing
+# real. That used to be on whoever ran the session to get right in two files.
 #
 # Environment variables override the file, one per field, upper-cased and prefixed:
-#   NOOB_TUBE_PING_MS=200 cargo run -p noob_tube_client
+#   NOOB_TUBE_PING_MS=200 cargo run -p noob_tube_server
 # which is the way to try one value without editing anything.
-#
-# The conditioner must be in effect on EVERY process. It delays only what a process receives — the
-# server's copy delays inputs coming in, each client's copy delays snapshots coming in — so a file
-# read by the server alone gives a half-duplex link that behaves like nothing real.
+
+# === Both ends. The server's copy wins. =========================================================
 
 # How often the simulation steps, in Hz. 64 is what CS:GO's official servers run; third-party
 # competitive servers use 128.
@@ -28,32 +41,6 @@
 # wall-clock error.
 tick_hz = 64.0
 
-# UDP port the game runs on: the server binds it, the client dials it.
-#
-# It is here so that two sessions can share a machine — one to play on, one to reproduce something
-# in — which needs nothing more than the same variable in front of both binaries:
-#   NOOB_TUBE_PORT=6000 cargo run -p noob_tube_server
-#   NOOB_TUBE_PORT=6000 cargo run -p noob_tube_client
-#
-# Moving it moves `meta_port` with it, as long as that one is still sitting just above the default:
-# a second server that took the first's metadata socket would be exactly as unusable as one that
-# took its game socket.
-port = 5000
-
-# TCP port where the server publishes this config, beside the game's UDP socket.
-#
-# A client fetches it before building its app and adopts the tick rate — and only the tick rate.
-# Everything else here is either its own preference (its simulated link, its input rate, how far in
-# the past it draws others) or something lightyear already learns over the wire.
-#
-# This has to be an endpoint of its own because the tick rate is needed before there is a
-# connection: it goes into the lightyear plugin group and into Time<Fixed> at app-build time.
-# lightyear never puts it on the wire, and its SetTickDuration trigger only updates Time<Fixed>,
-# leaving the TickDuration resource every timeline converts with untouched.
-#
-# 0 switches it off; the client then keeps its own rate and a disagreement is a refused connection.
-meta_port = 5001
-
 # Simulated round trip, in milliseconds. Each end delays half of it. 0 leaves the link untouched.
 ping_ms = 0
 
@@ -64,117 +51,18 @@ jitter_ms = 0
 # client's prediction, so this is the knob that exercises rollback.
 loss = 0.0
 
-# How often the server sends replication updates, in Hz. Server only.
-#
-# Deliberately below the 64 Hz tick rate. Sending every tick is more bandwidth than a shooter needs
-# and leaves no gap between updates, so interpolation has nothing to interpolate across and remote
-# players look smooth for the wrong reason.
-send_hz = 32.0
-
-# How often the client sends its inputs, in Hz. Client only. This is Source's cl_cmdrate.
-#
-# The other direction from send_hz. Lightyear's own default is to send every FRAME, which at 200 fps
-# is three input packets per simulated tick — bandwidth spent on nothing, since the extra packets
-# carry no tick the previous one did not. Matching tick_hz is the usual choice and what Source does.
-# Below tick_hz, each packet simply carries the several ticks that accumulated since the last.
-#
-# 0 restores lightyear's every-frame behaviour.
-cmd_hz = 64.0
-
-# How many consecutive lost input packets the client survives without the server missing a tick.
-#
-# Every input message repeats the last N packets' worth of ticks, so a gap is filled by the next
-# packet instead of costing movement. It is the cheapest redundancy in the protocol — inputs are a
-# handful of bytes — and the reason a lossy link still walks in a straight line. Try loss = 0.1 with
-# this at 1 to see what it is buying.
-input_redundancy = 5
-
-# How far in the past other players are drawn, as a multiple of the send interval. Client only.
-#
-# At the defaults this is 1.7 / 32 Hz ≈ 53 ms on top of the network. Lower it and remote players
-# start freezing between updates, because the next one has not arrived yet — lightyear clamps rather
-# than extrapolating, so that shows up as stuttering, not as players sliding through walls.
-interp_ratio = 1.7
-
-# Floor under the interpolation delay, in milliseconds. Client only. Matters only at very high
-# send rates, where 1.7 send intervals would be shorter than a frame.
-interp_min_ms = 5
-
-# --- When does the server act on my input? Two different answers. Both client-side: the client
-# --- stamps each input with the tick it is meant for, and the server simply acts on that tick.
-# ---
-# --- The cheap answer is min_client_lead_ticks, at the bottom of this section: hold the client's
-# --- clock further ahead, so inputs land with more slack. Local movement is untouched.
-# ---
-# --- The expensive answer is input_delay_*, immediately below: postpone the tick the input counts
-# --- for. This one DOES delay your own movement — see why there.
-
-# Never act on an input sooner than this many ticks, however good the connection.
-#
-# This is the fighting-game/GGPO knob, and it is not what Source does. The client stamps the input
-# for `now + delay` — and then waits until `now + delay` to apply it locally too. It has to: the
-# whole point is that both simulations use the input at the SAME tick. Apply it locally at `now`
-# and on the server at `now + delay` and the two disagree by construction, which is a client
-# rollback on every keypress.
-#
-# So the trade is real and one-directional: fewer rollbacks, at the price of your own movement
-# starting this late every time, even on a perfect link. Fighting games and RTSs pay it gladly for
-# a simulation that never rewinds. Shooters do not, which is why this is 0.
-#
-# One tick is 15.6 ms at the default 64 Hz.
-input_delay_min_ticks = 0
-
-# How much latency is covered by input delay before prediction takes over.
-#
-# Below this much ping the delay grows to match the link and there is nothing to roll back; above
-# it the delay stops growing and the rest is predicted. 0 means never trade responsiveness for
-# stability.
-#
-# Must be at least `input_delay_min_ticks` — a floor above the ceiling is refused at startup. For a
-# fixed delay of n ticks regardless of ping, set both to n.
-input_delay_max_ticks = 0
-
-# How far ahead of the server the client may simulate, in ticks.
-#
-# This is the ceiling on rollback depth, and so on what a single correction can cost in CPU.
-# Latency beyond what it covers turns into more input delay instead, up to input_delay_max_ticks.
-# 0 is lockstep: no prediction at all, every input waits for the round trip.
-max_predicted_ticks = 100
-
-# The guaranteed minimum lead, in ticks, of the client's clock over the server's.
-#
-# This is the other answer, and the one that costs the player nothing. The client's clock already
-# runs ahead of the server's by about half the ping, exactly so that an input stamped for tick T
-# reaches the server before it simulates T. This is the floor under that lead, on top of whatever
-# ping and jitter already demand.
-#
-# Unlike input_delay_min_ticks it does NOT delay local movement — the client applies your input the
-# moment you press it either way. It only moves the whole client timeline further into the future,
-# so inputs arrive with more slack. Raise it if inputs are landing late; the cost is that the client
-# predicts further ahead, so each rollback replays more ticks when one does happen.
-#
-# Fractional ticks are allowed. Below 1.0 is refused: the server would sometimes simulate a tick
-# before the input for it arrived.
-min_client_lead_ticks = 1.0
-
-# How many multiples of the measured jitter to add to that lead.
-#
-# The margin covers `jitter × this`, so it is a bet on what fraction of packets arrive in time:
-# 1 covers about 65%, 2 about 95%, 3 about 99.7%.
-jitter_safety_multiple = 4
-
-# --- Shooting ---------------------------------------------------------------------------------
-
 # Whether a shot is tested against the world the shooter saw, rather than the present one.
 #
-# Read by both binaries, meaning something different on each. On the client it makes every shot
+# Both ends read it, meaning something different on each, and the server's answer is the one that
+# counts — a client that kept its own would report a delay nobody rewinds by, or rewind by one
+# nobody reported. On the client it makes every shot
 # carry the two received snapshots the screen was blending between and how far between them it was,
 # and it makes every input message carry the client's interpolation delay as a coarser fallback. On
 # the server it makes each player's recent positions be kept, and each shot rewind its targets to
 # the shooter's moment before the ray is cast.
 #
 # Off, the server tests against where targets are NOW, while the aim came from where they were on
-# the shooter's screen — older by the round trip plus interp_ratio's delay. At ping_ms = 100 that
+# the shooter's screen — older by the round trip plus cl_interp_ratio's delay. At ping_ms = 100 that
 # is about 110 ms, and a player crossing at 6 m/s has moved 0.65 m in it: you must lead a running
 # target by most of its own width, at every range.
 #
@@ -183,19 +71,10 @@ jitter_safety_multiple = 4
 # clean way to see both halves is to set ping_ms = 200 and flip this.
 lag_compensation = true
 
-# How many ticks of player positions the server keeps to rewind into. Server only.
-#
-# The ceiling on how far back a shot may reach, so it must cover the worst connection the server
-# means to serve: round trip plus interpolation delay. 35 ticks is about 550 ms at 64 Hz, which is
-# generous; the memory is a few hundred bytes per player.
-#
-# Too short is not silent — the server logs the rewind it could not satisfy and falls back to the
-# present for that shot, rather than quietly testing against a position nobody was ever in.
-lag_comp_history_ticks = 35
-
-# How much of a vehicle a driver's own client works out for itself. Both ends read it and they
-# must agree — the server decides who gets a prediction target, the client decides what its
-# predicted chassis may collide with, and neither can see the other's copy.
+# How much of a vehicle a driver's own client works out for itself. Both ends read it and they must
+# agree: the server decides who gets a prediction target, the client decides what its predicted
+# chassis may collide with. Neither can see the other's copy, so the server's is the one that counts
+# and a client takes it from the endpoint below.
 #
 #   "full"  — the vehicle and everything driverless it might hit. Loose crates and parked vehicles
 #             are handed to the driver for the duration, so both sides shove the same box on the
@@ -217,3 +96,158 @@ lag_comp_history_ticks = 35
 #             produces about 35 rollbacks a second, and making that clean means not predicting the
 #             driver either.
 predict_vehicles = "full"
+
+# === Where the server is. Both read them; neither is fetched, for the obvious reason. ==========
+
+# UDP port the game runs on: the server binds it, the client dials it.
+#
+# It is here so that two sessions can share a machine — one to play on, one to reproduce something
+# in — which needs nothing more than the same variable in front of both binaries:
+#   NOOB_TUBE_PORT=6000 cargo run -p noob_tube_server
+#   NOOB_TUBE_PORT=6000 cargo run -p noob_tube_client
+#
+# Moving it moves `meta_port` with it, as long as that one is still sitting just above the default:
+# a second server that took the first's metadata socket would be exactly as unusable as one that
+# took its game socket.
+port = 5000
+
+# TCP port where the server publishes this config, beside the game's UDP socket.
+#
+# This is how every unprefixed setting above reaches a client: it fetches this file before building
+# its app and takes them over whatever its own said. It has to be an endpoint of its own, because
+# they are all needed before there is a connection — the tick rate goes into the lightyear plugin
+# group and into Time<Fixed>, the conditioner goes onto the transport. lightyear never puts the tick
+# duration on the wire, and its SetTickDuration trigger only updates Time<Fixed>, leaving the
+# TickDuration resource every timeline converts with untouched.
+#
+# 0 switches it off. Every client then keeps its own numbers: a tick rate that disagrees shows up as
+# a refused connection, and a simulated link that disagrees shows up as nothing at all.
+meta_port = 5001
+
+# === The client's own. Nothing here has to match anything the server does. =====================
+
+# How often the client sends its inputs, in Hz. Client only. This is Source's cl_cmdrate.
+#
+# The other direction from srv_send_hz. Lightyear's own default is to send every FRAME, which at
+# 200 fps is three input packets per simulated tick — bandwidth spent on nothing, since the extra
+# carry no tick the previous one did not. Matching tick_hz is the usual choice and what Source does.
+# Below tick_hz, each packet simply carries the several ticks that accumulated since the last.
+#
+# 0 restores lightyear's every-frame behaviour.
+cl_cmd_hz = 64.0
+
+# How many consecutive lost input packets the client survives without the server missing a tick.
+#
+# Every input message repeats the last N packets' worth of ticks, so a gap is filled by the next
+# packet instead of costing movement. It is the cheapest redundancy in the protocol — inputs are a
+# handful of bytes — and the reason a lossy link still walks in a straight line. Try loss = 0.1 with
+# this at 1 to see what it is buying.
+cl_input_redundancy = 5
+
+# How far in the past other players are drawn, as a multiple of the send interval. Client only.
+#
+# At the defaults this is 1.7 / 32 Hz ≈ 53 ms on top of the network. Lower it and remote players
+# start freezing between updates, because the next one has not arrived yet — lightyear clamps rather
+# than extrapolating, so that shows up as stuttering, not as players sliding through walls.
+cl_interp_ratio = 1.7
+
+# Floor under the interpolation delay, in milliseconds. Client only. Matters only at very high
+# send rates, where 1.7 send intervals would be shorter than a frame.
+cl_interp_min_ms = 5
+
+# --- When does the server act on my input? Two different answers. Both client-side: the client
+# --- stamps each input with the tick it is meant for, and the server simply acts on that tick.
+# ---
+# --- The cheap answer is cl_min_lead_ticks, at the bottom of this section: hold the client's
+# --- clock further ahead, so inputs land with more slack. Local movement is untouched.
+# ---
+# --- The expensive answer is cl_input_delay_*, immediately below: postpone the tick the input
+# --- counts for. This one DOES delay your own movement — see why there.
+
+# Never act on an input sooner than this many ticks, however good the connection.
+#
+# This is the fighting-game/GGPO knob, and it is not what Source does. The client stamps the input
+# for `now + delay` — and then waits until `now + delay` to apply it locally too. It has to: the
+# whole point is that both simulations use the input at the SAME tick. Apply it locally at `now`
+# and on the server at `now + delay` and the two disagree by construction, which is a client
+# rollback on every keypress.
+#
+# So the trade is real and one-directional: fewer rollbacks, at the price of your own movement
+# starting this late every time, even on a perfect link. Fighting games and RTSs pay it gladly for
+# a simulation that never rewinds. Shooters do not, which is why this is 0.
+#
+# One tick is 15.6 ms at the default 64 Hz.
+cl_input_delay_min_ticks = 0
+
+# How much latency is covered by input delay before prediction takes over.
+#
+# Below this much ping the delay grows to match the link and there is nothing to roll back; above
+# it the delay stops growing and the rest is predicted. 0 means never trade responsiveness for
+# stability.
+#
+# Must be at least `cl_input_delay_min_ticks` — a floor above the ceiling is refused at startup.
+# For a fixed delay of n ticks regardless of ping, set both to n.
+cl_input_delay_max_ticks = 0
+
+# How far ahead of the server the client may simulate, in ticks.
+#
+# This is the ceiling on rollback depth, and so on what a single correction can cost in CPU.
+# Latency beyond what it covers turns into more input delay instead, up to cl_input_delay_max_ticks.
+# 0 is lockstep: no prediction at all, every input waits for the round trip.
+cl_max_predicted_ticks = 100
+
+# The guaranteed minimum lead, in ticks, of the client's clock over the server's.
+#
+# This is the other answer, and the one that costs the player nothing. The client's clock already
+# runs ahead of the server's by about half the ping, exactly so that an input stamped for tick T
+# reaches the server before it simulates T. This is the floor under that lead, on top of whatever
+# ping and jitter already demand.
+#
+# Unlike cl_input_delay_min_ticks it does NOT delay local movement — the client applies your input
+# the moment you press it either way. It only moves the whole client timeline further into the
+# future, so inputs arrive with more slack. Raise it if inputs are landing late; the cost is that
+# the client predicts further ahead, so each rollback replays more ticks when one does happen.
+#
+# Fractional ticks are allowed. Below 1.0 is refused: the server would sometimes simulate a tick
+# before the input for it arrived.
+cl_min_lead_ticks = 1.0
+
+# How many multiples of the measured jitter to add to that lead.
+#
+# The margin covers `jitter × this`, so it is a bet on what fraction of packets arrive in time:
+# 1 covers about 65%, 2 about 95%, 3 about 99.7%.
+cl_jitter_safety_multiple = 4
+
+# === The server's own. A client never reads them. ==============================================
+
+# How often the server sends replication updates, in Hz. Server only.
+#
+# Deliberately below the 64 Hz tick rate. Sending every tick is more bandwidth than a shooter needs
+# and leaves no gap between updates, so interpolation has nothing to interpolate across and remote
+# players look smooth for the wrong reason.
+srv_send_hz = 32.0
+
+# How many ticks of player positions the server keeps to rewind into. Server only.
+#
+# The ceiling on how far back a shot may reach, so it must cover the worst connection the server
+# means to serve: round trip plus interpolation delay. 35 ticks is about 550 ms at 64 Hz, which is
+# generous; the memory is a few hundred bytes per player.
+#
+# Too short is not silent — the server logs the rewind it could not satisfy and falls back to the
+# present for that shot, rather than quietly testing against a position nobody was ever in.
+srv_lag_comp_history_ticks = 35
+
+# How many ticks after committing a terrain edit everybody applies it. Server only: the server
+# stamps every accepted stroke with `now + this` and the tick travels with it, so both sides move
+# the ground on the same one and no client needs the number.
+#
+# It is a margin, and it covers two things at once. The commit has to arrive first — one trip to
+# the slowest client, plus jitter — or somebody is told to apply an edit at a tick they have
+# already passed. And no rollback window may straddle it, because a replay is handed the ground as
+# it is NOW: an edit landing inside the window a client is predicting over means the ticks from
+# before the edit are walked on the ground from after it.
+#
+# 10 ticks is 156 ms at 64 Hz. What the second half buys is a probability, not a guarantee: a
+# client whose lead has grown past this may take one rollback that straddles an edit and be
+# corrected by however far the ground moved. Rare, small, and self-correcting.
+srv_edit_delay_ticks = 10

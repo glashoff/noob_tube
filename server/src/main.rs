@@ -400,7 +400,7 @@ fn resolve_shots(
                     // configuration that cannot serve this connection, and says so.
                     if history.is_full() {
                         warn!(
-                            "lag_comp_history_ticks is too short: peer {} asked to rewind to \
+                            "srv_lag_comp_history_ticks is too short: peer {} asked to rewind to \
                              {}, oldest kept is {:?}",
                             player.peer,
                             rewind.describe(),
@@ -524,7 +524,7 @@ fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
             Density(props::LOOSE_DENSITY),
             CollisionLayers::new(Layer::Body, LayerMask::ALL),
             Position(at),
-            HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
+            HitboxHistory::with_capacity(net.srv_lag_comp_history_ticks.into()),
             Replicate::to_clients(NetworkTarget::All),
             // Interpolated, not predicted, and that is the rule rather than a shortcut. A client
             // can only predict what it has the information to compute, and what moves a crate is
@@ -554,7 +554,7 @@ fn spawn_props(net: Res<NetConfig>, mut commands: Commands) {
             prop.collider(),
             CollisionLayers::new(Layer::Body, LayerMask::ALL),
             Position(crate_.position_at(0.0)),
-            HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
+            HitboxHistory::with_capacity(net.srv_lag_comp_history_ticks.into()),
             Replicate::to_clients(NetworkTarget::All),
             // Interpolated by everyone and predicted by nobody. There is no input behind a prop to
             // predict from, and no client simulates one.
@@ -977,7 +977,7 @@ fn restock_the_fleet(
     }
     for marker in &wanted {
         if to_park.contains(&marker.id) {
-            park_a_vehicle(&mut commands, &ground.0, marker, net.lag_comp_history_ticks.into());
+            park_a_vehicle(&mut commands, &ground.0, marker, net.srv_lag_comp_history_ticks.into());
         }
     }
     // Said out loud only when the fleet actually changed, because the condition this runs under is
@@ -1060,7 +1060,7 @@ fn restock_the_crates(
     }
     for marker in &wanted {
         if to_park.contains(&marker.id) {
-            park_a_crate(&mut commands, &ground.0, marker, net.lag_comp_history_ticks.into());
+            park_a_crate(&mut commands, &ground.0, marker, net.srv_lag_comp_history_ticks.into());
         }
     }
     if !to_park.is_empty() || !to_clear.is_empty() {
@@ -1192,7 +1192,7 @@ fn start_listening(net: Res<NetConfig>, mut commands: Commands) {
 
     commands.trigger(server::Start { entity: server });
     info!("listening on {addr}");
-    info!("{}", net.describe());
+    info!("{}", net.describe(noob_tube_shared::tuning::Side::Server));
 }
 
 /// Startup: publishes the config beside the game socket, so a client can adopt the tick rate
@@ -1257,7 +1257,7 @@ fn on_peer_connected(
         Aim::default(),
         Health::default(),
         // The past this player can be shot in. Server-side only, like the spawn index.
-        HitboxHistory::with_capacity(net.lag_comp_history_ticks.into()),
+        HitboxHistory::with_capacity(net.srv_lag_comp_history_ticks.into()),
         // Where this client's inputs are written once they arrive.
         ActionState::<PlayerInput>::default(),
         // Replicate is the other half of ReplicationSender: that says the channel may send, this

@@ -168,16 +168,19 @@ fn windowing() -> PluginGroupBuilder {
     })
 }
 
-/// Reads our own settings, then asks the server for the one it owns.
+/// Reads our own settings, then asks the server for the ones it owns.
 ///
-/// The tick rate has to be settled before `App::new`, because it goes into the lightyear plugin
-/// group and into `Time<Fixed>`. That is the whole reason the server publishes a metadata endpoint
-/// rather than sending it over the game connection: by the time a connection exists, the app is
-/// already built around a number.
+/// **Everything both ends have to agree on comes from the server**, and this is where it arrives —
+/// before `App::new`, because a client is built around these: the tick rate goes into the lightyear
+/// plugin group and into `Time<Fixed>`, and the link conditioner goes onto the transport. That is
+/// the whole reason the server publishes a metadata endpoint over TCP rather than sending it over
+/// the game connection: by the time a connection exists, the app is already built around them. See
+/// [`NetConfig::adopt_from_server`] for which settings those are and why the names say so.
 ///
-/// A server that does not answer is not an error — plenty will not have the endpoint, and a
-/// disagreement still fails safely, as a refused connection rather than a desync. Which of the two
-/// happened is worth saying out loud either way.
+/// A server that does not answer is not an error — plenty will not have the endpoint — but it is no
+/// longer only the tick rate at stake, so the line for it says what is being taken on trust. The
+/// tick rate still fails safely, as a refused connection rather than a desync; a link conditioner
+/// nobody agreed on fails as a set of numbers that mean nothing, which is quieter and worse.
 ///
 /// `println!` rather than `info!`, and this is the one place it is right: all of this happens
 /// before `App::new`, so `LogPlugin` has not installed a tracing subscriber and every `info!` here
@@ -190,21 +193,15 @@ fn configure() -> NetConfig {
 
     let addr = server_address(net.meta_port);
     match noob_tube_shared::metadata::fetch(addr) {
-        Some(server) => {
-            let ours = net.tick_hz;
-            net.adopt_from_server(&server);
-            if net.tick_hz == ours {
-                println!("server at {addr} agrees on {} Hz", net.tick_hz);
-            } else {
-                println!(
-                    "server at {addr} runs {} Hz, adopting it over our {ours}",
-                    net.tick_hz
-                );
-            }
-        }
+        Some(server) => match net.adopt_from_server(&server) {
+            moved if moved.is_empty() => println!("server at {addr} agrees with our settings"),
+            moved => println!("server at {addr} says {}", moved.join(", ")),
+        },
         None => println!(
-            "no metadata from {addr}, keeping our {} Hz — a mismatch will refuse to connect",
-            net.tick_hz
+            "no metadata from {addr}: our own settings stand, {} Hz and all. A tick rate the \
+             server does not share refuses the connection; a simulated link it does not share is \
+             not caught by anything.",
+            net.tick_hz,
         ),
     }
     net
@@ -322,7 +319,7 @@ fn connect(net: Res<NetConfig>, mut commands: Commands) {
     // with no rollback and no warning.
     commands.insert_resource(PredictionManager {
         rollback_policy: RollbackPolicy {
-            max_rollback_ticks: net.max_predicted_ticks,
+            max_rollback_ticks: net.cl_max_predicted_ticks,
             ..default()
         },
         ..default()
@@ -355,7 +352,7 @@ fn connect(net: Res<NetConfig>, mut commands: Commands) {
         .id();
 
     commands.trigger(client::Connect { entity: client });
-    info!("connecting to {server_addr}, {}", net.describe());
+    info!("connecting to {server_addr}, {}", net.describe(noob_tube_shared::tuning::Side::Client));
 }
 
 fn on_connected(trigger: On<Add, Connected>) {

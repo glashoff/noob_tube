@@ -9,9 +9,11 @@
 //!    out before a single sample is written. Undercharging would let a client buy a bigger stroke
 //!    than it pays for — and since the commit is broadcast before it is applied, an oversized
 //!    stroke stalls every machine in the game rather than only the sender's.
-//! 3. **It says when.** Every accepted stroke is stamped `now + max_predicted_ticks`, which is what
-//!    keeps a rollback window from ever straddling an edit. See [`sculpt`](noob_tube_shared::sculpt)
-//!    for why that matters and what it costs.
+//! 3. **It says when.** Every accepted stroke is stamped `now + srv_edit_delay_ticks`, which is
+//!    what keeps a rollback window from ever straddling an edit. It used to say
+//!    `max_predicted_ticks` here, which is a ceiling rather than a margin and cost a second and a
+//!    half of waiting on every stroke. See [`sculpt`](noob_tube_shared::sculpt) for why the tick is
+//!    chosen at all and what the smaller margin trades away.
 
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
@@ -77,7 +79,7 @@ pub fn serve_strokes(
     // `now` is read once, so every stroke in a frame lands on the same tick. Two strokes a frame
     // apart on the same spot are already ordered by the queue; giving them different ticks would
     // only add a tick of stutter to the second.
-    let due = timeline.tick().0 + u32::from(net.edit_delay_ticks);
+    let due = timeline.tick().0 + u32::from(net.srv_edit_delay_ticks);
 
     let mut asked: Vec<(PeerId, Stroke)> = Vec::new();
     for (remote, mut receiver) in inbox.iter_mut() {

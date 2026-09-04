@@ -670,45 +670,63 @@ The file is for the settings you keep, the environment for the one you are chang
 `cp noob_tube.example.toml noob_tube.toml` to start; that name is gitignored, so local experiments
 stay local.
 
+**A name says who a setting belongs to.** There are three kinds, and the prefix is the whole
+difference: `cl_` is the client's own, `srv_` is the server's own, and **no prefix means both ends
+must agree and the server decides** — a client fetches those over the metadata endpoint before it
+builds its app and takes them over whatever its own file said. `port` and `meta_port` are the two
+exceptions, for the obvious reason: they are how a client finds a server in the first place.
+
 ```toml
-tick_hz = 64.0             # simulation rate; must match on both sides
-meta_port = 5001           # where the server publishes this config      (server only)
-ping_ms = 100              # simulated round trip; each end delays half of it
-jitter_ms = 10             # random variation on each leg, ± this
-loss = 0.02                # packet loss probability, 0.0 to 1.0
-send_hz = 32.0             # how often the server replicates           (server only)
-cmd_hz = 64.0              # how often the client sends inputs         (client only)
-input_redundancy = 5       # consecutive input packet losses survived  (client only)
-interp_ratio = 1.7         # interpolation delay, in send intervals    (client only)
-interp_min_ms = 5          # floor under that delay                    (client only)
-min_client_lead_ticks = 1  # guaranteed lead of the client's clock     (client only)
-jitter_safety_multiple = 4 # multiples of measured jitter added to it  (client only)
-input_delay_min_ticks = 0  # postpone the tick an input counts for     (client only)
-input_delay_max_ticks = 0  # ping covered by delay before predicting   (client only)
-max_predicted_ticks = 100  # how far ahead the client may simulate     (client only)
-lag_compensation = true    # rewind targets to what the shooter saw           (both)
-lag_comp_history_ticks = 35 # how far back the server can rewind        (server only)
+# Both ends. The server's copy wins.
+tick_hz = 64.0                  # simulation rate
+ping_ms = 100                   # simulated round trip; each end delays half of it
+jitter_ms = 10                  # random variation on each leg, ± this
+loss = 0.02                     # packet loss probability, 0.0 to 1.0
+lag_compensation = true         # rewind targets to what the shooter saw
+predict_vehicles = "full"       # how much of a vehicle its driver simulates
+
+# Where the server is. Both read them; neither is fetched.
+port = 5000
+meta_port = 5001
+
+# The client's own.
+cl_cmd_hz = 64.0                # how often it sends inputs
+cl_input_redundancy = 5         # consecutive input packet losses survived
+cl_interp_ratio = 1.7           # interpolation delay, in send intervals
+cl_interp_min_ms = 5            # floor under that delay
+cl_input_delay_min_ticks = 0    # postpone the tick an input counts for
+cl_input_delay_max_ticks = 0    # ping covered by delay before predicting
+cl_max_predicted_ticks = 100    # how far ahead it may simulate
+cl_min_lead_ticks = 1           # guaranteed lead of its clock over the server's
+cl_jitter_safety_multiple = 4   # multiples of measured jitter added to that lead
+
+# The server's own.
+srv_send_hz = 32.0              # how often it replicates
+srv_lag_comp_history_ticks = 35 # how far back it can rewind
+srv_edit_delay_ticks = 10       # how late a terrain edit lands
 ```
 
 ```bash
-NOOB_TUBE_PING_MS=200 cargo run -p noob_tube_client    # try one value, edit nothing
+NOOB_TUBE_PING_MS=200 cargo run -p noob_tube_server    # try one value, edit nothing
 ```
 
-Both binaries read the same file and take the fields they need, so one file describes a whole
-session.
+Both binaries read the same file and take the fields they need, so one file can still describe a
+whole session — but a client no longer has to be given one for the session to be what it says it is.
 
-**The conditioner has to be in effect on every process.** It delays only what a process *receives* —
-the server's copy delays inputs coming in, each client's copy delays snapshots coming in — so a file
-read by the server alone gives a half-duplex link that behaves like nothing real.
+**The link conditioner is why the rule is worth the letters.** It delays only what a process
+*receives* — the server's copy delays inputs coming in, each client's copy delays snapshots coming
+in — so 100 ms set on the server alone is a 50 ms half-duplex link that behaves like nothing real.
+It used to be on whoever ran the session to put the same three numbers in two files. Now they are
+the server's, and a client that could not ask says so before it connects.
 
 Verified: a 64 Hz server and a 64 Hz client connect, a 128/128 pair connects, and a 64 Hz server
 with a 32 Hz client times out instead.
 
-#### Learning the tick rate from the server
+#### Taking the shared settings from the server
 
-A client should not have to be told what the server runs at, so it asks. The server publishes its
-`NetConfig` as TOML — the same language the config file speaks, parsed by the same code — over a
-small HTTP endpoint on `meta_port`, beside the game's UDP socket:
+A client should not have to be told what the server runs at, so it asks — and not only about the
+tick rate. The server publishes its `NetConfig` as TOML — the same language the config file speaks,
+parsed by the same code — over a small HTTP endpoint on `meta_port`, beside the game's UDP socket:
 
 ```
 $ curl http://127.0.0.1:5001/
@@ -725,22 +743,26 @@ puts the tick duration on the wire (`SenderMetadata` carries the send interval *
 circular), and its `SetTickDuration` trigger is half-finished: the only global observer updates
 `Time<Fixed>` and leaves the `TickDuration` resource that every timeline converts with untouched.
 
-**Only the tick rate is adopted.** Everything else in the served config is either the client's own
-preference — its simulated link, its input rate, how far in the past it draws other players — or
-something lightyear already learns over the wire. A server dictating a client's latency simulation
-would be nonsense.
+**Everything unprefixed is adopted, and nothing else is.** The list lives in
+`NetConfig::adopt_from_server` and nowhere else, and a test holds the struct to it *by field name*
+through serde — so a field added later without a decision about who owns it fails a test rather than
+quietly joining whichever group it was declared next to.
 
-Measured, with the client always starting at 64 Hz:
+Measured, with the client's own file saying 64 Hz and a clean link:
 
 | server | endpoint | client says | result |
 |---|---|---|---|
-| 128 Hz | on | *runs 128 Hz, adopting it over our 64* | connects |
-| 64 Hz | on | *agrees on 64 Hz* | connects |
-| 64 Hz | off | *no metadata, keeping our 64 Hz* | connects |
+| 128 Hz, 180 ms | on | *says jitter_ms 0 -> 20, loss 0 -> 0.03, ping_ms 0 -> 180* | connects, lagged |
+| same as ours | on | *agrees with our settings* | connects |
+| 64 Hz | off | *our own settings stand, 64 Hz and all* | connects |
 
-The first row is the point: before the endpoint, that pair could not connect at all.
+The client keeps its own `cl_` settings throughout — its input rate stays where its file put it —
+and never reads the server's `srv_` ones.
 
-This is a convenience, not a safety net. The safety net is below, and stays.
+For the tick rate this is a convenience; the safety net is below, and stays. For the rest there is
+no net at all: a client and a server simulating different links connect perfectly happily and
+produce a session whose numbers mean nothing. That is the failure this endpoint now exists to
+prevent, and why the last row says what it says.
 
 `tick_hz` is the one setting both sides must agree on — the server owns the simulation rate and the
 client replays its prediction at it. Two processes reading two files cannot be made to agree, so the
@@ -756,7 +778,18 @@ cannot parse typo.toml: TOML parse error at line 1, column 1
   |
 1 | pign_ms = 100
   | ^^^^^^^
-unknown field `pign_ms`, expected one of `ping_ms`, `jitter_ms`, `loss`, `send_hz`, ...
+unknown field `pign_ms`, expected one of `tick_hz`, `ping_ms`, `jitter_ms`, `loss`, ...
+```
+
+A file written before the prefixes gets the same refusal and a line saying what to do about it:
+
+```
+$ NOOB_TUBE_CONFIG=old.toml cargo run -p noob_tube_server
+cannot parse old.toml: TOML parse error at line 2, column 1
+...
+A setting only one end reads now says which end that is:
+  send_hz is now srv_send_hz
+  cmd_hz is now cl_cmd_hz
 ```
 
 A misspelled key reads as "no latency", a `NOOB_TUBE_CONFIG` pointing at nothing reads as "no
@@ -767,9 +800,20 @@ to start. A *missing* `noob_tube.toml` is normal and silent — the defaults are
 And every start logs what is actually in effect, including where it came from:
 
 ```
-link untouched, sending at 32 Hz, interpolating at 1.7× [defaults]
-ping 100 ms, jitter ±10 ms per leg, loss 0, sending at 20 Hz, interpolating at 1.7× [noob_tube.toml]
+# the server
+ping 180 ms, jitter ±20 ms per leg, loss 0.03, ticking at 64 Hz, sending at 20 Hz,
+edits landing 10 ticks late, lag compensation over 35 ticks [noob_tube.toml]
+
+# the client, whose own file asked for a clean link
+server at 127.0.0.1:5001 says jitter_ms 0 -> 20, loss 0 -> 0.03, ping_ms 0 -> 180
+connecting to 127.0.0.1:5000, ping 180 ms, jitter ±20 ms per leg, loss 0.03, ticking at 64 Hz,
+inputs at 30 Hz ×5, interpolating at 1.7×, input delay 0..0 ticks, predicting up to 100,
+lead ≥1 ticks, lag compensation on [noob_tube.toml]
 ```
+
+Each end prints only what applies to it. A client holding a `srv_send_hz` — it read the same file,
+or took the defaults — has a number that affects nothing it does, and printing it would be the same
+lie as writing a client-only setting into a server's config file.
 
 #### The three delays, and which knob moves which
 
@@ -778,27 +822,28 @@ They are separate, and confusing them is how netcode gets tuned in the wrong dir
 | what you feel | how long | knob |
 |---|---|---|
 | your own movement reacting | **zero** — the client predicts it | none; this is what prediction buys |
-| the server learning what you did | half the ping, plus the client's lead | `ping_ms`, `min_client_lead_ticks` |
-| seeing another player's move | half the ping + interpolation delay | ping, `SEND_HZ`, `INTERP_RATIO` |
+| the server learning what you did | half the ping, plus the client's lead | `ping_ms`, `cl_min_lead_ticks` |
+| seeing another player's move | half the ping + interpolation delay | ping, `srv_send_hz`, `cl_interp_ratio` |
 
 The third is the one worth spending time on. At the defaults it is `1.7 / 32 Hz ≈ 53 ms` on top of
-the network. Raising `send_hz` shortens it and costs bandwidth; lowering `interp_ratio` shortens it
-and starts letting remote players freeze between updates, because the next one has not arrived yet.
+the network. Raising `srv_send_hz` shortens it and costs bandwidth; lowering `cl_interp_ratio`
+shortens it and starts letting remote players freeze between updates, because the next one has not
+arrived yet.
 
 Lightyear **clamps rather than extrapolates** when it does run dry, so a too-short delay shows up as
 players stuttering to a halt and jumping, not as them sliding through walls.
 
 #### The other direction: how often inputs go out
 
-`send_hz` is the server talking. `cmd_hz` is the client talking back — Source's `cl_cmdrate`, and
-the same trap `send_hz` was: lightyear's own default sends inputs every *frame*, which at 200 fps is
-three packets per simulated tick, two of which carry no tick the first did not. It now defaults to
-64, matching the tick rate as Source does.
+`srv_send_hz` is the server talking. `cl_cmd_hz` is the client talking back — Source's `cl_cmdrate`,
+and the same trap `srv_send_hz` was: lightyear's own default sends inputs every *frame*, which at
+200 fps is three packets per simulated tick, two of which carry no tick the first did not. It now
+defaults to 64, matching the tick rate as Source does.
 
-Beside it, `input_redundancy`: every input message repeats the last N packets' worth of ticks, so a
-lost packet is covered by the next one instead of costing the server a tick of movement. Five by
-default. It is the cheapest redundancy in the protocol — inputs are a handful of bytes — and it is
-why walking stayed straight at 10 % packet loss in the M4 measurement. Set it to 1 with `loss = 0.1`
+Beside it, `cl_input_redundancy`: every input message repeats the last N packets' worth of ticks,
+so a lost packet is covered by the next one instead of costing the server a tick of movement.
+Five by default. It is the cheapest redundancy in the protocol — inputs are a handful of bytes —
+and it is why walking stayed straight at 10 % packet loss in the M4 measurement. Set it to 1 with `loss = 0.1`
 to see what it buys.
 
 Both are fixed when the protocol is registered, which is why `ProtocolPlugin` takes the config.
@@ -811,7 +856,7 @@ tick. Rollback, throughout, means **client-side** rollback — the server never 
 
 **The cheap answer: hold the client's clock further ahead.** It already runs ahead of the server by
 roughly half the ping, exactly so that an input stamped for tick `T` arrives before the server
-simulates `T`. `min_client_lead_ticks` is the guaranteed floor under that lead, on top of what ping
+simulates `T`. `cl_min_lead_ticks` is the guaranteed floor under that lead, on top of what ping
 and jitter already demand. Local movement is untouched — the client applies your input the moment
 you press it either way; only the whole timeline moves further into the future, so inputs land with
 more slack. Measured at a 100 ms ping, leads of 1, 6 and 12 ticks all leave the input delay at 0.
@@ -837,14 +882,14 @@ own movement starting that late every time, even on a perfect link.
 
 Three knobs for it, all on the client:
 
-- `input_delay_min_ticks` — never act on an input sooner than this, however good the link is.
-- `input_delay_max_ticks` — how much ping to cover with delay before prediction takes over.
-- `max_predicted_ticks` — the ceiling on how far ahead the client may run, and so on rollback depth.
+- `cl_input_delay_min_ticks` — never act on an input sooner than this, however good the link is.
+- `cl_input_delay_max_ticks` — how much ping to cover with delay before prediction takes over.
+- `cl_max_predicted_ticks` — the ceiling on how far ahead it may run, and so on rollback depth.
 
 The defaults are `0 / 0 / 100`: cover every millisecond with prediction, delay nothing. That is the
 shooter answer, and it is why the earlier measurement found the client running 0.60 m ahead of the
-server. Fighting games and RTSs take the opposite end — `input_delay_max_ticks` high, or
-`max_predicted_ticks = 0` for full lockstep, where nothing is predicted and every input waits out
+server. Fighting games and RTSs take the opposite end — `cl_input_delay_max_ticks` high, or
+`cl_max_predicted_ticks = 0` for full lockstep, where nothing is predicted and every input waits out
 the round trip.
 
 For a fixed delay regardless of ping, set the min and the max to the same number. A min above the
@@ -859,7 +904,7 @@ agree. Measured at a 100 ms ping:
 | `0 .. 0` — the shooter default | 0 ticks |
 | `4 .. 4` — fixed | 4 ticks, 62.5 ms |
 | `0 .. 20` — cover the ping | 15 ticks, 234 ms |
-| `0 .. 20`, `max_predicted_ticks = 0` — lockstep | 17 ticks, 266 ms |
+| `0 .. 20`, `cl_max_predicted_ticks = 0` — lockstep | 17 ticks, 266 ms |
 
 Note the third row: asked to cover a 100 ms ping, lightyear chose 234 ms. It is budgeting for jitter
 and sync error on top of the round trip, and it is generous about it. Tune against the number the
@@ -1281,16 +1326,16 @@ running, turning, jumping and firing at once:
 | 300 ms | 50% | 40 ms | 5 | 56 / 56 | **0.000 cm** |
 | 300 ms | 50% | 40 ms | **1** | 0 / 56 | — |
 
-Bit-identical, with zero rollbacks, up to half the packets being dropped. `input_redundancy` is what
-buys that: every input message repeats the last five packets' worth of ticks, so an input has to be
-lost five times running to be lost at all.
+Bit-identical, with zero rollbacks, up to half the packets being dropped. What buys that is
+`cl_input_redundancy`: every input message repeats the last five packets' worth of ticks, so an
+input has to be lost five times running to be lost at all.
 
 The last row is the interesting failure, and it is not the one expected. With the redundancy turned
 off, the two never disagree about a *position* — they disagree about which **tick** the shot happens
 on. The input carrying the trigger's first press is lost, the server keeps doing the last thing it
 was told for two more ticks, and from then on the cooldown keeps both sides firing every nine ticks
 but permanently two ticks apart. Every shot still happens; each one is 31 ms out of step. So
-`input_redundancy` is not only about movement not stuttering — it is what keeps the trigger itself
+`cl_input_redundancy` is not only about movement not stuttering — it keeps the trigger itself
 in step.
 
 Which leaves the part of the worry that is real, and it is the *other* end of the shot. What the
@@ -2375,7 +2420,7 @@ because its interpolation timeline has caught up with the newest sample that has
 300 ms it sits four ticks past it. Lightyear is then clamping to the last received position rather
 than blending two, which means remote players are stepping, not moving. That is a problem with the
 interpolation buffer rather than with shooting, it is now logged in as many words, and lag
-compensation degrades to the delay rung instead of breaking. `interp_ratio` is the knob; 1.7 send
+compensation degrades to the delay rung instead of breaking. `cl_interp_ratio` is the knob; 1.7 send
 intervals is not enough once the network delay dominates.
 
 Measured with a single shot, at 300 ms of simulated ping. The shooter aims at a standing target;
@@ -2403,7 +2448,7 @@ first shot reports no view bracket: interpolation is at tick 544 but the newest 
   sample is 540 — it is clamping, not blending. The shot falls back to the coarser rewind.
 lag compensation is on, but peer 178811… reports no view delay: its shots resolve against the
   present. Is lag_compensation off on that client?
-lag_comp_history_ticks is too short: peer 178811… asked to rewind to tick 1241, oldest kept is 1257
+srv_lag_comp_history_ticks is too short: peer 178811… asked to rewind to tick 1241, oldest kept is 1257
 ```
 
 The last one falls back to the present for that shot rather than testing against a position nobody
@@ -2470,7 +2515,7 @@ is 18 cm in a frame and a 15 cm jump would hide inside it.
 
 The result is not what the frequency suggested. **The camera needs almost no smoothing yet, and the
 reason is not that the link is good.** The only thing driving the local player is the local player's
-own input, and `input_redundancy = 5` means six consecutive packets must drop before the server
+own input, and `cl_input_redundancy = 5` means six consecutive packets must drop before the server
 misses one — so the server simulates from exactly the input the client predicted from, and the two
 agree to within half a centimetre. Setting redundancy to 0 shows what a genuinely missed input
 costs, and that is the amplitude to expect the moment the *simulation* gains a way to diverge —
@@ -2671,11 +2716,11 @@ if every machine lands on exactly the same numbers, so two rules hold in the bru
 there is no seam in it where a rollback replay could be handed historical terrain — so an edit
 applied inside the rollback window would have every replayed tick, including the ones from before
 the edit, walked on the new ground. The server therefore stamps each accepted stroke with
-`commit_tick + edit_delay_ticks` and both sides apply it there.
+`commit_tick + srv_edit_delay_ticks` and both sides apply it there.
 
 **That margin was fifteen times too big for a fortnight.** The rule as written asks for
-`max_predicted_ticks`, which satisfies it by construction — no rollback window can straddle the
-edit, because no client may ever predict that far. But `max_predicted_ticks` is a *ceiling*, the
+`cl_max_predicted_ticks`, which satisfies it by construction — no rollback window can straddle the
+edit, because no client may ever predict that far. But `cl_max_predicted_ticks` is a *ceiling*, the
 worst a bad link may ask for, and it was being paid on every stroke by every link: 100 ticks, **a
 second and a half** of watching a hillside not move. What the margin actually has to cover is the
 commit reaching the slowest client, plus whatever window a client is predicting over *at the time*

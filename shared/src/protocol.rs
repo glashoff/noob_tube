@@ -89,8 +89,10 @@ impl Plugin for ProtocolPlugin {
         // worth of ticks with every message rather than one input per message, so a dropped packet
         // does not cost a tick of movement — and it keeps the history a rollback replays from.
         //
-        // How often and how redundantly is `cmd_hz` and `input_redundancy`; both are fixed here,
-        // at registration, which is why the protocol needs the config at all.
+        // How often and how redundantly is `cl_cmd_hz` and `cl_input_redundancy`; both are fixed
+        // here, at registration, which is why the protocol needs the config at all. Both are the
+        // client's own — the server builds this plugin too, and neither number means anything on
+        // an end that does not send inputs.
         app.add_plugins(InputPlugin::<PlayerInput> {
             config: self.net.input_config(),
         });
