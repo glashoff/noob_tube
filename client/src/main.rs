@@ -35,6 +35,15 @@ use noob_tube_shared::PLACEHOLDER_PRIVATE_KEY;
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 
 fn main() {
+    // `noob_tube_client server` is the dedicated server, run out of this binary. It exists because
+    // a local round otherwise means keeping two builds in step by hand, and the moment shared code
+    // changes and only one of them is rebuilt, the two disagree about the protocol. Handled before
+    // anything else: `configure` reads the client's own settings, which a server has no use for.
+    if std::env::args().nth(1).as_deref() == Some("server") {
+        noob_tube_server::run();
+        return;
+    }
+
     let net = configure();
 
     App::new()

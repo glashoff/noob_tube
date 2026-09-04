@@ -1,0 +1,13 @@
+# Aliases, not settings. Nothing here touches RUSTFLAGS, so adding this file invalidates no cached
+# artifact — which is the whole point of putting the dev loop in one place instead of in habits.
+#
+# The rule these encode: build the whole workspace, always, with the same features. Cargo unifies
+# features across the packages one command selects, so narrowing the selection with `-p` silently
+# asks for a different set of dependencies and builds a second copy of the tree. Both narrowings
+# have been measured here: `-p noob_tube_server` drops Bevy's renderer and rebuilds every Bevy
+# crate; `-p noob_tube_client` drops the tool crates, which changes `parry3d`'s features and takes
+# `avian3d` and `lightyear` with it. Either way it is minutes, and it happens every time you switch.
+[alias]
+# The dev loop. `remote` opens the BRP endpoint the agent tooling drives, `inspector` the in-process
+# inspector window.
+dev = "build --workspace --features noob_tube_client/remote,noob_tube_server/remote,noob_tube_client/inspector"

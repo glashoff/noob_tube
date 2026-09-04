@@ -9,6 +9,9 @@ license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
 noob_tube_shared = { path = "shared" }
+# The client depends on this to run `noob_tube_client server`. It is a library with a thin
+# binary on top, and the binary is what gets deployed.
+noob_tube_server = { path = "server" }
 bevy = { version = "0.19.1", default-features = false, features = ["serialize"] }
 serde = { version = "1", features = ["derive"] }
 # For terrain map manifests. See terrain.md §1: the heights are binary because they have to
