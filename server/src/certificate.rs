@@ -1,7 +1,8 @@
 //! The TLS identity the game socket runs behind.
 //!
 //! WebTransport is QUIC, and QUIC has no unencrypted mode: there is no configuration of this game
-//! in which the server does not present a certificate. See web.md §1 for why the transport is
+//! in which the server does not present a certificate. A browser has no UDP socket, which is why
+//! the transport is
 //! WebTransport on native as well as in a browser.
 //!
 //! **Two shapes, and which one is in use decides what a client has to be told.**
@@ -24,7 +25,7 @@
 //! connection would fail. Supplying the files means saying "this one needs no pinning".
 //!
 //! What is not here yet is the renewal: a certificate replaced every sixty days is a server that
-//! has to be told, and today that means restarting it. See web.md §8.
+//! has to be told, and today that means restarting it.
 
 use bevy::prelude::*;
 use lightyear::prelude::Identity;

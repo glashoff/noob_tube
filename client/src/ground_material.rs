@@ -14,7 +14,9 @@ use bevy::asset::{RenderAssetUsages, uuid_handle};
 use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension};
+use bevy::render::render_resource::{
+    AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat,
+};
 use bevy::shader::ShaderRef;
 use noob_tube_shared::terrain::{Ground, Layer, MAX_LAYERS, waterline};
 
@@ -30,6 +32,8 @@ impl Plugin for GroundMaterialPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<GroundMaterial>::default())
             .init_resource::<GroundTextures>()
+            // Before any map can arrive, because `dress` binds it the moment one does.
+            .add_systems(Startup, lay_out_the_placeholder)
             // Chained, and the order is the whole of it: the mip levels are built into each
             // layer's own image, and the stack copies those images as they then are. Stacking
             // first would put four one-level textures into an array that says it has eleven.
@@ -553,6 +557,45 @@ fn linear_to_srgb(value: f32) -> u8 {
     (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8
 }
 
+/// What the two array bindings hold until [`stack_the_layers`] has something real to put there.
+///
+/// **Ours rather than Bevy's, and the reason is the GL backend.** Leaving the fields `None` binds
+/// [`FallbackImage::d2_array`](bevy::render::texture::FallbackImage), which is 1×1×**1**. wgpu's GL
+/// backend cannot ask a view what dimension it is: it derives the GL texture target from the
+/// descriptor's layer count, so a single-layer texture reached through a `2d_array` view becomes
+/// `TEXTURE_2D` where the shader wants `TEXTURE_2D_ARRAY`, and wgpu-hal logs the mismatch for every
+/// frame until the maps have loaded. Four layers of white cost sixteen bytes and the question never
+/// comes up.
+///
+/// Nothing reads it. The uniform's per-layer flags stay zero until the real arrays are bound, which
+/// is what keeps the shader off a texture that says every surface is white.
+pub const GROUND_PLACEHOLDER: Handle<Image> =
+    uuid_handle!("c1e7b95a-2f43-4d86-b0a1-7e5c93f28d40");
+
+/// Startup: puts [`GROUND_PLACEHOLDER`] where the asset server can find it.
+///
+/// `MAX_LAYERS` deep rather than one, which is the whole point — see the constant. One pixel wide,
+/// because a placeholder that is never sampled needs no more, and `RENDER_WORLD` because nothing on
+/// the CPU has any use for it either.
+fn lay_out_the_placeholder(mut images: ResMut<Assets<Image>>) {
+    let written = images.insert(
+        &GROUND_PLACEHOLDER,
+        Image::new_fill(
+            Extent3d { width: 1, height: 1, depth_or_array_layers: MAX_LAYERS as u32 },
+            TextureDimension::D2,
+            &[255, 255, 255, 255],
+            TextureFormat::Rgba8Unorm,
+            RenderAssetUsages::RENDER_WORLD,
+        ),
+    );
+    // Only a handle whose asset was dropped mid-frame can fail here, and this one is a constant
+    // written at startup. Said rather than swallowed, because the ground would draw white without
+    // it and nothing else would say why.
+    if let Err(error) = written {
+        error!("the ground's placeholder array could not be written: {error}");
+    }
+}
+
 /// A handle the material is built under, so that a rebuild replaces it rather than leaking one.
 pub const GROUND_MATERIAL: Handle<GroundMaterial> =
     uuid_handle!("6f2a1f4e-8c3d-4a19-9b77-1f0c5a2e7d31");
@@ -596,10 +639,10 @@ pub fn dress(
             extension: GroundLayers {
                 rules: GroundRules::of(layers, water_y),
                 // Filled in by `stack_the_layers` once every image has settled. Until then the
-                // bindings hold Bevy's white array placeholder and the uniform's flags keep the
-                // shader off it.
-                colours: None,
-                details: None,
+                // bindings hold our own empty array and the uniform's flags keep the shader off
+                // it — see `GROUND_PLACEHOLDER` for why it is ours rather than Bevy's.
+                colours: Some(GROUND_PLACEHOLDER),
+                details: Some(GROUND_PLACEHOLDER),
             },
         },
     );

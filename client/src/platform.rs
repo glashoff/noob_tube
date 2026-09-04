@@ -1,7 +1,7 @@
 //! The handful of things a client asks of the machine it is running on.
 //!
 //! Everything here has two answers, one per target, and they are in one file so that the *reasons*
-//! sit next to each other rather than being rediscovered at each call site. web.md §5 is the list
+//! sit next to each other rather than being rediscovered at each call site. This module is the list
 //! this was written from.
 //!
 //! The rule the two halves are chosen by: a browser is not a worse computer, it is a different one.
@@ -46,7 +46,7 @@ pub fn switched_on(name: &str) -> bool {
 /// source of it that needs no dependency.
 ///
 /// **`SystemTime::now()` panics on `wasm32-unknown-unknown`** rather than returning an error, which
-/// is the only entry in web.md §5 that would have taken the client down on its first frame instead
+/// is the only one of them that would have taken the client down on its first frame instead
 /// of quietly doing nothing. In a browser the clock is `Date.now()`, in milliseconds rather than
 /// nanoseconds — coarse enough that two tabs opened together could land on the same one, so the
 /// low bits come from `Math.random()` instead.
@@ -128,7 +128,7 @@ pub fn default_host() -> String {
 
 /// What the page was told about the server before the wasm module started.
 ///
-/// The whole shape of the bootstrap is here, and web.md §2 has the reasoning: everything the two
+/// The whole shape of the bootstrap is here: everything the two
 /// ends must agree on has to be settled *before* `App::new`, and in a browser nothing may block —
 /// `main` has to return to the event loop, and there is no synchronous fetch and no raw TCP. So the
 /// fetch happens in `index.html`, before the module is instantiated, and lands here.

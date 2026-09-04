@@ -59,7 +59,7 @@
     <div id="loading">starting…</div>
 
     <script type="module">
-      // The bootstrap, and the order in it is the whole point — see web.md §2. Everything the two
+      // The bootstrap, and the order in it is the whole point. Everything the two
       // ends have to agree on has to be settled before the client builds its app, and in a browser
       // nothing may block: `main` has to return to the event loop, there is no synchronous fetch
       // and there is no raw TCP. So the fetch happens here, before the module is instantiated, and
@@ -110,34 +110,36 @@
       const status = document.getElementById("loading");
 
       // What this browser has to be able to do, asked before anything else is started. Both are
-      // hard requirements and neither degrades: without WebGPU there is nothing to draw with, and
-      // without WebTransport there is no way to reach a server (web.md §1 and §3).
+      // hard requirements and neither degrades: without WebGL2 there is nothing to draw with, and
+      // without WebTransport there is no way to reach a server.
       //
       // Asked here rather than left to fail on its own, because what it looks like otherwise is a
       // wasm-bindgen stack trace out of the middle of the renderer — a panic with the cause four
-      // frames down and the remedy nowhere at all. Firefox on Linux is the browser this is written
-      // for: it has had WebTransport since 2023 and WebGPU is still coming.
+      // frames down and the remedy nowhere at all.
+      //
+      // WebGL2 rather than WebGPU, and by making a context rather than by looking for a name: the
+      // constructor is present on browsers whose driver is blocked, and what a player then gets is
+      // null from `getContext` rather than a missing API. The canvas is a throwaway — asking the
+      // real one would take the context the renderer wants.
       const missing = [];
-      if (!navigator.gpu) {
-        missing.push("WebGPU");
-      } else {
-        // Having the object is not having a device. A browser with WebGPU switched on but no
-        // adapter it can use answers null here, and that is the same "cannot run" for a player.
-        try {
-          if (!(await navigator.gpu.requestAdapter())) {
-            missing.push("a WebGPU adapter");
-          }
-        } catch (trouble) {
-          missing.push(`a WebGPU adapter (${trouble})`);
+      try {
+        if (!document.createElement("canvas").getContext("webgl2")) {
+          missing.push("WebGL2");
         }
+      } catch (trouble) {
+        missing.push(`WebGL2 (${trouble})`);
       }
       if (!window.WebTransport) {
         missing.push("WebTransport");
       }
       if (missing.length > 0) {
+        // WebGL2 has been in every browser since 2017, so in practice the one that fails here is
+        // WebTransport, and the remedy is a newer browser rather than a different one.
         status.textContent =
           `Noob Tube needs ${missing.join(" and ")}, and this browser has none. ` +
-          `Chrome, Edge and Safari 26 all work; Firefox on Linux is the one that does not, yet.`;
+          `WebTransport arrived in Chrome 97, Firefox 114 and Safari 26.4; ` +
+          `WebGL2 is older than all of them and is usually off because the driver is blocked ` +
+          `(chrome://gpu says so).`;
         console.error(`missing: ${missing.join(", ")}`);
         throw new Error(`this browser is missing ${missing.join(" and ")}`);
       }

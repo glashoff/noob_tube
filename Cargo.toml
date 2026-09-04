@@ -27,7 +27,7 @@ toml = { version = "0.9", default-features = false, features = ["parse", "displa
 # `frame_interpolation` draws the predicted player blended between fixed ticks, and is what
 # visual correction after a rollback is built on — the correction decays the difference
 # between the frame the last update drew and the one the replay produced.
-# `webtransport` rather than `udp`, and on the native build too — see web.md §1. A browser has no
+# `webtransport` rather than `udp`, and on the native build too. A browser has no
 # UDP socket, and a second transport kept for native alone would be the one that gets exercised
 # while the one every player uses rots. `webtransport_self_signed` is what mints the development
 # certificate; a deployment hands the server a real one.
@@ -83,3 +83,89 @@ opt-level = 3
 # And carry no debug info at all. A backtrace through Bevy or lightyear loses its line numbers;
 # panics in our own code, which is where the ones worth reading come from, keep theirs.
 debug = false
+
+# Bevy 0.19.1 promises `min_binding_size = 16` for the mesh view bind group's visibility-range
+# buffer, which is right only where that binding is a storage buffer. Wherever there are none —
+# WebGL2 — the shader takes the uniform branch and declares a fixed `array<vec4<f32>, 64>`, so
+# 1024 bytes are required and every PBR pipeline fails validation, which takes the whole client
+# down. Reported upstream as bevyengine/bevy#21309 in October 2025 and untouched since; this
+# revision is that fix on top of the v0.19.1 tag, offered back as a pull request.
+#
+# **Every Bevy crate, and it has to be every one.** The crates in Bevy's repository depend on each
+# other by `path`, so patching one drags its siblings out of the repository too — while the crates
+# still coming from crates.io keep using the crates.io siblings. That leaves two copies of
+# `bevy_camera`, `bevy_mesh` and thirty-five others in the graph, whose types are not each other's,
+# and the build fails with six hundred errors that say nothing about the patch. A published
+# `.crate` has its `path` entries stripped, which is why patching one crate from a local unpacked
+# copy appears to work and patching one crate from git does not.
+#
+# Pinned by revision, never by branch: a branch would silently change what this builds against.
+# Delete the whole section once a Bevy release carries the fix.
+[patch.crates-io]
+bevy                     = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_a11y                = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_android             = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_animation           = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_animation_macros    = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_anti_alias          = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_app                 = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_asset               = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_asset_macros        = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_audio               = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_camera              = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_clipboard           = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_color               = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_core_pipeline       = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_derive              = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_dev_tools           = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_diagnostic          = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_dylib               = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_ecs                 = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_ecs_macro_logic     = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_ecs_macros          = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_encase_derive       = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_feathers            = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_gilrs               = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_gizmos              = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_gizmos_macros       = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_gizmos_render       = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_gltf                = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_image               = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_input               = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_input_focus         = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_internal            = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_light               = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_log                 = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_macro_utils         = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_material            = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_material_macros     = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_math                = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_mesh                = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_pbr                 = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_picking             = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_platform            = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_post_process        = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_ptr                 = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_reflect             = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_reflect_derive      = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_remote              = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_render              = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_render_macros       = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_scene               = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_scene_macros        = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_shader              = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_sprite              = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_sprite_render       = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_state               = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_state_macros        = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_tasks               = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_text                = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_time                = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_transform           = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_ui                  = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_ui_render           = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_ui_widgets          = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_utils               = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_window              = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_winit               = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }
+bevy_world_serialization = { git = "https://github.com/glashoff/bevy", rev = "221cbfc67b782e106cdd20444d5e5c70d16fbf9f" }

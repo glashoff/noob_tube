@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Serves `web/dist` for a machine you are sitting at, and proxies the one thing that is not a file.
 
-The page fetches `net-config` from its own origin — see web.md §2, and `index.html`, which explains
+The page fetches `net-config` from its own origin — see `index.html`, which explains
 why it has to happen before the wasm module starts. On a deployment that path is a reverse-proxy
 rule; here it is this, so that the local page and the deployed one are the same page.
 

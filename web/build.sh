@@ -13,7 +13,7 @@
 # What comes out is a directory of static files, plus one thing that is not static: `net-config`,
 # which the page fetches from its own origin and which has to be proxied to the server's metadata
 # port. `web/serve.py` does that for a machine you are sitting at; a deployment does it in the
-# reverse proxy. See web.md §2 and §8.
+# reverse proxy. `web/serve.py` does that on a machine you are sitting at.
 
 set -euo pipefail
 
@@ -50,7 +50,7 @@ cp web/index.html "$out/"
 # The assets, as a link rather than a copy. Three hundred megabytes duplicated into a build
 # directory is three hundred megabytes to keep in step by hand, and what the browser fetches is
 # whatever the link points at — which is what makes editing a shader and reloading the page work.
-# A deployment copies instead; see web.md §8.
+# A deployment copies instead, so that the served tree is self-contained.
 ln -sfn ../../assets "$out/assets"
 
 printf 'built %s (%s)\n' "$out" "$(du -h "$out/noob_tube_client_bg.wasm" | cut -f1)"
