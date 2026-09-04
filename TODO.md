@@ -66,3 +66,56 @@ mechanism. What has to be true:
 **One decision is still open and it is not mine to make:** a subdomain
 (`noobtube.fkirchhoff.com`, which needs a DNS record) or a path under the existing
 `game.fkirchhoff.com`. Nothing on the server has been touched either way.
+
+## 5. Compress the map on its way to a client
+
+A client waits about **fourteen seconds** for the ground after it connects, and the arithmetic is
+not subtle: the height field is 526 338 bytes, lightyear cuts it into roughly 458 fragments of
+about 1150, and the server sends at 32 Hz with one fragment to a packet. Nothing is wrong; there is
+just no compression anywhere on that path. It is not a browser problem either — the same sum holds
+natively, where nobody noticed because one waits a moment after starting anyway.
+
+Measured on real maps, losslessly:
+
+| Map | raw | zlib | delta + zlib | delta + lzma |
+|---|---|---|---|---|
+| `test` — barely sculpted | 526 KB | **534 B** (986×) | 1.1 KB | 216 B |
+| `aaaaa` — sculpted | 526 KB | **33 KB** (15.8×) | 30 KB (17.8×) | 21 KB |
+| `Terrain004_8K` — imported | 2.1 MB | 1.94 MB (**1.1×**) | 1.47 MB (1.4×) | 1.23 MB |
+
+So the first thing to do is the cheap one: **delta-encode along rows and deflate**, in
+[`TerrainBaseline::of`](shared/src/terrain.rs) and back out in `adopt`, with the length check moved
+after the decompression. `flate2` with `rust_backend` is pure Rust and builds for wasm. Nothing
+about the data changes; a sculpted map goes from fourteen seconds to under one.
+
+**The third row is the honest one, and it points somewhere else.** An imported heightfield does not
+compress because its low bits are noise: `Terrain004_8K` spans 128 m over 65 536 steps, which is
+1.95 mm of vertical resolution on a grid whose samples are 1 m apart. Quantising to 12 bits — 3.1 cm,
+still far finer than anything the grid can express — takes it to 798 KB, and `aaaaa` to 15 KB.
+
+But **that must not happen on the wire.** The height field is shared simulation state: a client
+predicts its own movement against it, and one holding a coarser field than the server would
+mispredict systematically and be corrected back on ground that looks different on the two machines.
+If the precision is worth reducing, reduce it in
+[`import_heightmap`](tools/import_heightmap) — once, in the file, where both sides then read the
+same numbers and the transfer benefits as a side effect.
+
+## 6. Get rid of the Bevy patch
+
+The `[patch.crates-io]` block at the end of [`Cargo.toml`](Cargo.toml) is sixty-seven lines that
+exist for one expression. Bevy 0.19.1 promises a `min_binding_size` of 16 bytes for the mesh view
+bind group's visibility-range binding whichever type that binding was given, which is right only on
+the storage path; on WebGL2 the shader declares a fixed `array<vec4<f32>, 64>` and needs all 1024,
+so no PBR pipeline can be built and the client quits.
+
+Reported upstream as [bevyengine/bevy#21309](https://github.com/bevyengine/bevy/issues/21309) in
+October 2025. The fix lives on two branches of a fork — one off `main` for the pull request, one off
+the `v0.19.1` tag which is what the pin points at — and a reproduction that builds both in a browser
+is at [`bevy-webgl2-visibility-range-repro`](https://github.com/glashoff/bevy-webgl2-visibility-range-repro).
+
+**Delete the whole block** the day a Bevy release carries the fix. Until then it is pinned by
+revision and never by branch, so that what this tree builds against cannot change underneath it.
+Every Bevy crate is patched rather than the two that differ, because patching a subset pulls half
+the tree out of the repository through its `path` dependencies and leaves two copies of thirty-five
+crates whose types are not each other's — six hundred compiler errors that say nothing about the
+patch.
