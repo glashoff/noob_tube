@@ -1248,20 +1248,37 @@ impl Manifest {
 /// bands, only about the arithmetic between them, which is what
 /// [`the_shader_and_the_cpu_agree`](tests::the_shader_and_the_cpu_agree) is arranged to pin.
 ///
-/// `texture` and `tile_scale` are the plan's own fields and are carried unused: there are no ground
-/// textures in the repository yet, so a layer is a colour and a roughness for now. Nothing about
-/// the rule changes when they arrive — a texture is sampled *instead of* the flat colour, at the
-/// weight this already computes.
+/// A layer is drawn from a **texture pack**: `texture` names one in `assets/textures`, and what
+/// the ground wears there is its colour map, projected on all three world planes and blended by
+/// the surface normal, tiled at `tile_scale` metres — plus a second image beside it holding that
+/// pack's normal and roughness, baked into one texture by `tools/bake_ground_maps`. Neither is
+/// required. A layer whose `texture` is empty, or whose files have not loaded yet, is drawn flat
+/// in `colour`, which is what makes a texture something a map may have rather than something it
+/// must — and what a headless build and a client with a half-warm asset server both see.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
-    /// What to call it, and what the texture will be named when there is one.
+    /// Which texture pack, by the name its files carry: `<texture>_Color.png` is the colour map
+    /// and `<texture>_Packed.png` the normal and roughness beside it. Empty for a layer that is
+    /// only a colour.
     pub texture: String,
-    /// Metres per texture repeat. Unused until there is a texture; kept so a map written now does
-    /// not need a migration when there is.
+    /// Metres one texture tile spans on the ground.
+    ///
+    /// Metres rather than repeats-per-map, because it is a property of what the surface *is* — a
+    /// four-metre grass tile is four metres of grass wherever it is used — and because a map may
+    /// be any size.
     #[serde(default = "one")]
     pub tile_scale: f32,
-    /// Linear RGB.
+    /// What the texture averages to, in **linear** RGB — a measurement, not a preference.
+    ///
+    /// Three jobs, which is why a wrong one is worth noticing: it is what this layer is painted
+    /// with before its texture has loaded, it is what it is painted with when there is no texture
+    /// at all, and it is the mean the shader's stochastic tiling restores the contrast around — so
+    /// a value that is merely close leaves washed-out patches in the middle of every tile. Measured
+    /// off the pack's own `_Color.png`, and kept honest by
+    /// `each_layer_is_the_colour_its_own_texture_averages_to`.
     pub colour: [f32; 3],
+    /// How rough the surface is where its packed map does not say — the same 0..1 Bevy's PBR
+    /// takes. Where there is a packed map, that map's roughness is used instead.
     pub roughness: f32,
     /// Which slopes, in **degrees from flat**: 0 is level ground, 90 is a wall.
     ///
