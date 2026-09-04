@@ -14,7 +14,7 @@
 //! So this is a second, tiny listener beside the game socket: HTTP on TCP, one endpoint, returning
 //! a [`ServerInfo`] as JSON. A client fetches it in `main`, before `App::new`.
 //!
-//! **JSON rather than the TOML the config file speaks**, since web.md §2: in a browser this is
+//! **JSON rather than the TOML the config file speaks**: in a browser this is
 //! fetched by JavaScript before the wasm module starts, because nothing on that side may block. A
 //! browser parses JSON for free and would need a shipped parser for anything else.
 //!
@@ -112,7 +112,7 @@ pub fn serve(info: ServerInfo, port: u16) {
 /// config. Hand-written HTTP is only defensible because the response never varies.
 ///
 /// `Access-Control-Allow-Origin` is not here and should not be: the browser reads this through the
-/// same origin that served the page, proxied to this port on loopback (web.md §2). A page on
+/// same origin that served the page, proxied to this port on loopback. A page on
 /// another origin has no business minting connect tokens for this server.
 fn answer(mut stream: TcpStream, body: &str) {
     // The request has to be drained before replying, or a client that is still writing gets its

@@ -403,7 +403,7 @@ fn world_inspector() -> impl Plugin {
 /// Where and how to dial the server, settled before the app exists.
 ///
 /// Three separate answers to "which server", and they are separate because a browser cannot derive
-/// any of them from the others (web.md §2):
+/// any of them from the others:
 ///
 /// - [`target`](Self::target) is a URL, and the name in it is what TLS is checked against. A
 ///   resolved address would not do: a certificate names hosts.
