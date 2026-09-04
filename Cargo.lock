@@ -5857,11 +5857,13 @@ dependencies = [
  "bevy-inspector-egui",
  "bevy_brp_extras",
  "image",
+ "js-sys",
  "lightyear",
  "noob_tube_shared",
  "serde",
  "serde_json",
  "toml",
+ "web-sys",
 ]
 
 [[package]]
@@ -9256,6 +9258,7 @@ dependencies = [
  "smallvec",
  "static_assertions",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "wgpu-core",
  "wgpu-hal",

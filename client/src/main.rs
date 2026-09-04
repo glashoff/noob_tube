@@ -16,6 +16,7 @@ mod props;
 mod recording;
 mod remote_players;
 mod placing;
+mod platform;
 mod sculpting;
 mod settings;
 mod shot_effects;
@@ -144,7 +145,7 @@ fn windowing() -> PluginGroupBuilder {
         })
         .set(draw_with_the_integrated_gpu());
 
-    if std::env::var("NOOB_TUBE_HEADLESS").is_ok_and(|value| value != "0") {
+    if platform::switched_on("NOOB_TUBE_HEADLESS") {
         return plugins
             .set(WindowPlugin {
                 primary_window: None,
@@ -313,7 +314,7 @@ struct Dial {
 /// The name, not an address, because this is what goes into the WebTransport URL and a certificate
 /// is issued to names.
 fn server_host() -> String {
-    std::env::var("NOOB_TUBE_SERVER").unwrap_or_else(|_| Ipv4Addr::LOCALHOST.to_string())
+    platform::setting("NOOB_TUBE_SERVER").unwrap_or_else(|| Ipv4Addr::LOCALHOST.to_string())
 }
 
 /// The same machine, resolved, for a given port.
@@ -321,7 +322,7 @@ fn server_host() -> String {
 /// A name is resolved, and only IPv4 answers count: the server binds `0.0.0.0`, so an AAAA record
 /// leading the list would produce a connection that times out with nothing to say about why.
 fn server_address(port: u16) -> SocketAddr {
-    let Ok(host) = std::env::var("NOOB_TUBE_SERVER") else {
+    let Some(host) = platform::setting("NOOB_TUBE_SERVER") else {
         return SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
     };
     match (host.as_str(), port).to_socket_addrs() {
@@ -407,11 +408,8 @@ fn on_connected(trigger: On<Add, Connected>) {
     info!("connected: {}", trigger.entity);
 }
 
-/// Distinct id per process so two clients on one machine do not collide.
+/// Distinct id per process so two clients on one machine do not collide. See
+/// [`platform::unique_id`], which is where the two ways of getting one are written down.
 fn rand_client_id() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
+    platform::unique_id()
 }
