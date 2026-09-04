@@ -35,5 +35,12 @@ bevy_brp_extras = { version = "0.22.5", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [features]
+# Bevy in a shared object instead of a static archive, so that editing our own code relinks against
+# it rather than pulling the whole engine through the linker again. On by default because the dev
+# loop is where nearly every build happens; a release build has to pass `--no-default-features`, or
+# the binary comes out needing `libbevy_dylib.so` beside it. Nothing else lives in `default`, so
+# turning defaults off costs nothing. `deploy.sh` only ever builds the server, and builds it with
+# `-p`, so this never reaches the deployed binary.
+default = ["bevy/dynamic_linking"]
 remote = ["noob_tube_shared/remote", "dep:bevy_brp_extras"]
 inspector = ["dep:bevy-inspector-egui"]

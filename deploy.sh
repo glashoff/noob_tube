@@ -251,6 +251,6 @@ if [ "$follow" = yes ]; then
 else
     ssh_ "journalctl -u $SERVICE --no-pager --lines=20"
     echo
-    echo "Connect with:  NOOB_TUBE_SERVER=${HOST#*@} cargo run --release -p noob_tube_client"
+    echo "Connect with:  NOOB_TUBE_SERVER=${HOST#*@} cargo run --release --no-default-features -p noob_tube_client"
     echo "Follow it:     ssh $HOST journalctl -u $SERVICE -f"
 fi
