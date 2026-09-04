@@ -139,7 +139,7 @@
           `Noob Tube needs ${missing.join(" and ")}, and this browser has none. ` +
           `Chrome, Edge and Safari 26 all work; Firefox on Linux is the one that does not, yet.`;
         console.error(`missing: ${missing.join(", ")}`);
-        throw new Error(`this browser has no ${missing.join(", no ")}`);
+        throw new Error(`this browser is missing ${missing.join(" and ")}`);
       }
 
       try {
