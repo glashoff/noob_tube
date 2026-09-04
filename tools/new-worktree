@@ -6,20 +6,26 @@
 # Makes `../<this-checkout>-NAME` a git worktree on a branch NAME — a full working tree with its
 # own files and its own HEAD, backed by the one object store, so a second editor and a second agent
 # can work on a second branch without cloning anything. Git does all of that on its own. What it
-# does not do is the part that costs disk:
+# does not do is the part that costs disk, and there the two answers differ by three orders of
+# magnitude, so they are answered differently:
 #
-#   target/     47 GB of compiled Bevy, and the reason this script exists. A fresh checkout would
-#               build its own copy, which neither fits on this disk nor is worth the hour. Made a
-#               symlink rather than a `build.target-dir` setting so that every relative `target/…`
-#               path — deploy.sh, the README's `./target/debug/noob_tube_client` — keeps working.
+#   target/     49 GB of compiled Bevy, and the reason this script exists. A fresh checkout would
+#               build its own copy, which neither fits on this disk nor is worth the hour. SHARED,
+#               as a symlink rather than a `build.target-dir` setting, so that every relative
+#               `target/…` path — deploy.sh, the README's `./target/debug/noob_tube_client` —
+#               keeps working.
 #
 #   downloads/  two gigabytes of ambientCG zips that `tools/fetch-ground-textures` would otherwise
 #               fetch a second time from a site that sells nothing smaller than a whole pack.
+#               SHARED, for that reason and no other: nothing writes here but the fetcher.
 #
 #   assets/…    every file under assets/ that is not committed: the Mixamo soldier and its clips
 #               from `tools/setup-assets`, the mounted gun, and the ground textures unpacked out of
-#               downloads/. All of them are produced by a tool or a licence decision, none of them
-#               by editing, so pointing at the originals is both cheaper and honest about it.
+#               downloads/. COPIED. Sharing them would save 275 MB, which against the 49 GB above
+#               is not a reason for anything — and a copy is what lets one tree re-bake a texture
+#               without writing it into the other's assets directory. Copied rather than
+#               regenerated because regenerating them needs the Mixamo source and a bake run over
+#               those two gigabytes, which is minutes against a second.
 #
 # Not shared, deliberately:
 #
@@ -62,21 +68,28 @@ else
     git -C "$main" worktree add -b "$name" "$dest" "$start"
 fi
 
-step "Sharing the build directory and the downloaded assets"
-# `target` first and on its own: it is ignored by name rather than by being untracked, so it never
-# shows up in the list below.
+step "Sharing the build directory and the downloads"
+# Both are ignored by name rather than by being untracked, so neither shows up in the asset list
+# below and each is named here.
 ln -s "$main/target" "$dest/target"
-printf '  target -> %s\n' "$main/target"
+printf '  target    -> %s\n' "$main/target"
+if [ -d "$main/downloads" ]; then
+    ln -s "$main/downloads" "$dest/downloads"
+    printf '  downloads -> %s\n' "$main/downloads"
+fi
 
-# Every ignored path under assets/ and downloads/, with whole ignored directories collapsed to one
-# entry — `assets/anims/` as itself rather than as its 49 clips.
+step "Copying the assets that are not committed"
+# Every ignored path under assets/, with whole ignored directories collapsed to one entry —
+# `assets/anims/` as itself rather than as its 51 clips. `cp -a` so a directory comes across whole
+# and mtimes survive: the bake tools compare them.
+copied=0
 while IFS= read -r path; do
     path="${path%/}"
     mkdir -p "$dest/$(dirname "$path")"
-    ln -s "$main/$path" "$dest/$path"
-done < <(git -C "$main" ls-files --others --ignored --exclude-standard --directory assets downloads)
-printf '  %s more symlinks under assets/ and downloads/\n' \
-    "$(git -C "$main" ls-files --others --ignored --exclude-standard --directory assets downloads | wc -l)"
+    cp -a "$main/$path" "$dest/$path"
+    copied=$((copied + 1))
+done < <(git -C "$main" ls-files --others --ignored --exclude-standard --directory assets)
+printf '  %s entries, assets/ is now %s\n' "$copied" "$(du -sh "$dest/assets" | cut -f1)"
 
 step "Local settings"
 if [ -f "$main/noob_tube.toml" ]; then

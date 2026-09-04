@@ -250,7 +250,7 @@ cargo run -p noob_tube_client
 ### A second checkout, without a second build
 
 Two branches at once — an editor and an agent on each — wants two working trees, and a second
-`git clone` is the wrong way to get one here. `target/` is 47 GB of compiled Bevy and `downloads/`
+`git clone` is the wrong way to get one here. `target/` is 49 GB of compiled Bevy and `downloads/`
 is two more of ambientCG zips; neither fits twice on this disk, and the assets that are not
 committed would have to be produced again by hand.
 
@@ -258,11 +258,22 @@ committed would have to be produced again by hand.
 tools/new-worktree spikes          # ../my_bevy_game-spikes, on a new branch `spikes`
 ```
 
-A git worktree, so it has its own files and its own HEAD against the one object store, plus
-symlinks for the three things that must not be copied: `target/`, `downloads/`, and every file
-under `assets/` that is not committed — the Mixamo soldier and its clips, the mounted gun, the
-unpacked ground textures. `noob_tube.toml` is copied rather than linked, because the second session
-is the one that wants different numbers.
+A git worktree, so it has its own files and its own HEAD against the one object store. What it does
+with the rest is decided by size, and the sizes are three orders of magnitude apart:
+
+| | | |
+|---|---|---|
+| `target/` | 49 GB | symlink |
+| `downloads/` | 2.1 GB | symlink |
+| ignored files under `assets/` | 275 MB | **copied** |
+| `maps/`, `noob_tube.toml` | — | not shared at all |
+
+Only the first two are worth a shared directory. The assets — the Mixamo soldier and its 51 clips,
+the mounted gun, the ground textures unpacked out of `downloads/` — are copied instead: 275 MB is
+not a reason for anything, and a copy is what lets one tree re-bake a texture without writing it
+into the other tree's asset directory. Copied rather than regenerated because regenerating needs
+the Mixamo source and a bake run over those two gigabytes, which is minutes against a second. A
+fresh tree therefore costs 355 MB, against the 51.5 GB a second clone would.
 
 `target/` is a symlink rather than a `build.target-dir` setting so that every relative path in the
 scripts and in this README keeps working. Sharing it costs two things and they are worth knowing:
@@ -279,18 +290,19 @@ corrupted map rather than a shared one. A new tree starts on the built-in map; t
 world, point one server at the other's with `NOOB_TUBE_MAPS=…`. Nor are ports — give the second
 session its own with `NOOB_TUBE_PORT`, or the two sessions are one session.
 
-Only ignored files are linked, never a committed one — the Quaternius character beside the Mixamo
-soldier in `assets/characters/` is the picture: everything in the commit is a real file, `swat.glb`
-is the link. So git sees nothing unusual, and the three ways a link could plausibly be walked into
-turn out not to bite:
+Nothing git tracks is a symlink, in either tree; only `target/` and `downloads/`, both of which are
+ignored by name. So the two ways a shared directory could be walked into stay small:
 
-- **A file that is ignored today gets committed tomorrow.** Git replaces the link with the real
-  file on the next checkout — it never writes *through* one — and the original in the main checkout
-  is untouched. The two copies simply diverge from then on, which is what committing it asked for.
-- **`git clean -xdff` in the linked tree.** Removes the links and not what they point at.
-- **`cargo clean` in the linked tree.** Removes the `target` symlink and reports one file of 117
-  bytes; the shared build directory survives. `ln -s ../<main>/target target` puts it back. In the
-  *main* checkout it does what it says, and then the build is gone for both trees.
+- **`git clean -xdff`.** Removes the two links and not what they point at.
+- **`cargo clean` in the second tree.** Removes the `target` symlink and reports one file of 117
+  bytes; the shared build directory survives, and `ln -s <main>/target target` puts the link back.
+  In the *main* checkout it does what it says, and then the build is gone for both trees.
+
+One consequence of copying the assets rather than linking them, for completeness: if a file that is
+ignored today is committed tomorrow, the copy sitting at that path is overwritten by the committed
+one on the next checkout, silently — git treats a file its current rules ignore as expendable. That
+is the right outcome and it is what committing the file asked for, but a tree that had re-baked its
+own version loses it.
 
 ---
 
