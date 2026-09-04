@@ -1142,9 +1142,39 @@ fn remote_inspection() -> impl Plugin {
     |_: &mut App| {}
 }
 
+/// Which address the game socket binds, and — the part that is not obvious — which address a
+/// client's connect token has to name.
+///
+/// `0.0.0.0` on a developer's machine, and it has to be something else on a public one.
+///
+/// Netcode's token carries the address list the client believes it is dialling, and the server
+/// refuses a token that does not name the address it is itself bound to. The one exception in
+/// `lightyear_netcode` is that an unspecified local address matches a *loopback* token address,
+/// which is exactly the case a developer runs and exactly why nothing here ever needed saying. A
+/// client that dials a real IP sends a token naming that IP, `0.0.0.0` does not match it, and the
+/// server drops every connection request with "server address not in connect token whitelist"
+/// while the client sits there until it times out — no error either side can act on.
+///
+/// So a deployed server is told its own public address, and `deploy.sh` is what tells it.
+fn bind_address(port: u16) -> SocketAddr {
+    let Some(host) = std::env::var_os("NOOB_TUBE_BIND") else {
+        return SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port);
+    };
+    match host.to_string_lossy().parse::<std::net::IpAddr>() {
+        Ok(ip) => SocketAddr::new(ip, port),
+        Err(error) => {
+            // Not fatal: an unusable address here is a server nobody can reach, and one bound to
+            // everything is at worst a server only a local client can reach. Both need the log
+            // line, and only one of them can be read after the fact.
+            warn!("NOOB_TUBE_BIND is not an IP address ({error}); binding 0.0.0.0");
+            SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port)
+        }
+    }
+}
+
 /// Binds the UDP socket and starts accepting connections.
 fn start_listening(net: Res<NetConfig>, mut commands: Commands) {
-    let addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), net.port);
+    let addr = bind_address(net.port);
 
     let server = commands
         .spawn((

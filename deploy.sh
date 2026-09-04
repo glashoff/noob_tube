@@ -4,7 +4,8 @@
 # changed, start it again.
 #
 #   ./deploy.sh                 build, copy, restart
-#   ./deploy.sh --no-build      copy what is already in target/release
+#   ./deploy.sh --release       build with optimisations rather than the dev profile
+#   ./deploy.sh --no-build      copy what is already built
 #   ./deploy.sh --overwrite-maps  push every map, not only the ones the server lacks
 #   ./deploy.sh --no-maps       leave the server's maps alone entirely
 #   ./deploy.sh --logs          follow the journal afterwards instead of printing the tail
@@ -32,12 +33,14 @@ CONFIG=noob_tube_vserver.toml  # copied over as $PREFIX/noob_tube.toml
 cd "$(dirname "$(readlink -f "$0")")"
 
 build=yes
+profile=debug   # the dev profile: dependencies are optimised, our own code is not — see Cargo.toml
 maps=new        # new | all | none
 follow=no
 
 for arg in "$@"; do
     case "$arg" in
         --no-build) build=no ;;
+        --release) profile=release ;;
         --overwrite-maps) maps=all ;;
         --no-maps) maps=none ;;
         --logs) follow=yes ;;
@@ -66,12 +69,16 @@ meta_port=$(awk -F'[ =]+' '/^meta_port *=/ { print $2; exit }' "$CONFIG")
 # --- Build -----------------------------------------------------------------------------------
 
 if [ "$build" = yes ]; then
-    say "Building $BIN (release)"
-    cargo build --release -p noob_tube_server
+    say "Building $BIN ($profile)"
+    case "$profile" in
+        debug)   cargo build -p noob_tube_server ;;
+        release) cargo build --release -p noob_tube_server ;;
+    esac
 fi
 
-binary=target/release/$BIN
+binary=target/$profile/$BIN
 [ -x "$binary" ] || { echo "deploy: no $binary — drop --no-build" >&2; exit 1; }
+echo "deploying $binary"
 
 # --- Is the artefact usable over there? ---------------------------------------------------------
 
@@ -93,6 +100,27 @@ if [ "$(printf '%s\n%s\n' "$local_glibc" "$remote_glibc" | sort -V | head -1)" !
     exit 1
 fi
 echo "$HOST: $remote_arch, glibc $remote_glibc — good (here: $local_glibc)"
+
+# The address the game socket binds, which is not a detail: netcode's connect token names the
+# address the client dialled, and the server refuses a token that does not name the address it is
+# bound to — with one exception, an unspecified address against a loopback token, which is why a
+# server on 0.0.0.0 works perfectly at home and silently refuses every real client. See
+# `bind_address` in server/src/main.rs.
+#
+# Taken from the far side's own routing table rather than from DNS, because it is the address the
+# machine actually answers on.
+public_ip=$(ssh_ "ip -4 route get 1.1.1.1" | awk '{ for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1); exit }')
+[ -n "$public_ip" ] || { echo "deploy: cannot work out $HOST's public address" >&2; exit 1; }
+echo "$HOST: binding $public_ip"
+
+# What a client dialling by name would put in its token. A mismatch is not fatal — the DNS may not
+# have caught up, or this deploy may be going to a machine reached by IP — but a client that
+# resolves the name to something else will be refused, so it is worth saying out loud.
+resolved=$(getent ahostsv4 "${HOST#*@}" 2>/dev/null | awk 'NR == 1 { print $1 }')
+if [ -n "$resolved" ] && [ "$resolved" != "$public_ip" ]; then
+    echo "deploy: warning — ${HOST#*@} resolves to $resolved, but the server binds $public_ip." >&2
+    echo "        A client dialling the name will be refused. Point the DNS at $public_ip." >&2
+fi
 
 # --- The user, the directories and the unit ------------------------------------------------------
 
@@ -131,6 +159,7 @@ WorkingDirectory=$PREFIX
 # it was *built* at, which does not exist on this machine.
 Environment=NOOB_TUBE_CONFIG=$PREFIX/noob_tube.toml
 Environment=NOOB_TUBE_MAPS=$PREFIX/maps
+Environment=NOOB_TUBE_BIND=$public_ip
 Environment=RUST_BACKTRACE=1
 ExecStart=$PREFIX/bin/$BIN
 # A game server that dies mid-round should be back before the players have finished swearing.
@@ -208,7 +237,7 @@ say "Status"
 if ssh_ "systemctl is-active --quiet $SERVICE"; then
     ssh_ "systemctl --no-pager --lines=0 status $SERVICE | sed -n '1,5p'"
     echo
-    ssh_ "ss -lnup 2>/dev/null | grep -q ':$port ' && echo \"game:     udp/$port listening\" || echo \"game:     udp/$port NOT listening\"
+    ssh_ "ss -lnup 2>/dev/null | grep -q '$public_ip:$port ' && echo \"game:     udp $public_ip:$port listening\" || echo \"game:     udp $public_ip:$port NOT listening\"
           ss -lntp 2>/dev/null | grep -q ':$meta_port ' && echo \"metadata: tcp/$meta_port listening\" || echo \"metadata: tcp/$meta_port NOT listening\""
 else
     echo "deploy: $SERVICE did not stay up. The last of its journal:" >&2
