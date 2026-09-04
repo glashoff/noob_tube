@@ -5,6 +5,7 @@
 //! are switched off.
 
 
+mod certificate;
 mod maps;
 mod markers;
 mod sculpting;
@@ -38,6 +39,17 @@ fn main() {
     // Read once, at startup, before anything can ask for it.
     let net = NetConfig::load();
 
+    // Before the App, because a server with no certificate has nothing to listen with: QUIC has no
+    // unencrypted mode. A failure here is fatal and belongs at the top of the log rather than as a
+    // panic inside a Startup system half way down it.
+    let bound = BoundAddr(bind_address(net.port));
+    let certificate = match certificate::ServerCertificate::self_signed(bound.0) {
+        Ok(certificate) => certificate,
+        Err(why) => {
+            println!("{why}");
+            std::process::exit(1);
+        }
+    };
 
     App::new()
         // Sleeping between frames rather than spinning: see `NetConfig::frame_duration`, which is
@@ -58,6 +70,8 @@ fn main() {
         // interpolation then has nothing to interpolate across — see `SEND_RATE`.
         .insert_resource(ReplicationMetadata::new(net.send_interval()))
         .insert_resource(net)
+        .insert_resource(certificate)
+        .insert_resource(bound)
         // The map. The server owns it — it is the authority, and until step six of terrain.md
         // there is one map and it is the built-in one. Every client is sent a copy of exactly
         // this on join; none of them may read one for itself.
@@ -70,7 +84,7 @@ fn main() {
         // disagreed, every step near the difference would produce a correction the player sees.
         .add_systems(
             Startup,
-            (start_listening, publish_metadata, level::spawn_level, spawn_props),
+            (start_listening, level::spawn_level, spawn_props),
         )
         // The ground, whenever the map appears or changes. PreUpdate rather than Startup so that
         // the server and a client build it through the same path — see `level::build_the_ground`,
@@ -1166,15 +1180,39 @@ fn bind_address(port: u16) -> SocketAddr {
             // Not fatal: an unusable address here is a server nobody can reach, and one bound to
             // everything is at worst a server only a local client can reach. Both need the log
             // line, and only one of them can be read after the fact.
-            warn!("NOOB_TUBE_BIND is not an IP address ({error}); binding 0.0.0.0");
+            //
+            // `println!` because this is read in `main`, before the App and therefore before
+            // `LogPlugin` has installed a subscriber — the same reason the client's `configure`
+            // prints. It is read there because the certificate is minted from it.
+            println!("NOOB_TUBE_BIND is not an IP address ({error}); binding 0.0.0.0");
             SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port)
         }
     }
 }
 
-/// Binds the UDP socket and starts accepting connections.
-fn start_listening(net: Res<NetConfig>, mut commands: Commands) {
-    let addr = bind_address(net.port);
+/// The address the game socket is bound to, worked out once in `main`.
+///
+/// A resource so that the one system which listens and the certificate minted before it are
+/// talking about the same address, rather than each asking the environment again.
+#[derive(Resource, Clone, Copy)]
+struct BoundAddr(SocketAddr);
+
+/// Opens the WebTransport endpoint and publishes what a client needs to reach it.
+///
+/// The two are one system because they are one fact. A connect token has to name the address the
+/// server bound, and netcode drops every request whose token names anything else — so the address
+/// that goes out over the metadata endpoint is, by construction, the one the socket is listening
+/// on rather than a second guess at it.
+///
+/// A Startup system rather than a call from `main`, so that its log lines have somewhere to go:
+/// the tracing subscriber arrives with `LogPlugin`, inside the App.
+fn start_listening(
+    net: Res<NetConfig>,
+    bound: Res<BoundAddr>,
+    certificate: Res<certificate::ServerCertificate>,
+    mut commands: Commands,
+) {
+    let addr = bound.0;
 
     let server = commands
         .spawn((
@@ -1185,7 +1223,9 @@ fn start_listening(net: Res<NetConfig>, mut commands: Commands) {
                 private_key: PLACEHOLDER_PRIVATE_KEY,
                 ..default()
             }),
-            server::ServerUdpIo::default(),
+            server::WebTransportServerIo {
+                certificate: certificate.identity.clone_identity(),
+            },
             LocalAddr(addr),
         ))
         .id();
@@ -1193,17 +1233,25 @@ fn start_listening(net: Res<NetConfig>, mut commands: Commands) {
     commands.trigger(server::Start { entity: server });
     info!("listening on {addr}");
     info!("{}", net.describe(noob_tube_shared::tuning::Side::Server));
-}
 
-/// Startup: publishes the config beside the game socket, so a client can adopt the tick rate
-/// before it builds its app.
-///
-/// A Startup system rather than a plain call from `main`, only so that its log line has somewhere
-/// to go: the tracing subscriber arrives with `LogPlugin`, inside the App. Zero switches it off.
-fn publish_metadata(net: Res<NetConfig>) {
-    if net.meta_port != 0 {
-        noob_tube_shared::metadata::serve(*net, net.meta_port);
+    // Zero switches the endpoint off, and with it every client's chance of learning the digest
+    // above — which on a self-signed certificate means nothing can connect at all. Worth saying
+    // out loud rather than leaving as a timeout nobody can explain.
+    if net.meta_port == 0 {
+        warn!(
+            "no metadata endpoint: clients cannot learn the certificate digest and, unless this \
+             server has a publicly trusted certificate, none of them will connect"
+        );
+        return;
     }
+    noob_tube_shared::metadata::serve(
+        noob_tube_shared::metadata::ServerInfo {
+            net: *net,
+            token_addr: addr,
+            cert_digest: certificate.digest.clone(),
+        },
+        net.meta_port,
+    );
 }
 
 /// Fires once per incoming connection. Lightyear spawns a child entity carrying `LinkOf` for each

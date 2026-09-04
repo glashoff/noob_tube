@@ -12,8 +12,11 @@
 //! leaves the `TickDuration` resource that every timeline converts with untouched.
 //!
 //! So this is a second, tiny listener beside the game socket: HTTP on TCP, one endpoint, returning
-//! the server's [`NetConfig`] as TOML — the same language the config file speaks, parsed by the
-//! same code. A client fetches it in `main`, before `App::new`.
+//! a [`ServerInfo`] as JSON. A client fetches it in `main`, before `App::new`.
+//!
+//! **JSON rather than the TOML the config file speaks**, since web.md §2: in a browser this is
+//! fetched by JavaScript before the wasm module starts, because nothing on that side may block. A
+//! browser parses JSON for free and would need a shipped parser for anything else.
 //!
 //! For the tick rate it is a convenience rather than a safety net: that one is baked into the
 //! netcode protocol id and rejects a mismatched peer whether or not this endpoint was reachable.
@@ -21,13 +24,40 @@
 //! disagreeing about lag compensation, connect perfectly happily and produce a session whose
 //! numbers mean nothing — which is exactly the failure this endpoint now exists to prevent, and
 //! why a client that could not reach it says so in as many words.
+//!
+//! Two of the three fields are not settings at all but facts about the running server, and they
+//! are here because a browser cannot discover them for itself: it has no name resolver to turn a
+//! host into the address a connect token must name, and no way to learn a self-signed
+//! certificate's digest. See [`ServerInfo`].
 
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
 use crate::tuning::NetConfig;
+
+/// Everything a client is told before it builds its app.
+///
+/// [`net`](Self::net) is the settings, and the only part with a rule about who owns what. The other
+/// two are facts about this particular process:
+///
+/// - [`token_addr`](Self::token_addr) is the address a netcode connect token has to name. The
+///   client mints its own token — there is no backend issuing them — so it has to know what the
+///   server will accept, and netcode compares it against the address the server actually bound.
+///   Working it out on the client meant resolving a host name, which a browser cannot do at all.
+/// - [`cert_digest`](Self::cert_digest) is the SHA-256 of a self-signed certificate, hex, no
+///   colons — empty when the server holds a real one and ordinary validation applies.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ServerInfo {
+    /// The settings the server owns.
+    pub net: NetConfig,
+    /// What a connect token must name for this server to accept it.
+    pub token_addr: SocketAddr,
+    /// Hex SHA-256 of the server's certificate, or empty when it has a publicly trusted one.
+    pub cert_digest: String,
+}
 
 /// How long a client waits for the endpoint before giving up and using its own settings.
 ///
@@ -43,7 +73,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_millis(500);
 ///
 /// A failure to bind is logged and otherwise ignored. The endpoint is a convenience; a server that
 /// cannot offer it should still serve the game.
-pub fn serve(config: NetConfig, port: u16) {
+pub fn serve(info: ServerInfo, port: u16) {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = match TcpListener::bind(addr) {
         Ok(listener) => listener,
@@ -52,7 +82,7 @@ pub fn serve(config: NetConfig, port: u16) {
             return;
         }
     };
-    let body = match toml::to_string(&config) {
+    let body = match serde_json::to_string(&info) {
         Ok(body) => body,
         Err(err) => {
             warn!("cannot serialise the config: {err}");
@@ -76,6 +106,10 @@ pub fn serve(config: NetConfig, port: u16) {
 ///
 /// There is one thing to say, so there is no routing and no method check: any request gets the
 /// config. Hand-written HTTP is only defensible because the response never varies.
+///
+/// `Access-Control-Allow-Origin` is not here and should not be: the browser reads this through the
+/// same origin that served the page, proxied to this port on loopback (web.md §2). A page on
+/// another origin has no business minting connect tokens for this server.
 fn answer(mut stream: TcpStream, body: &str) {
     // The request has to be drained before replying, or a client that is still writing gets its
     // connection reset instead of the answer. One read is enough for a request this small.
@@ -85,7 +119,7 @@ fn answer(mut stream: TcpStream, body: &str) {
 
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
-         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Type: application/json; charset=utf-8\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
          \r\n\
@@ -99,7 +133,7 @@ fn answer(mut stream: TcpStream, body: &str) {
 ///
 /// Unreachable is not an error: plenty of servers will not have this, and the protocol id still
 /// refuses a mismatched connection. The caller logs what it decided.
-pub fn fetch(addr: SocketAddr) -> Option<NetConfig> {
+pub fn fetch(addr: SocketAddr) -> Option<ServerInfo> {
     let mut stream = TcpStream::connect_timeout(&addr, FETCH_TIMEOUT).ok()?;
     stream.set_read_timeout(Some(FETCH_TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(FETCH_TIMEOUT)).ok()?;
@@ -108,7 +142,39 @@ pub fn fetch(addr: SocketAddr) -> Option<NetConfig> {
 
     let mut response = String::new();
     stream.read_to_string(&mut response).ok()?;
-    // Headers and body are separated by a blank line; everything after it is the TOML.
+    // Headers and body are separated by a blank line; everything after it is the JSON.
     let body = response.split_once("\r\n\r\n").map(|(_, body)| body)?;
-    toml::from_str(body).ok()
+    serde_json::from_str(body).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The endpoint's own round trip, over a real socket on a port the OS picked.
+    ///
+    /// It exists because the body is hand-written HTTP: a header that is one byte wrong is
+    /// invisible in review and fatal at startup, and the only thing that can say which it is, is a
+    /// client parsing what the server actually wrote.
+    #[test]
+    fn what_the_server_wrote_is_what_the_client_reads() {
+        let mut net = NetConfig::default();
+        net.tick_hz = 32.0;
+        let info = ServerInfo {
+            net,
+            token_addr: "10.0.0.1:5555".parse().expect("an address"),
+            cert_digest: "ab".repeat(32),
+        };
+
+        // Port zero, then ask the OS which one it gave us — a fixed port would collide with
+        // whatever else is running on the machine the tests run on.
+        let port = TcpListener::bind(("127.0.0.1", 0))
+            .and_then(|probe| probe.local_addr())
+            .expect("a free port")
+            .port();
+        serve(info.clone(), port);
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        assert_eq!(fetch(addr), Some(info));
+    }
 }

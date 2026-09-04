@@ -35,7 +35,7 @@ use noob_tube_shared::PLACEHOLDER_PRIVATE_KEY;
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 
 fn main() {
-    let net = configure();
+    let (net, dial) = configure();
 
     App::new()
         .add_plugins(windowing())
@@ -47,6 +47,7 @@ fn main() {
         // server has no say in this: it acts on whatever tick an input arrives labelled with.
         .insert_resource(net.input_timeline())
         .insert_resource(net)
+        .insert_resource(dial)
         .add_plugins((
             noob_tube_shared::physics::PhysicsPlugin,
             // Draws the predicted player between fixed ticks, and carries visual correction.
@@ -185,26 +186,38 @@ fn windowing() -> PluginGroupBuilder {
 /// `println!` rather than `info!`, and this is the one place it is right: all of this happens
 /// before `App::new`, so `LogPlugin` has not installed a tracing subscriber and every `info!` here
 /// would go nowhere at all.
-fn configure() -> NetConfig {
+fn configure() -> (NetConfig, Dial) {
     let mut net = NetConfig::load();
+    let mut dial = Dial {
+        target: format!("https://{}:{}", server_host(), net.port),
+        // What to name in the token if the server will not say: the address we resolved for
+        // ourselves, which is what this did before the server published one.
+        token_addr: server_address(net.port),
+        cert_digest: String::new(),
+    };
     if net.meta_port == 0 {
-        return net;
+        return (net, dial);
     }
 
     let addr = server_address(net.meta_port);
     match noob_tube_shared::metadata::fetch(addr) {
-        Some(server) => match net.adopt_from_server(&server) {
-            moved if moved.is_empty() => println!("server at {addr} agrees with our settings"),
-            moved => println!("server at {addr} says {}", moved.join(", ")),
-        },
+        Some(server) => {
+            dial.token_addr = server.token_addr;
+            dial.cert_digest = server.cert_digest;
+            match net.adopt_from_server(&server.net) {
+                moved if moved.is_empty() => println!("server at {addr} agrees with our settings"),
+                moved => println!("server at {addr} says {}", moved.join(", ")),
+            }
+        }
         None => println!(
             "no metadata from {addr}: our own settings stand, {} Hz and all. A tick rate the \
              server does not share refuses the connection; a simulated link it does not share is \
-             not caught by anything.",
+             not caught by anything. Nor is there a certificate to pin, so a server holding a \
+             self-signed one will refuse the connection outright.",
             net.tick_hz,
         ),
     }
-    net
+    (net, dial)
 }
 
 /// Live ECS inspection over BRP, compiled in only with `--features remote`.
@@ -267,13 +280,43 @@ fn world_inspector() -> impl Plugin {
     |_: &mut App| {}
 }
 
-/// Which machine the server is on, for a given port.
+/// Where and how to dial the server, settled before the app exists.
+///
+/// Three separate answers to "which server", and they are separate because a browser cannot derive
+/// any of them from the others (web.md §2):
+///
+/// - [`target`](Self::target) is a URL, and the name in it is what TLS is checked against. A
+///   resolved address would not do: a certificate names hosts.
+/// - [`token_addr`](Self::token_addr) is an address, because netcode compares it against the one
+///   the server bound. The server publishes it, since resolving a name needs a resolver and a
+///   browser has none.
+/// - [`cert_digest`](Self::cert_digest) is what a self-signed certificate is pinned by, and empty
+///   for a publicly trusted one. See the server's `certificate` module.
+#[derive(Resource, Clone, Debug)]
+struct Dial {
+    /// The WebTransport URL, `https://host:port`.
+    target: String,
+    /// What this client's connect token names.
+    token_addr: SocketAddr,
+    /// Hex SHA-256 of the certificate to pin, or empty to validate the ordinary way.
+    cert_digest: String,
+}
+
+/// Which machine the server is on, by name.
 ///
 /// Localhost unless `NOOB_TUBE_SERVER` says otherwise, which is the shape the rest of the settings
 /// have: the file is for what you keep, the environment for the one thing you are changing right
 /// now. It is not a [`NetConfig`] field because that resource is `Copy` and read by both binaries
 /// — a host name is neither a number nor anything the server has an opinion about. `deploy.sh`
 /// prints the line to run with it.
+///
+/// The name, not an address, because this is what goes into the WebTransport URL and a certificate
+/// is issued to names.
+fn server_host() -> String {
+    std::env::var("NOOB_TUBE_SERVER").unwrap_or_else(|_| Ipv4Addr::LOCALHOST.to_string())
+}
+
+/// The same machine, resolved, for a given port.
 ///
 /// A name is resolved, and only IPv4 answers count: the server binds `0.0.0.0`, so an AAAA record
 /// leading the list would produce a connection that times out with nothing to say about why.
@@ -296,13 +339,9 @@ fn server_address(port: u16) -> SocketAddr {
     }
 }
 
-fn connect(net: Res<NetConfig>, mut commands: Commands) {
-    let server_addr = server_address(net.port);
-    // Port 0 lets the OS pick, so several clients can run on one machine.
-    let local_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
-
+fn connect(net: Res<NetConfig>, dial: Res<Dial>, mut commands: Commands) {
     let auth = Authentication::Manual {
-        server_addr,
+        server_addr: dial.token_addr,
         client_id: rand_client_id(),
         private_key: PLACEHOLDER_PRIVATE_KEY,
         protocol_id: net.protocol_id(),
@@ -345,14 +384,23 @@ fn connect(net: Res<NetConfig>, mut commands: Commands) {
                 },
             )
             .expect("failed to build the netcode client"),
-            UdpIo::default(),
-            LocalAddr(local_addr),
-            PeerAddr(server_addr),
+            client::WebTransportClientIo {
+                certificate_digest: dial.cert_digest.clone(),
+                target: Some(dial.target.clone()),
+            },
+            // Not what the URL is built from — `target` above is — but what the rest of the app
+            // and an inspector read to say who this link talks to.
+            PeerAddr(dial.token_addr),
         ))
         .id();
 
     commands.trigger(client::Connect { entity: client });
-    info!("connecting to {server_addr}, {}", net.describe(noob_tube_shared::tuning::Side::Client));
+    info!(
+        "connecting to {} as {}, {}",
+        dial.target,
+        dial.token_addr,
+        net.describe(noob_tube_shared::tuning::Side::Client),
+    );
 }
 
 fn on_connected(trigger: On<Add, Connected>) {

@@ -82,10 +82,12 @@ What it costs:
   unpicking: netcode is also what does connection tokens, client ids and the protocol-id refusal
   that makes a tick-rate mismatch fail safely.
 
-**Escape hatch.** Keep `UdpIo` reachable behind a cargo feature for one milestone, so a latency
-regression can be bisected against the transport rather than argued about. Delete it once a session
-has been measured on both. A feature that outlives that milestone is the second path this section
-just refused.
+**No escape hatch, in the end.** The plan was to keep `UdpIo` behind a cargo feature for one
+milestone so a latency regression could be bisected against the transport. It was not built: the
+flag needs both lightyear IO features compiled in and a `cfg` fork in each of the two binaries plus
+the config, and every change after it would have had to keep both alive — which is the second path
+this section just refused, wearing a different hat. Git holds the last UDP commit, and bisecting
+against it costs one checkout.
 
 **Certificate.** WebTransport requires TLS with no exceptions. Two shapes:
 
@@ -141,6 +143,12 @@ speaks HTTP natively; the native client's `fetch()` is ten lines of hand-written
 `TcpStream` that work unchanged against a JSON body. There is nothing to unify — the two consumers
 already share the endpoint. What gets deleted is nothing; what gets added is a JSON body and a `.json`
 content type.
+
+**The payload grew two fields, and they arrived with §1** rather than here, because native needed
+them first: `token_addr`, the address a connect token must name, and `cert_digest`, the certificate
+to pin. Both are facts about the running process rather than settings, which is why they sit beside
+`NetConfig` in a `ServerInfo` instead of inside it — and why neither goes through
+`adopt_from_server`, whose rule is about who owns a *setting*. See `shared/src/metadata.rs`.
 
 **Can this go over WebTransport instead?** No, and it is worth writing down why so the question does
 not come back: the config is what the connection is *built from*. Tick duration decides the plugin
