@@ -150,6 +150,12 @@ fn windowing() -> PluginGroupBuilder {
     let plugins = DefaultPlugins
         .set(AssetPlugin {
             file_path: ASSETS.into(),
+            // Bevy looks for a `.meta` file beside every asset it loads. On a disk that is a
+            // failed `stat`; over HTTP it is a second request and a 404 for each one, which
+            // doubles the traffic of a load and fills the console with failures that are not.
+            // Nothing here ships a `.meta` file, so there is nothing to look for.
+            #[cfg(target_family = "wasm")]
+            meta_check: bevy::asset::AssetMetaCheck::Never,
             ..default()
         })
         .set(draw_with_the_integrated_gpu());

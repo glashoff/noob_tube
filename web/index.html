@@ -25,6 +25,21 @@
            around the whole picture when it has it. */
         outline: none;
       }
+      /* Only ever shown with `?log` in the address — see the script below. Fixed, on top, and
+         scrollable, because what it is for is being read and copied out of a machine that has no
+         developer tools open. */
+      #log {
+        position: fixed;
+        inset: auto 0 0 0;
+        max-height: 40%;
+        overflow: auto;
+        margin: 0;
+        padding: 0.5rem 0.75rem;
+        background: #0b0d12ee;
+        border-top: 1px solid #2a3040;
+        font: 12px/1.4 ui-monospace, monospace;
+        white-space: pre-wrap;
+      }
       #loading {
         position: fixed;
         inset: 0;
@@ -50,6 +65,28 @@
       // and there is no raw TCP. So the fetch happens here, before the module is instantiated, and
       // the answer is left on `window` for the client to read synchronously.
       import init from "./noob_tube_client.js";
+
+      // `?log` mirrors the console into the page. It is for a machine with no developer tools in
+      // front of it — a phone, a headless browser in a test, somebody being asked what went wrong
+      // — and it is off otherwise, because a game does not need a log pane over the bottom of it.
+      if (new URLSearchParams(location.search).has("log")) {
+        const pane = document.createElement("pre");
+        pane.id = "log";
+        document.body.append(pane);
+        const write = (kind, args) => {
+          pane.append(`${kind} ${args.map(String).join(" ")}\n`);
+          pane.scrollTop = pane.scrollHeight;
+        };
+        for (const kind of ["log", "info", "warn", "error"]) {
+          const was = console[kind].bind(console);
+          console[kind] = (...args) => {
+            was(...args);
+            write(kind, args);
+          };
+        }
+        addEventListener("error", (event) => write("uncaught", [event.message]));
+        addEventListener("unhandledrejection", (event) => write("unhandled", [event.reason]));
+      }
 
       const status = document.getElementById("loading");
 

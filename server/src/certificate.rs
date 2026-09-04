@@ -4,24 +4,31 @@
 //! in which the server does not present a certificate. See web.md §1 for why the transport is
 //! WebTransport on native as well as in a browser.
 //!
-//! **Self-signed, for now.** A development server mints one at startup and publishes its SHA-256
-//! digest over the metadata endpoint, which is what lets a client trust exactly this certificate
-//! and nothing else: on native `wtransport` compares the digest, and in a browser the same hex
-//! goes into `serverCertificateHashes`. That mechanism is the reason the identity is generated
-//! here rather than by an operator — a hash nobody published is a hash nobody can pin.
+//! **Two shapes, and which one is in use decides what a client has to be told.**
 //!
-//! It is also why the validity is two weeks and not two years. A browser refuses a pinned
-//! certificate valid for longer than fourteen days, so `Identity::self_signed` mints exactly that,
-//! and a server left running past it stops being connectable — which is correct for a development
-//! certificate and unacceptable for a deployment.
+//! A deployment is handed a certificate from an authority the browser already trusts —
+//! `NOOB_TUBE_CERT` and `NOOB_TUBE_KEY`, in the environment beside `NOOB_TUBE_BIND`, because these
+//! are facts about a machine rather than settings of a game. Then there is nothing to publish: the
+//! digest goes out empty and validation happens the ordinary way.
 //!
-//! **A deployment therefore needs a real one**, from a CA the browser already trusts, and then the
-//! digest goes out empty and ordinary validation applies. That is not built: loading a PEM pair is
-//! the deployment step of web.md §9, together with the reload a renewal every sixty days needs.
-//! Until it exists, this server is a development server.
+//! Everything else mints one at startup and publishes its SHA-256 digest over the metadata
+//! endpoint, which is what lets a client trust exactly this certificate and nothing else: on native
+//! `wtransport` compares the digest, and in a browser the same hex goes into
+//! `serverCertificateHashes`. That is also why the generated one lasts a fortnight and not a year
+//! — a browser refuses a pinned certificate valid for longer than fourteen days — and why a server
+//! left running past it stops being connectable. Correct for a development certificate,
+//! unacceptable for a deployment, which is the whole reason the first shape exists.
+//!
+//! The two cannot be mixed. A publicly trusted certificate is good for sixty or ninety days, so
+//! publishing *its* digest would ask the browser to pin something it refuses to pin, and every
+//! connection would fail. Supplying the files means saying "this one needs no pinning".
+//!
+//! What is not here yet is the renewal: a certificate replaced every sixty days is a server that
+//! has to be told, and today that means restarting it. See web.md §8.
 
 use bevy::prelude::*;
 use lightyear::prelude::Identity;
+use wtransport::tls::{Certificate, CertificateChain, PrivateKey};
 
 /// The certificate the server presents, and the digest a client pins it by.
 ///
@@ -38,13 +45,78 @@ pub struct ServerCertificate {
 }
 
 impl ServerCertificate {
+    /// The certificate an operator supplied, or one minted for this run.
+    ///
+    /// A supplied pair that cannot be read is fatal rather than quietly falling back to a generated
+    /// one. The fallback would start, would look like it worked, and would refuse every browser
+    /// that arrived — which is a worse failure than not starting, and one nobody would connect to
+    /// the file they had just installed.
+    pub fn load(bind: std::net::SocketAddr) -> Result<Self, String> {
+        match (std::env::var_os("NOOB_TUBE_CERT"), std::env::var_os("NOOB_TUBE_KEY")) {
+            (Some(chain), Some(key)) => Self::from_pemfiles(chain.as_ref(), key.as_ref()),
+            (None, None) => Self::self_signed(bind),
+            // One without the other is a half-finished deployment, and guessing which half was
+            // meant is how a server ends up serving a certificate nobody chose.
+            _ => Err("NOOB_TUBE_CERT and NOOB_TUBE_KEY have to be given together".to_string()),
+        }
+    }
+
+    /// A certificate and key an authority issued, in the PEM files certbot leaves behind.
+    ///
+    /// `fullchain.pem` rather than `cert.pem`: a browser needs the intermediates, and a chain with
+    /// only the leaf in it fails on some clients and not others, which is the worst way for this to
+    /// go wrong.
+    fn from_pemfiles(chain: &std::path::Path, key: &std::path::Path) -> Result<Self, String> {
+        let pem = std::fs::read(chain).map_err(|why| format!("{}: {why}", chain.display()))?;
+        let certificates = rustls_pemfile::certs(&mut &pem[..])
+            .map(|found| {
+                found
+                    .map_err(|why| format!("{}: {why}", chain.display()))
+                    .and_then(|der| {
+                        Certificate::from_der(der.to_vec())
+                            .map_err(|why| format!("{}: {why}", chain.display()))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if certificates.is_empty() {
+            return Err(format!("{} holds no certificate", chain.display()));
+        }
+
+        let pem = std::fs::read(key).map_err(|why| format!("{}: {why}", key.display()))?;
+        // PKCS#8 only — `BEGIN PRIVATE KEY`, which is what every current tool writes and what
+        // `from_der_pkcs8` below is willing to read. The older formats are still out there, and a
+        // line saying which one this is and how to convert it beats "invalid key".
+        let private = rustls_pemfile::pkcs8_private_keys(&mut &pem[..])
+            .next()
+            .ok_or_else(|| {
+                format!(
+                    "{} holds no PKCS#8 private key (`BEGIN PRIVATE KEY`). If it is an older \
+                     format: openssl pkcs8 -topk8 -nocrypt -in {} -out {}.pkcs8",
+                    key.display(),
+                    key.display(),
+                    key.display(),
+                )
+            })?
+            .map_err(|why| format!("{}: {why}", key.display()))?;
+
+        Ok(Self {
+            identity: Identity::new(
+                CertificateChain::new(certificates),
+                PrivateKey::from_der_pkcs8(private.secret_pkcs8_der().to_vec()),
+            ),
+            // Nothing to pin: this one is trusted on its own account, and asking a browser to pin
+            // it would fail on the validity period alone. See this module's header.
+            digest: String::new(),
+        })
+    }
+
     /// Mints a development certificate, or explains why it could not.
     ///
     /// The names are what a self-signed certificate is *for* rather than what it is checked
     /// against: a client that pins the digest does not look at them at all. They are here so that
     /// a client which one day does not pin — because the server got a real certificate and this
     /// path is only the fallback — sees the names it dialled.
-    pub fn self_signed(bind: std::net::SocketAddr) -> Result<Self, String> {
+    fn self_signed(bind: std::net::SocketAddr) -> Result<Self, String> {
         let mut names = vec![
             "localhost".to_string(),
             "127.0.0.1".to_string(),
@@ -74,4 +146,69 @@ fn hex(identity: &Identity) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("noob_tube_{name}_{}.pem", std::process::id()))
+    }
+
+    /// A PEM pair written and read back is the certificate that was written.
+    ///
+    /// The point is not the round trip — it is the two decisions either side of it. A supplied
+    /// certificate must come back with an **empty digest**, because publishing one would ask a
+    /// browser to pin a certificate that outlives what pinning allows, and every connection would
+    /// fail with nothing pointing at this file. And the key has to survive being written as
+    /// PKCS#8 and parsed back, which is the one part of this that is somebody else's format.
+    #[test]
+    fn a_supplied_certificate_is_taken_as_it_is_and_pinned_by_nobody() {
+        let minted = ServerCertificate::self_signed("127.0.0.1:0".parse().expect("an address"))
+            .expect("a certificate could not be minted");
+        let leaf = &minted.identity.certificate_chain().as_slice()[0];
+
+        let chain_path = scratch("chain");
+        let key_path = scratch("key");
+        std::fs::write(&chain_path, leaf.to_pem()).expect("the scratch chain");
+        std::fs::write(&key_path, minted.identity.private_key().to_secret_pem())
+            .expect("the scratch key");
+
+        let loaded = ServerCertificate::from_pemfiles(&chain_path, &key_path)
+            .expect("the pair could not be read back");
+        assert_eq!(hex(&loaded.identity), hex(&minted.identity), "a different certificate");
+        assert!(loaded.digest.is_empty(), "a supplied certificate was published for pinning");
+
+        let _ = std::fs::remove_file(&chain_path);
+        let _ = std::fs::remove_file(&key_path);
+    }
+
+    /// A key in a format this cannot read says which format it wanted and how to get there.
+    ///
+    /// The failure it replaces is a server that will not start with "invalid key" and no idea
+    /// which of the four things in a PEM file is wrong.
+    #[test]
+    fn a_key_in_the_wrong_format_says_so() {
+        let chain_path = scratch("lonely_chain");
+        let key_path = scratch("sec1");
+        let minted = ServerCertificate::self_signed("127.0.0.1:0".parse().expect("an address"))
+            .expect("a certificate could not be minted");
+        std::fs::write(&chain_path, minted.identity.certificate_chain().as_slice()[0].to_pem())
+            .expect("the scratch chain");
+        // A PEM file with a section this does not take. The bytes need not be a real key: nothing
+        // gets as far as looking at them.
+        std::fs::write(&key_path, "-----BEGIN EC PRIVATE KEY-----\nMHQ=\n-----END EC PRIVATE KEY-----\n")
+            .expect("the scratch key");
+
+        let trouble = match ServerCertificate::from_pemfiles(&chain_path, &key_path) {
+            Err(trouble) => trouble,
+            Ok(_) => panic!("a key this cannot read was accepted"),
+        };
+        assert!(trouble.contains("PKCS#8"), "the error does not say what it wanted: {trouble}");
+        assert!(trouble.contains("openssl"), "the error does not say how to get there: {trouble}");
+
+        let _ = std::fs::remove_file(&chain_path);
+        let _ = std::fs::remove_file(&key_path);
+    }
 }

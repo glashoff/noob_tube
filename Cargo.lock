@@ -5875,7 +5875,9 @@ dependencies = [
  "bevy",
  "lightyear",
  "noob_tube_shared",
+ "rustls-pemfile",
  "serde_json",
+ "wtransport",
 ]
 
 [[package]]

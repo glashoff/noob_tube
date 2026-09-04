@@ -43,7 +43,7 @@ fn main() {
     // unencrypted mode. A failure here is fatal and belongs at the top of the log rather than as a
     // panic inside a Startup system half way down it.
     let bound = BoundAddr(bind_address(net.port));
-    let certificate = match certificate::ServerCertificate::self_signed(bound.0) {
+    let certificate = match certificate::ServerCertificate::load(bound.0) {
         Ok(certificate) => certificate,
         Err(why) => {
             println!("{why}");
