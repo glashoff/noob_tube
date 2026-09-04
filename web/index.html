@@ -109,6 +109,39 @@
 
       const status = document.getElementById("loading");
 
+      // What this browser has to be able to do, asked before anything else is started. Both are
+      // hard requirements and neither degrades: without WebGPU there is nothing to draw with, and
+      // without WebTransport there is no way to reach a server (web.md §1 and §3).
+      //
+      // Asked here rather than left to fail on its own, because what it looks like otherwise is a
+      // wasm-bindgen stack trace out of the middle of the renderer — a panic with the cause four
+      // frames down and the remedy nowhere at all. Firefox on Linux is the browser this is written
+      // for: it has had WebTransport since 2023 and WebGPU is still coming.
+      const missing = [];
+      if (!navigator.gpu) {
+        missing.push("WebGPU");
+      } else {
+        // Having the object is not having a device. A browser with WebGPU switched on but no
+        // adapter it can use answers null here, and that is the same "cannot run" for a player.
+        try {
+          if (!(await navigator.gpu.requestAdapter())) {
+            missing.push("a WebGPU adapter");
+          }
+        } catch (trouble) {
+          missing.push(`a WebGPU adapter (${trouble})`);
+        }
+      }
+      if (!window.WebTransport) {
+        missing.push("WebTransport");
+      }
+      if (missing.length > 0) {
+        status.textContent =
+          `Noob Tube needs ${missing.join(" and ")}, and this browser has none. ` +
+          `Chrome, Edge and Safari 26 all work; Firefox on Linux is the one that does not, yet.`;
+        console.error(`missing: ${missing.join(", ")}`);
+        throw new Error(`this browser has no ${missing.join(", no ")}`);
+      }
+
       try {
         // Same origin, proxied to the server's metadata port. Not cached: it carries the
         // certificate digest, and a stale one is a connection that will not open.
