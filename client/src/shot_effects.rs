@@ -42,8 +42,22 @@ const HOLE_SECONDS: f32 = 12.0;
 /// How many bullet holes exist at once. Past this the oldest goes, so a long firefight cannot turn
 /// into an unbounded pile of entities.
 const MAX_HOLES: usize = 160;
-/// How wide a bullet hole is.
+/// How wide a bullet hole is, across.
 const HOLE_SIZE: f32 = 0.09;
+/// How many segments its rim is made of.
+///
+/// Eighteen is where a circle stops having corners at the size a hole is drawn at — nine
+/// centimetres, so a couple of hundred pixels at the closest anybody ever gets to a wall they have
+/// just shot. Below that the flats show; above it the vertices are spent on nothing.
+const HOLE_SIDES: usize = 18;
+/// How far the rim is allowed to fall short of the full radius, as a fraction of it.
+///
+/// A bullet does not leave a compass circle. Each segment of the rim comes in by up to this much,
+/// by a fixed amount of its own, and the same mesh is then turned differently for every hole — so
+/// one shape reads as a wall full of different ones. See [`spawn_hole`] for the turn.
+const HOLE_RAGGED: f32 = 0.24;
+/// How far out the dark pit reaches before it starts giving way to the rim, as a fraction.
+const HOLE_PIT: f32 = 0.45;
 /// How far a hole floats off the surface, so it does not fight the wall for the same pixels.
 const HOLE_LIFT: f32 = 0.01;
 /// How far short of the shot's endpoint the surface under a bullet hole is looked for, and how far
@@ -123,15 +137,89 @@ fn load_assets(
             unlit: true,
             ..default()
         }),
-        hole: meshes.add(Rectangle::new(HOLE_SIZE, HOLE_SIZE)),
+        hole: meshes.add(hole_mesh()),
         hole_material: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.06, 0.05, 0.05),
+            // White, because the colour is in the mesh: a hole is dark in the middle and lighter at
+            // its chipped rim, and a base colour that was anything else would tint both.
+            base_color: Color::WHITE,
             perceptual_roughness: 1.0,
             // Both faces, so a hole is still there when seen from the other side of a thin prop.
             cull_mode: None,
             ..default()
         }),
     });
+}
+
+/// The colour of the pit and of the rim, in **linear** light.
+///
+/// The pit is not quite black and the rim is what material knocked loose looks like — pale, dusty,
+/// and the same on every surface, because what is showing there is powder rather than the wall. A
+/// hole that were one flat dark colour throughout is a sticker; the step from one to the other is
+/// the whole of what makes it read as a hole.
+const PIT: [f32; 4] = [0.004, 0.004, 0.004, 1.0];
+const RIM: [f32; 4] = [0.105, 0.100, 0.090, 1.0];
+
+/// The shape of a bullet hole: a ragged disc, dark in the middle and pale at the rim.
+///
+/// **Round in the geometry rather than in a texture**, and that is the whole of the choice. Round
+/// is the one thing a texture is not needed for — a disc is round because it is a disc. What a
+/// texture would buy is detail, and it would charge two things for it that a nine-centimetre mark
+/// living twelve seconds cannot pay: an alpha test to cut a circle out of a quad, alpha being the
+/// channel that thins out in the small mip levels and takes the hole with it as it goes; and an
+/// image in `assets` that nothing else on the map would ever use. Three rings of vertices draw the
+/// same picture in fifty triangles and need nothing to be shipped.
+///
+/// The rim comes in by up to [`HOLE_RAGGED`], as a few harmonics of the angle rather than a hash
+/// per segment — a rim drawn from independent radii is a gear, and chipping is smooth at this
+/// scale. Whole harmonics, so the last segment closes onto the first exactly.
+///
+/// One mesh for every hole on the map. What makes two of them different is the turn each is given
+/// where it stands; see [`spawn_hole`].
+fn hole_mesh() -> Mesh {
+    let radius = HOLE_SIZE / 2.0;
+    let sides = HOLE_SIDES;
+    let mut positions = vec![[0.0, 0.0, 0.0]];
+    let mut normals = vec![[0.0, 0.0, 1.0]];
+    let mut colours = vec![PIT];
+    let mut indices: Vec<u32> = Vec::new();
+
+    for ring in [HOLE_PIT, 1.0] {
+        for side in 0..sides {
+            let angle = side as f32 / sides as f32 * std::f32::consts::TAU;
+            let lumps = 0.36 * (3.0 * angle + 0.7).sin()
+                + 0.30 * (5.0 * angle + 2.1).sin()
+                + 0.20 * (7.0 * angle + 4.3).sin();
+            // Only the rim is ragged. The pit stays a circle, so the pale band between them varies
+            // in width the way the edge of a chip does rather than staying a stencilled ring.
+            let short = match ring < 1.0 {
+                true => 1.0,
+                false => 1.0 - HOLE_RAGGED * (0.5 + 0.5 * lumps / 0.86).clamp(0.0, 1.0),
+            };
+            let (sin, cos) = angle.sin_cos();
+            let out = radius * ring * short;
+            positions.push([cos * out, sin * out, 0.0]);
+            normals.push([0.0, 0.0, 1.0]);
+            colours.push(if ring < 1.0 { PIT } else { RIM });
+        }
+    }
+
+    let at = |ring: usize, side: usize| (1 + ring * sides + side % sides) as u32;
+    for side in 0..sides {
+        // The pit, as a fan from the middle.
+        indices.extend_from_slice(&[0, at(0, side), at(0, side + 1)]);
+        // And the band out to the rim, as two triangles a segment.
+        indices.extend_from_slice(&[at(0, side), at(1, side), at(1, side + 1)]);
+        indices.extend_from_slice(&[at(0, side), at(1, side + 1), at(0, side + 1)]);
+    }
+
+    Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colours)
+    .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
 /// What a shot is fired from: the trigger and this tick's input, plus where the eye is.
@@ -348,12 +436,13 @@ fn spawn_hole(commands: &mut Commands, assets: &ShotAssets, decals: &mut Decals,
     // A hole on the floor faces straight up, which is exactly where `looking_to` cannot use Y as
     // its up vector — the two would be parallel and the rotation undefined.
     let up = if facing.dot(Vec3::Y).abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-    // Turned by a different amount each time, so a wall taking fire does not become a grid of
-    // identical squares. Derived from the point itself, so it is stable rather than random: every
-    // client draws the same hole the same way round.
+    // Turned by a different amount each time, so a wall taking fire does not become a row of the
+    // same mark repeated — one ragged disc turned at random is a wallful of different ones. Derived
+    // from the point itself, so it is stable rather than random: every client draws the same hole
+    // the same way round.
     let spin = Quat::from_rotation_z(shot.to.x * 7.3 + shot.to.y * 3.1 + shot.to.z * 5.7);
-    // A `Rectangle` faces +Z, and `looking_to` points -Z, so it is aimed into the wall to lay the
-    // front of the quad flat against it.
+    // The hole faces +Z and `looking_to` points -Z, so it is aimed into the wall to lay the front
+    // of the disc flat against it.
     let pose = Transform::from_translation(shot.to + facing * HOLE_LIFT)
         .looking_to(-facing, up)
         .with_rotation(Transform::default().looking_to(-facing, up).rotation * spin);
@@ -395,5 +484,69 @@ fn forget_effects(
         if effect.0 <= 0.0 {
             commands.entity(entity).despawn();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bullet hole is round, and it is round without being a compass circle.
+    ///
+    /// The claim worth a test rather than a look: every corner of it is inside the width the hole
+    /// says it is — a rim that overshot would be a mark bigger than `HOLE_SIZE`, and one that ran
+    /// to zero would be a hole with a bite out of it — and the radii are not all the same, which is
+    /// what tells a ragged disc from the circle a texture would have drawn. It was a square before,
+    /// and a square passes neither half.
+    #[test]
+    fn a_bullet_hole_is_a_ragged_circle() {
+        let mesh = hole_mesh();
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(points)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("a bullet hole has no positions");
+        };
+        let radius = HOLE_SIZE / 2.0;
+        let rim: Vec<f32> = points[1 + HOLE_SIDES..]
+            .iter()
+            .map(|p| (p[0] * p[0] + p[1] * p[1]).sqrt())
+            .collect();
+        assert_eq!(rim.len(), HOLE_SIDES);
+        for away in &rim {
+            assert!(*away <= radius + 1.0e-6, "a hole reaches past its own width");
+            assert!(
+                *away >= radius * (1.0 - HOLE_RAGGED) - 1.0e-6,
+                "a hole has a bite out of it: {away} against {radius}",
+            );
+        }
+        let (low, high) = rim.iter().fold((f32::MAX, 0.0f32), |(l, h), r| (l.min(*r), h.max(*r)));
+        assert!(high - low > radius * 0.05, "the rim is a compass circle, not a bullet hole");
+
+        // Flat, facing the way `spawn_hole` aims it, and closed: every vertex is used, and the
+        // triangles are the fan plus two a segment for the band out to the rim.
+        assert!(points.iter().all(|p| p[2] == 0.0), "a hole is not flat");
+        let Some(bevy::mesh::Indices::U32(indices)) = mesh.indices() else {
+            panic!("a bullet hole has no indices");
+        };
+        assert_eq!(indices.len(), HOLE_SIDES * 9);
+        for corner in 0..points.len() as u32 {
+            assert!(indices.contains(&corner), "vertex {corner} is in no triangle");
+        }
+    }
+
+    /// The pit is dark and the rim is not, which is the difference between a hole and a sticker.
+    #[test]
+    fn a_bullet_hole_is_dark_in_the_middle() {
+        let mesh = hole_mesh();
+        let Some(bevy::mesh::VertexAttributeValues::Float32x4(colours)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("a bullet hole has no colours");
+        };
+        assert_eq!(colours.len(), 1 + HOLE_SIDES * 2);
+        assert_eq!(colours[0], PIT, "the middle of a hole is not the pit");
+        assert!(colours[1..=HOLE_SIDES].iter().all(|c| *c == PIT));
+        assert!(colours[1 + HOLE_SIDES..].iter().all(|c| *c == RIM));
+        assert!(RIM[0] > PIT[0] * 4.0, "the rim is not lighter than the pit it surrounds");
     }
 }
