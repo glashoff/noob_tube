@@ -358,15 +358,15 @@ fn give_bodies(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
 ) {
-    // Asked of the filesystem once per arrival rather than of the asset server, because the two
+    // Asked once per arrival of what shipped, rather than of the asset server, because the two
     // answer different questions. The asset server would report a missing file asynchronously,
     // some frames after the vehicle has already been given a body, and by then the choice between
-    // the model and the box has been made. This is the same thing the config loader does with the
-    // settings file, for the same reason.
-    let modelled = std::path::Path::new(crate::ASSETS).join(MODEL).exists();
+    // the model and the box has been made. See `platform::shipped`, which is also where the
+    // browser's answer to this comes from.
+    let modelled = crate::platform::shipped(MODEL);
     // The gun needs the vehicle model, not merely its own file: what it is bolted to is a beam that
     // only exists in the model. On the box there is nothing to bolt it to.
-    let armed = modelled && std::path::Path::new(crate::ASSETS).join(GUN).exists();
+    let armed = modelled && crate::platform::shipped(GUN);
     for (entity, kind) in arrived.iter() {
         let spec = kind.spec();
         let paint = materials.add(StandardMaterial {

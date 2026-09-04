@@ -66,6 +66,29 @@ pub fn unique_id() -> u64 {
     }
 }
 
+/// Whether an asset is there to be loaded, answered now rather than in a few frames.
+///
+/// Three places choose between two things by this — which character kit to use, whether a clip
+/// exists to be played, and whether the vehicle has a model or a box — and all three need the
+/// answer before they build anything, which is why none of them asks the asset server. See
+/// `build.rs`, which is where the browser's copy of the answer comes from and why it exists.
+///
+/// The path is relative to the asset root, the way the asset server names things.
+pub fn shipped(path: &str) -> bool {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::path::Path::new(crate::ASSETS).join(path).exists()
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        SHIPPED.lines().any(|shipped| shipped == path)
+    }
+}
+
+/// What was under `assets/` when this was built, one path per line.
+#[cfg(target_family = "wasm")]
+const SHIPPED: &str = include_str!(concat!(env!("OUT_DIR"), "/shipped_assets.txt"));
+
 /// One line, from before there is anywhere for a log line to go.
 ///
 /// Everything `configure` says happens before `App::new`, so `LogPlugin` has not installed a

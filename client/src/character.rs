@@ -310,19 +310,20 @@ impl Kit {
         CAPSULE_HEIGHT / self.height
     }
 
-    /// Whether this kit's files are on disk.
+    /// Whether this kit's files shipped with this build.
     ///
-    /// From the filesystem rather than from the asset server, which would answer asynchronously —
-    /// some frames after the first player has already arrived and needed a body. The same choice
-    /// and the same reason as the vehicle model's.
+    /// Asked of [`platform::shipped`](crate::platform::shipped) rather than of the asset server,
+    /// which would answer asynchronously — some frames after the first player has already arrived
+    /// and needed a body. The same choice and the same reason as the vehicle model's.
     fn present(&self) -> bool {
-        let assets = std::path::Path::new(crate::ASSETS);
-        if !assets.join(self.body).exists() {
+        if !crate::platform::shipped(self.body) {
             return false;
         }
         match self.clips {
-            Clips::PerFile { directory } => assets.join(directory).join("idle.glb").exists(),
-            Clips::Library { file } => assets.join(file).exists(),
+            Clips::PerFile { directory } => {
+                crate::platform::shipped(&format!("{directory}/idle.glb"))
+            }
+            Clips::Library { file } => crate::platform::shipped(file),
         }
     }
 }
@@ -480,15 +481,11 @@ fn load_the_character(assets: Res<AssetServer>, mut commands: Commands) {
 
 /// The clip's name back again if its file is there, so a name nobody fetched can be substituted.
 ///
-/// From the filesystem rather than from the asset server, for the same reason the kit itself is
-/// chosen that way: the server answers asynchronously, and by the time it said "no such file" the
-/// graph would already have been built around the answer.
+/// Asked of [`platform::shipped`](crate::platform::shipped) rather than of the asset server, for
+/// the same reason the kit itself is chosen that way: the server answers asynchronously, and by the
+/// time it said "no such file" the graph would already have been built around the answer.
 fn on_disk(directory: &str, name: String) -> Option<String> {
-    std::path::Path::new(crate::ASSETS)
-        .join(directory)
-        .join(format!("{name}.glb"))
-        .exists()
-        .then_some(name)
+    crate::platform::shipped(&format!("{directory}/{name}.glb")).then_some(name)
 }
 
 /// Update, until it succeeds: builds the graph for a kit whose clips share one file.
