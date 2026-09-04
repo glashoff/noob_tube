@@ -36,6 +36,18 @@ use serde::{Deserialize, Serialize};
 /// short enough that nothing is lost by quitting straight after letting go.
 const WRITE_AFTER: f32 = 0.5;
 
+/// The far end of [`Setting::Sight`]'s range, where it stops being a distance and means "no limit".
+///
+/// A constant rather than a number written three times, because three things read it and they have
+/// to agree about it: the dialog says "off" here, [`Settings::sight`] answers `None` here, and a
+/// hand-typed file asking for more is clamped to here. Written as one rule so that moving it moves
+/// all three.
+///
+/// 512 m is [`DEFAULT_EXTENT`](noob_tube_shared::terrain::DEFAULT_EXTENT), the span of the map this
+/// game starts on — far enough that a player at one corner sees the other, which is what "no limit"
+/// has to mean to be worth the word.
+const SIGHT_UNLIMITED: f32 = 512.0;
+
 /// Where the settings are kept when `NOOB_TUBE_SETTINGS` does not say.
 ///
 /// Under the player's config directory rather than beside `noob_tube.toml` in the working
@@ -258,11 +270,17 @@ fn write_to(key: &str, settings: &Settings) -> Result<(), String> {
 pub struct Settings {
     /// How far from the eye grass is drawn, in metres. Zero is no grass at all.
     pub grass_reach: f32,
+    /// How far from the eye anything is drawn, in metres. See [`Settings::sight`], which is where
+    /// the top of the range stops being a distance and starts meaning "no limit".
+    pub sight_reach: f32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { grass_reach: 16.0 }
+        // The sight starts switched off. The setting is here to be reached for by somebody whose
+        // machine is short of frames, and a game that quietly drew a horizon at 200 m on a first
+        // run would be answering a question nobody had asked yet.
+        Self { grass_reach: 16.0, sight_reach: SIGHT_UNLIMITED }
     }
 }
 
@@ -279,6 +297,21 @@ impl Settings {
         }
         self
     }
+
+    /// How far the player has asked to see, or `None` for as far as there is anything to see.
+    ///
+    /// **The top of the slider is not a distance.** It is the setting switched off, and the
+    /// difference is one the two readers can feel: the fog is *removed* rather than pushed out to
+    /// 512 m, and the camera's far plane goes back to what the projection was built with rather
+    /// than being pinned to a number that happens to be large. A map bigger than the default would
+    /// otherwise be quietly cropped by a slider sitting at "off".
+    ///
+    /// It is a method rather than a comparison at each call site because there are three of them —
+    /// the two above and [`Setting::say`] — and a rule spelled in three places is a rule with three
+    /// chances to be spelled differently.
+    pub fn sight(&self) -> Option<f32> {
+        (self.sight_reach < SIGHT_UNLIMITED).then_some(self.sight_reach)
+    }
 }
 
 /// One thing a player can set.
@@ -287,15 +320,17 @@ impl Settings {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Setting {
     GrassReach,
+    Sight,
 }
 
 impl Setting {
     /// Every setting there is. What the dialog builds its rows from.
-    pub const ALL: &'static [Setting] = &[Setting::GrassReach];
+    pub const ALL: &'static [Setting] = &[Setting::GrassReach, Setting::Sight];
 
     pub fn label(self) -> &'static str {
         match self {
             Setting::GrassReach => "Grass distance",
+            Setting::Sight => "Sight distance",
         }
     }
 
@@ -307,12 +342,18 @@ impl Setting {
     pub fn range(self) -> (f32, f32, f32) {
         match self {
             Setting::GrassReach => (0.0, 64.0, 2.0),
+            // The floor is not a taste. Below about sixty metres a 90 degree view is a corridor,
+            // and the predecessor's 60 m fog is on record in its own notes as doing balance work
+            // rather than graphics work. Sixty-four is that floor on the sixteen-metre step this
+            // range is walked in.
+            Setting::Sight => (64.0, SIGHT_UNLIMITED, 16.0),
         }
     }
 
     pub fn read(self, settings: &Settings) -> f32 {
         match self {
             Setting::GrassReach => settings.grass_reach,
+            Setting::Sight => settings.sight_reach,
         }
     }
 
@@ -333,6 +374,7 @@ impl Setting {
         let value = ((value / step).round() * step).clamp(low, high);
         match self {
             Setting::GrassReach => settings.grass_reach = value,
+            Setting::Sight => settings.sight_reach = value,
         }
     }
 
@@ -348,6 +390,10 @@ impl Setting {
         match self {
             Setting::GrassReach if value <= 0.0 => "off".to_string(),
             Setting::GrassReach => format!("{value:.0} m"),
+            // Through `sight` rather than against `SIGHT_UNLIMITED` here, so that what the dialog
+            // says and what the horizon does cannot come apart.
+            Setting::Sight if settings.sight().is_none() => "off".to_string(),
+            Setting::Sight => format!("{value:.0} m"),
         }
     }
 
@@ -364,6 +410,12 @@ impl Setting {
                  than the square of it, but it is still the most expensive thing on the page. Off \
                  is off."
             }
+            Setting::Sight => {
+                "How far you can see. Past it the ground fades into the sky and is then not drawn \
+                 at all, which is where the frames come back: this is the one setting here that \
+                 makes the whole picture cheaper rather than one thing in it. It can only ever \
+                 show you less than off does."
+            }
         }
     }
 }
@@ -374,6 +426,31 @@ mod tests {
 
     fn scratch(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("noob_tube_{name}_{}.toml", std::process::id()))
+    }
+
+    /// The top of the sight slider is off, and everything below it is a distance.
+    ///
+    /// Two things read that rule and they must not come apart: the dialog, which says "off" there,
+    /// and `sight`'s horizon, which takes the fog away and gives the far plane back rather than
+    /// pinning it to 512 m. The trap is a hand-typed or BRP-set value past the top of the range —
+    /// it has to arrive as "off" and not as a far plane nobody chose.
+    #[test]
+    fn the_top_of_the_sight_slider_is_off_rather_than_far() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.sight(), None, "the default was not off");
+        assert_eq!(Setting::Sight.say(&settings), "off");
+
+        Setting::Sight.set(&mut settings, 128.0);
+        assert_eq!(settings.sight(), Some(128.0));
+        assert_eq!(Setting::Sight.say(&settings), "128 m");
+
+        Setting::Sight.set(&mut settings, 5000.0);
+        assert_eq!(settings.sight(), None, "a value past the range was kept as a distance");
+        assert_eq!(Setting::Sight.say(&settings), "off");
+
+        // And under it: the floor is a distance like any other, not a second way to say off.
+        Setting::Sight.set(&mut settings, 0.0);
+        assert_eq!(settings.sight(), Some(Setting::Sight.range().0));
     }
 
     /// What is written comes back, which is the whole promise of keeping a file at all.
