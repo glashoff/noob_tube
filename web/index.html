@@ -73,8 +73,13 @@
         const pane = document.createElement("pre");
         pane.id = "log";
         document.body.append(pane);
+        const lines = [];
         const write = (kind, args) => {
-          pane.append(`${kind} ${args.map(String).join(" ")}\n`);
+          // `%c` and its arguments are how the tracing bridge colours a line. Nothing here wants
+          // the colours, and printed literally they are half the width of every message.
+          const said = args.map(String).join(" ").replace(/%c/g, "");
+          lines.push(`${kind} ${said}`);
+          pane.append(`${kind} ${said}\n`);
           pane.scrollTop = pane.scrollHeight;
         };
         for (const kind of ["log", "info", "warn", "error"]) {
@@ -86,6 +91,20 @@
         }
         addEventListener("error", (event) => write("uncaught", [event.message]));
         addEventListener("unhandledrejection", (event) => write("unhandled", [event.reason]));
+
+        // And posted back to whoever served the page, a second at a time. That is what makes a
+        // browser with nobody in front of it — a headless one in a test, a phone on somebody
+        // else's desk — say what it is doing without a debugger attached to it. `web/serve.py`
+        // prints them; anything else answers 404 and this quietly stops mattering.
+        let sent = 0;
+        setInterval(() => {
+          if (lines.length === sent) {
+            return;
+          }
+          const batch = lines.slice(sent).join("\n");
+          sent = lines.length;
+          fetch("log", { method: "POST", body: batch, keepalive: true }).catch(() => {});
+        }, 1000);
       }
 
       const status = document.getElementById("loading");

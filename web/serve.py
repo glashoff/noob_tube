@@ -29,8 +29,33 @@ PORT = int(os.environ.get("NOOB_TUBE_WEB_PORT", "8000"))
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    # `WebAssembly.instantiateStreaming` refuses anything that is not `application/wasm`, and
+    # Python's table does not know the type. The generated glue falls back to fetching the whole
+    # body and compiling that, so the wrong type is a warning and a slower load rather than a
+    # failure — which is exactly the kind of thing that is never noticed and always paid for.
+    extensions_map = {
+        **http.server.SimpleHTTPRequestHandler.extensions_map,
+        ".wasm": "application/wasm",
+    }
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=ROOT, **kwargs)
+
+    def do_POST(self):
+        """Takes the console lines a `?log` page posts back, and prints them.
+
+        Nothing else on this server accepts a POST, and nothing on a deployment's static host
+        would either — the page treats a refusal as "nobody is listening" and carries on. See
+        `index.html`.
+        """
+        if not self.path.split("?")[0].rstrip("/").endswith("log"):
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        for line in self.rfile.read(length).decode("utf-8", "replace").splitlines():
+            print(f"  browser | {line}", flush=True)
+        self.send_response(204)
+        self.end_headers()
 
     def do_GET(self):
         if self.path.split("?")[0].rstrip("/").endswith("net-config"):
@@ -55,6 +80,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        # One line per asset request is hundreds of lines of nothing while the game loads, and it
+        # buries what the page is posting back. Failures still say so.
+        if isinstance(args[0], str) and args[0].startswith(("GET", "POST")) and "20" in str(args[1]):
+            return
+        super().log_message(format, *args)
 
     def end_headers(self):
         # Nothing here may be cached: this is a build directory being reloaded after every change.

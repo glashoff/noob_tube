@@ -146,6 +146,29 @@ fn draw_with_the_integrated_gpu() -> RenderPlugin {
     }
 }
 
+/// How much the client says about itself, and how to ask it for more.
+///
+/// `NOOB_TUBE_LOG_FILTER` — `?log_filter=` in a browser — is a `tracing` filter, and giving one
+/// raises the ceiling to `trace` so that the filter, rather than a level set elsewhere, decides
+/// what comes out. It exists because the interesting failures in a dependency are logged at debug:
+/// a WebTransport connection that never opens says nothing at all at the default level, on either
+/// platform, and there is no way to attach a debugger to a browser tab from a test.
+///
+/// ```text
+/// NOOB_TUBE_LOG_FILTER=info,aeronet=debug,lightyear=debug cargo run -p noob_tube_client
+/// http://localhost:8000/?log&log_filter=info,aeronet=debug
+/// ```
+fn how_loud() -> bevy::log::LogPlugin {
+    let Some(filter) = platform::setting("NOOB_TUBE_LOG_FILTER") else {
+        return bevy::log::LogPlugin::default();
+    };
+    bevy::log::LogPlugin {
+        filter,
+        level: bevy::log::Level::TRACE,
+        ..default()
+    }
+}
+
 fn windowing() -> PluginGroupBuilder {
     let plugins = DefaultPlugins
         .set(AssetPlugin {
@@ -158,7 +181,8 @@ fn windowing() -> PluginGroupBuilder {
             meta_check: bevy::asset::AssetMetaCheck::Never,
             ..default()
         })
-        .set(draw_with_the_integrated_gpu());
+        .set(draw_with_the_integrated_gpu())
+        .set(how_loud());
 
     if platform::switched_on("NOOB_TUBE_HEADLESS") {
         return plugins
@@ -225,6 +249,7 @@ fn where_it_is_drawn() -> Window {
 fn configure() -> (NetConfig, Dial) {
     let mut net = NetConfig::load();
     let mut dial = Dial {
+        // Replaced below by what the server says, when it says anything.
         target: format!("https://{}:{}", server_host(), net.port),
         // What to name in the token if the server will not say: the address we resolved for
         // ourselves, which is what this did before the server published one.
@@ -237,6 +262,13 @@ fn configure() -> (NetConfig, Dial) {
         Some(server) => {
             dial.token_addr = server.token_addr;
             dial.cert_digest = server.cert_digest;
+            // The port comes from the server too, and it has to. `port` is deliberately not one of
+            // the settings a client adopts — it is how a client *finds* a server, so taking it from
+            // one would be circular. But a browser has no file to read it from and no environment
+            // to be told it in: it knows the origin that served the page and nothing else. The one
+            // number that cannot be wrong is the port the server is actually listening on, which is
+            // the one it just published.
+            dial.target = format!("https://{}:{}", server_host(), server.token_addr.port());
             match net.adopt_from_server(&server.net) {
                 moved if moved.is_empty() => {
                     platform::say(&format!("{asked} agrees with our settings"))

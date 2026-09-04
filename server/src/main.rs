@@ -1170,9 +1170,17 @@ fn remote_inspection() -> impl Plugin {
 /// while the client sits there until it times out — no error either side can act on.
 ///
 /// So a deployed server is told its own public address, and `deploy.sh` is what tells it.
+///
+/// **`[::]` and not `0.0.0.0` when nobody says**, which is not a preference either. A browser
+/// resolves the name it was given and dials what it finds, and it looks up AAAA first: Chrome
+/// resolves `localhost` to `::1` and a server listening only on IPv4 is a WebTransport handshake
+/// that fails with nothing to say about why. That is measured, not theoretical — it is what this
+/// looked like for an afternoon. An unspecified IPv6 socket accepts IPv4 as well, as long as
+/// `net.ipv6.bindv6only` is 0, which is the Linux default and the case on both machines this runs
+/// on. Where it is not, `NOOB_TUBE_BIND=0.0.0.0` is the way back.
 fn bind_address(port: u16) -> SocketAddr {
     let Some(host) = std::env::var_os("NOOB_TUBE_BIND") else {
-        return SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port);
+        return SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), port);
     };
     match host.to_string_lossy().parse::<std::net::IpAddr>() {
         Ok(ip) => SocketAddr::new(ip, port),

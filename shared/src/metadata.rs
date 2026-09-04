@@ -74,7 +74,11 @@ const FETCH_TIMEOUT: Duration = Duration::from_millis(500);
 /// A failure to bind is logged and otherwise ignored. The endpoint is a convenience; a server that
 /// cannot offer it should still serve the game.
 pub fn serve(info: ServerInfo, port: u16) {
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // `[::]` rather than `0.0.0.0`, and it accepts IPv4 as well — the same choice, for the same
+    // reason, as the game socket's; see `bind_address` in the server, where the reason is written
+    // down. A client that reaches this endpoint over one family and the game over another would be
+    // a confusing way to fail.
+    let addr = SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), port);
     let listener = match TcpListener::bind(addr) {
         Ok(listener) => listener,
         Err(err) => {
