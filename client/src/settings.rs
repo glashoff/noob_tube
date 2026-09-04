@@ -16,12 +16,14 @@
 //! [`grass`](crate::grass), which is a picture with no collider in it.
 //!
 //! **They are kept in a file, and the file follows the player rather than the directory.** See
-//! [`settings_path`]. That is the one thing that separates them from `noob_tube.toml`, which is
+//! [`settings_path`] — and [`Place`], which is what a browser has instead, and why it is not the
+//! same thing. That is the one thing that separates them from `noob_tube.toml`, which is
 //! about a *session* and is read by both binaries and written by neither: these belong to whoever
 //! is at this keyboard, and the game writes them itself whenever the dialog changes one. What comes
 //! back out of the file goes through the same clamp the slider does, because a file can be edited
 //! by hand and can be older than the game reading it.
 
+#[cfg(not(target_family = "wasm"))]
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
@@ -46,6 +48,7 @@ const WRITE_AFTER: f32 = 0.5;
 /// `NOOB_TUBE_SETTINGS` overrides it, in the same spirit as `NOOB_TUBE_CONFIG` and for a sharper
 /// reason: two clients on one machine share this file otherwise, and the second one to write wins.
 /// A harness, a bot, or an agent testing beside somebody playing wants its own.
+#[cfg(not(target_family = "wasm"))]
 pub fn settings_path() -> PathBuf {
     if let Some(named) = std::env::var_os("NOOB_TUBE_SETTINGS") {
         return PathBuf::from(named);
@@ -58,6 +61,45 @@ pub fn settings_path() -> PathBuf {
         .join("settings.toml")
 }
 
+/// Where the settings are kept: a file on this machine, or a key in this browser's storage.
+///
+/// The two are the same idea and not the same mechanism, and the difference is not that a browser
+/// has no files. It is that a browser tab has nowhere a *player* could go and open one: half of
+/// what `settings.toml` is for on a desktop — something you can find, read and edit — has no
+/// equivalent there. What is left is the half the game needs, which is that a preference outlives
+/// the tab. The text in it is the same TOML either way, so a setting can still be read by whoever
+/// goes looking with the developer tools open.
+#[cfg(not(target_family = "wasm"))]
+type Place = PathBuf;
+#[cfg(target_family = "wasm")]
+type Place = String;
+
+/// Where this client keeps them.
+#[cfg(not(target_family = "wasm"))]
+fn place() -> Place {
+    settings_path()
+}
+
+/// `?settings=` names a different key, for the same reason `NOOB_TUBE_SETTINGS` names a different
+/// file: two clients on one machine — here, two tabs on one origin — would otherwise share these,
+/// and the second one to write would win.
+#[cfg(target_family = "wasm")]
+fn place() -> Place {
+    crate::platform::setting("NOOB_TUBE_SETTINGS")
+        .unwrap_or_else(|| "noob_tube.settings".to_string())
+}
+
+/// The place, as a log line wants to name it.
+#[cfg(not(target_family = "wasm"))]
+fn shown(place: &Place) -> String {
+    place.display().to_string()
+}
+
+#[cfg(target_family = "wasm")]
+fn shown(place: &Place) -> String {
+    format!("the browser's {place}")
+}
+
 pub struct SettingsPlugin;
 
 impl Plugin for SettingsPlugin {
@@ -65,11 +107,11 @@ impl Plugin for SettingsPlugin {
         // Read before the app runs rather than in a Startup system, because the first frame already
         // uses them: the lawn is grown from `grass_reach` immediately, and a client that started on
         // the defaults would grow a lawn and throw it away again.
-        let path = settings_path();
-        let said = read_from(&path);
+        let place = place();
+        let said = read_from(&place);
         app.register_type::<Settings>()
             .insert_resource(said.clone().unwrap_or_default())
-            .insert_resource(Kept { path, said })
+            .insert_resource(Kept { place, said })
             .add_systems(Update, keep_the_settings);
     }
 }
@@ -86,10 +128,10 @@ impl Plugin for SettingsPlugin {
 /// setting, which is when they have asked for the file to say something else.
 #[derive(Resource)]
 struct Kept {
-    /// Where the file is. Worked out once, when the plugin is built, rather than on every write:
+    /// Where they are kept. Worked out once, when the plugin is built, rather than on every write:
     /// the answer cannot change while the game runs, and reading the environment sixty times a
     /// second to be told the same thing is sixty chances to be told something else.
-    path: PathBuf,
+    place: Place,
     /// What it already says, or `None` for a file that is not there yet.
     said: Option<Settings>,
 }
@@ -122,14 +164,14 @@ fn keep_the_settings(
         return;
     }
     kept.said = Some(settings.clone());
-    let path = kept.path.clone();
-    match write_to(&path, &settings) {
+    let place = kept.place.clone();
+    match write_to(&place, &settings) {
         // Down at debug: this happens whenever a slider is let go, and a line a player cannot act
         // on is a line in the way of the ones they can.
-        Ok(()) => debug!("settings written to {}", path.display()),
+        Ok(()) => debug!("settings written to {}", shown(&place)),
         // A warning and no more. Nothing here is worth interrupting a game over — the settings are
         // in effect either way, they are simply not kept.
-        Err(trouble) => warn!("the settings could not be written to {}: {trouble}", path.display()),
+        Err(trouble) => warn!("the settings could not be written to {}: {trouble}", shown(&place)),
     }
 }
 
@@ -141,13 +183,29 @@ fn keep_the_settings(
 /// — somebody edited it, and would otherwise watch their changes quietly do nothing.
 ///
 /// Either way the game starts. Nothing in here is worth refusing to play over.
+#[cfg(not(target_family = "wasm"))]
 fn read_from(path: &Path) -> Option<Settings> {
-    let text = std::fs::read_to_string(path).ok()?;
-    match toml::from_str::<Settings>(&text) {
-        Ok(settings) => Some(settings.tidied()),
+    Some(parse(&std::fs::read_to_string(path).ok()?, &shown(&path.to_path_buf())))
+}
+
+/// The same, out of the browser's storage.
+///
+/// Storage that is switched off — a private window, a browser set to block site data — reads as no
+/// settings rather than as an error, which is the same answer a first run gets and wants the same
+/// behaviour: play on the defaults, and write when something changes.
+#[cfg(target_family = "wasm")]
+fn read_from(key: &str) -> Option<Settings> {
+    let text = crate::platform::storage()?.get_item(key).ok().flatten()?;
+    Some(parse(&text, &shown(&key.to_string())))
+}
+
+/// What was kept, or the defaults and a word about why.
+fn parse(text: &str, place: &str) -> Settings {
+    match toml::from_str::<Settings>(text) {
+        Ok(settings) => settings.tidied(),
         Err(trouble) => {
-            warn!("{} is not settings I can read ({trouble}); using the defaults", path.display());
-            Some(Settings::default())
+            warn!("{place} is not settings I can read ({trouble}); using the defaults");
+            Settings::default()
         }
     }
 }
@@ -157,6 +215,7 @@ fn read_from(path: &Path) -> Option<Settings> {
 /// Written beside and moved into place. A rename is atomic where a write is not: a crash, or a
 /// second client writing at the same moment, would otherwise be able to leave half a file where the
 /// settings used to be — and the half-file is what the next run would read.
+#[cfg(not(target_family = "wasm"))]
 fn write_to(path: &Path, settings: &Settings) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -165,6 +224,22 @@ fn write_to(path: &Path, settings: &Settings) -> std::io::Result<()> {
     let beside = path.with_extension("toml.new");
     std::fs::write(&beside, text)?;
     std::fs::rename(&beside, path)
+}
+
+/// The same, into the browser's storage.
+///
+/// No write-beside-and-rename here, and none is needed: a `setItem` either happens or does not.
+/// What it can be is *refused* — the quota is small and a browser may be keeping nothing at all —
+/// so the caller's warning is the whole of the error handling, exactly as it is for a read-only
+/// disk.
+#[cfg(target_family = "wasm")]
+fn write_to(key: &str, settings: &Settings) -> Result<(), String> {
+    let storage = crate::platform::storage()
+        .ok_or_else(|| "this browser is not keeping site data".to_string())?;
+    let text = toml::to_string_pretty(settings).map_err(|trouble| trouble.to_string())?;
+    storage
+        .set_item(key, &text)
+        .map_err(|_| "the browser refused to keep them".to_string())
 }
 
 /// Everything a player has set.
@@ -293,7 +368,7 @@ impl Setting {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
 
@@ -379,7 +454,7 @@ mod tests {
             .insert_resource(Settings::default())
             // As a launch that found a file saying exactly the defaults: there is nothing to write
             // until something actually changes.
-            .insert_resource(Kept { path: path.clone(), said: Some(Settings::default()) })
+            .insert_resource(Kept { place: path.clone(), said: Some(Settings::default()) })
             .add_systems(Update, keep_the_settings);
 
         let tick = |app: &mut App, seconds: f32| {

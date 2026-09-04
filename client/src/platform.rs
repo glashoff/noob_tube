@@ -66,6 +66,75 @@ pub fn unique_id() -> u64 {
     }
 }
 
+/// One line, from before there is anywhere for a log line to go.
+///
+/// Everything `configure` says happens before `App::new`, so `LogPlugin` has not installed a
+/// tracing subscriber and `info!` would go nowhere at all. On a desktop the answer is `println!`.
+/// In a browser it is the console, and for the same reason: `println!` there writes to a stdout
+/// that nothing is reading.
+pub fn say(line: &str) {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        println!("{line}");
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        web_sys::console::log_1(&line.into());
+    }
+}
+
+/// The machine to reach the server on when nobody has said which.
+///
+/// Loopback on a desktop, because that is where a developer's server is. In a browser it is the
+/// host that served the page, which is the same answer arrived at from the other side: the bundle,
+/// the assets and the config all came from that origin, and the game is served by whoever served
+/// them.
+pub fn default_host() -> String {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::net::Ipv4Addr::LOCALHOST.to_string()
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        web_sys::window()
+            .and_then(|window| window.location().hostname().ok())
+            .filter(|host| !host.is_empty())
+            .unwrap_or_else(|| std::net::Ipv4Addr::LOCALHOST.to_string())
+    }
+}
+
+/// What the page was told about the server before the wasm module started.
+///
+/// The whole shape of the bootstrap is here, and web.md §2 has the reasoning: everything the two
+/// ends must agree on has to be settled *before* `App::new`, and in a browser nothing may block —
+/// `main` has to return to the event loop, and there is no synchronous fetch and no raw TCP. So the
+/// fetch happens in `index.html`, before the module is instantiated, and lands here.
+///
+/// A string rather than an object, deliberately. The JavaScript side does one `fetch` and one
+/// `.text()`; this side hands the result to the same `serde_json` that the native client's socket
+/// answer goes through, so there is one parser and one set of field names rather than two.
+#[cfg(target_family = "wasm")]
+pub fn preloaded_config() -> Option<noob_tube_shared::metadata::ServerInfo> {
+    let window = web_sys::window()?;
+    let said = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str(CONFIG_GLOBAL))
+        .ok()?
+        .as_string()?;
+    match serde_json::from_str(&said) {
+        Ok(info) => Some(info),
+        Err(trouble) => {
+            // Not a panic: a client with no answer keeps its own settings, exactly as one that
+            // could not reach the endpoint does. But this is the case where somebody *did* answer
+            // and the answer was not what this build reads, which is worth a line of its own.
+            web_sys::console::error_1(&format!("{CONFIG_GLOBAL} is not readable: {trouble}").into());
+            None
+        }
+    }
+}
+
+/// Where `index.html` leaves it. Changing this means changing the page too.
+#[cfg(target_family = "wasm")]
+const CONFIG_GLOBAL: &str = "NOOB_TUBE_CONFIG";
+
 /// The tab's query parameters, or `None` when there is no document to ask.
 #[cfg(target_family = "wasm")]
 fn query() -> Option<web_sys::UrlSearchParams> {

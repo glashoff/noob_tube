@@ -5863,6 +5863,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+ "wasm-bindgen",
  "web-sys",
 ]
 

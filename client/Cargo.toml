@@ -36,7 +36,14 @@ bevy = { workspace = true, features = ["default", "jpeg", "webgpu"] }
 # lightyear already pull in — `wasm-bindgen` in particular has to match the CLI that generates the
 # bindings, so two of them in one build is a link error rather than a warning.
 js-sys = "0.3.104"
-web-sys = { version = "0.3.104", features = ["Window", "Location", "UrlSearchParams", "Storage"] }
+wasm-bindgen = "0.2.127"
+web-sys = { version = "0.3.104", features = [
+    "Window",
+    "Location",
+    "UrlSearchParams",
+    "Storage",
+    "console",
+] }
 
 [dev-dependencies]
 # Only a test needs to read a PNG on its own: the one that checks the layer colours in
