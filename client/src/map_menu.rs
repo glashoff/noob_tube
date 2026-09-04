@@ -44,6 +44,9 @@ const VISIBLE_ROWS: f32 = 14.0;
 /// How wide the bar of a slider is. Wide enough that a drag has somewhere to go, narrow enough
 /// that the value beside it is still on the same line.
 const SLIDER_WIDTH: f32 = 180.0;
+/// How thick it is *drawn*. What can be taken hold of is the whole height of the row — see
+/// [`SliderTrack`], which is a six-pixel target only if you make it one.
+const SLIDER_THICK: f32 = 6.0;
 
 pub struct MapMenuPlugin;
 
@@ -620,7 +623,7 @@ fn operate(
         && let Some(at) = place.normalized
     {
         let (low, high, _) = setting.range();
-        setting.set(&mut settings, low + at.x.clamp(0.0, 1.0) * (high - low));
+        setting.set(&mut settings, low + along(at) * (high - low));
     }
 
     // The pointer first, so a click and a keypress in the same frame agree about the row: hovering
@@ -780,22 +783,39 @@ fn rebuild(
                     TextColor(Color::WHITE),
                 ));
                 if let Some(setting) = slider {
+                    // What the pointer grabs is the full height of the row and invisible; the bar
+                    // is drawn six pixels thick inside it. Aiming and seeing are different jobs:
+                    // a bar thick enough to be easy to hit is a bar too thick to read a value off.
                     row.spawn((
                         SliderTrack(setting),
                         RelativeCursorPosition::default(),
                         Node {
                             width: Val::Px(SLIDER_WIDTH),
-                            height: Val::Px(6.0),
+                            height: Val::Px(ROW_HEIGHT),
+                            align_items: AlignItems::Center,
                             ..default()
                         },
-                        BackgroundColor(Color::srgba(0.5, 0.55, 0.6, 0.35)),
                     ))
-                    .with_children(|track| {
-                        track.spawn((
-                            SliderFill(setting),
-                            Node { width: Val::Percent(0.0), height: Val::Percent(100.0), ..default() },
-                            BackgroundColor(Color::srgb(0.55, 0.72, 0.95)),
-                        ));
+                    .with_children(|grab| {
+                        grab.spawn((
+                            Node {
+                                width: Val::Percent(100.0),
+                                height: Val::Px(SLIDER_THICK),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgba(0.5, 0.55, 0.6, 0.35)),
+                        ))
+                        .with_children(|track| {
+                            track.spawn((
+                                SliderFill(setting),
+                                Node {
+                                    width: Val::Percent(0.0),
+                                    height: Val::Percent(100.0),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgb(0.55, 0.72, 0.95)),
+                            ));
+                        });
                     });
                 }
                 row.spawn((
@@ -897,6 +917,19 @@ fn paint(
         let window = ROW_HEIGHT * VISIBLE_ROWS;
         scroll.0.y = scroll.0.y.clamp(top + ROW_HEIGHT - window, top).max(0.0);
     }
+}
+
+/// Where along a slider's bar the pointer is, from 0 at the left end to 1 at the right.
+///
+/// The one line of arithmetic in here worth a name, because the number going into it is not what
+/// its type suggests: [`RelativeCursorPosition::normalized`] measures from a node's *middle* — (0,
+/// 0) is the centre and (0.5, 0.5) the bottom-right corner. Read as a fraction from the left, which
+/// is what a slider wants, that puts the whole left half of the bar on the floor of the range and
+/// squeezes the range's own bottom half across the right half of the bar. Which is exactly what a
+/// drag did: the grab landed half a bar to the right of the pointer and only the right half of it
+/// did anything.
+fn along(at: Vec2) -> f32 {
+    (at.x + 0.5).clamp(0.0, 1.0)
 }
 
 /// What a row says on the left and on the right.
@@ -1285,6 +1318,23 @@ mod tests {
             assert_eq!(rows[index], Row::Slide(*setting));
         }
         assert_eq!(rows[Setting::ALL.len()], Row::Do(Action::Back, "Back"));
+    }
+
+    /// A drag lands where the pointer is, which is the one thing about a slider a player checks.
+    ///
+    /// Worth a test rather than an eyeball because the number it reads is measured from the middle
+    /// of the bar and reads perfectly plausibly as measured from its left — the version that
+    /// shipped clamped it straight to 0..1, which pinned the left half of every bar to the floor
+    /// of its range and fitted the whole range into the right half. Nothing about that is visible
+    /// in the code; it is visible in these three numbers.
+    #[test]
+    fn a_drag_sets_the_value_under_the_pointer() {
+        assert_eq!(along(Vec2::new(-0.5, 0.0)), 0.0, "the left end of the bar was not the floor");
+        assert_eq!(along(Vec2::new(0.0, 0.0)), 0.5, "the middle of the bar was not the middle");
+        assert_eq!(along(Vec2::new(0.5, 0.0)), 1.0, "the right end of the bar was not the ceiling");
+        // And a drag that runs off either end stays on the end it ran off.
+        assert_eq!(along(Vec2::new(-4.0, 0.0)), 0.0);
+        assert_eq!(along(Vec2::new(4.0, 0.0)), 1.0);
     }
 
     /// A slider is worked from both ends of its range and never leaves it.
