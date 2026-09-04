@@ -5,63 +5,69 @@
 # unprefixed settings are the server's to decide and every client takes them from the metadata
 # endpoint, `srv_` ones are the server's alone, and `cl_` ones belong to whoever is playing.
 #
-# What is different here is what a real link makes pointless: the conditioner is off, because the
-# latency is now the actual internet rather than a simulation of one, and the server-only knobs are
-# set for a machine strangers connect to rather than for an experiment. Turning the conditioner on
-# here would put the same simulated lag on every player, which is a thing to do deliberately and
-# never by leaving an experiment's file in place.
+# So the first section below is not merely this machine's opinion — it is what everybody who
+# connects will be running. That is worth knowing before touching any of it.
+#
+# What is different here from the example is what a real link makes pointless: the conditioner is
+# off, because the latency is now the actual internet rather than a simulation of one, and the
+# server-only knobs are set for a machine strangers connect to rather than for an experiment.
 #
 # `cl_` fields are left out entirely. Nothing would read them — a client's own file answers those —
 # and a value here that nobody obeys is a lie waiting to be believed.
 
-# --- The link ------------------------------------------------------------------------------------
+# === Both ends. Every client takes these from the endpoint below. ================================
 
-# Must match every client, and does: a client fetches this file from the metadata endpoint below
-# and takes this number, and everything else unprefixed, before it builds its app. 64 Hz is what
-# CS:GO's official servers run.
+# How often the simulation steps. Must match every client, and does: a client fetches this file
+# before it builds its app. 64 Hz is what CS:GO's official servers run.
 tick_hz = 64.0
 
 # The conditioner, off. Real players bring their own latency, jitter and loss; adding more on top
 # would be measuring the sum of two links and calling it one.
+#
+# Turning it on here now lags EVERY player, not merely whoever shares this file: each of them takes
+# these three numbers on connecting. That is a thing to do deliberately and never by leaving an
+# experiment's file in place.
 ping_ms = 0
 jitter_ms = 0
 loss = 0.0
 
-# --- Sockets -------------------------------------------------------------------------------------
+# Rewind targets to what the shooter saw. Over the internet this is not a nicety: without it a
+# player must lead a running target by most of its own width at every range, because the aim comes
+# from a screen that is a round trip plus the interpolation delay old.
+#
+# Both ends have to be doing the same thing — a client that reported no interpolation delay would
+# leave the server nothing to rewind by — which is why this one is the server's to decide.
+lag_compensation = true
+
+# How much of a vehicle a driver's own client works out for itself. Both ends must agree: the
+# server decides who gets a prediction target, the client decides what its predicted chassis may
+# collide with, and neither can see the other's copy. This is where that agreement comes from.
+predict_vehicles = "full"
+
+# === Where the server is. Both ends read them; neither is fetched, for the obvious reason. =======
 
 # UDP, the game itself. The server binds 0.0.0.0 on this port.
 port = 5000
 
-# TCP, beside it: where this file is served, so a client can take everything unprefixed in it
+# TCP, beside it: where this file is served, so a client can take everything in the section above
 # before building its app. A client that cannot reach this port keeps its own numbers — a tick rate
 # that disagrees then shows up as a refused connection, and a simulated link that disagrees shows
 # up as nothing at all. So the port has to be open for the port above to be useful in practice.
 meta_port = 5001
 
-# --- What the server sends -----------------------------------------------------------------------
+# === The server's own. A client never reads them. ================================================
 
 # Replication updates per second, deliberately below the tick rate: sending every tick costs
 # bandwidth per player and leaves interpolation nothing to interpolate across.
 srv_send_hz = 32.0
 
-# --- Serving strangers ----------------------------------------------------------------------------
-
-# Rewind targets to what the shooter saw. Over the internet this is not a nicety: without it a
-# player must lead a running target by most of its own width at every range, because the aim comes
-# from a screen that is a round trip plus the interpolation delay old.
-lag_compensation = true
-
-# How far back that rewind may reach, in ticks. It has to cover the worst connection this server
-# means to serve — round trip plus interpolation delay — and a shot that asks for more is logged
-# and falls back to the present rather than testing against a position nobody was in. 45 ticks is
-# about 700 ms at 64 Hz, which covers a bad transatlantic link, and costs a few hundred bytes per
-# player.
+# How far back a shot's rewind may reach, in ticks. It has to cover the worst connection this
+# server means to serve — round trip plus interpolation delay — and a shot that asks for more is
+# logged and falls back to the present rather than testing against a position nobody was in. 45
+# ticks is about 700 ms at 64 Hz, which covers a bad transatlantic link, and costs a few hundred
+# bytes per player.
 srv_lag_comp_history_ticks = 45
 
 # How late a terrain edit lands, in ticks, so that every client applies it on the same tick the
-# server does.
+# server does. The tick travels with the edit, so no client needs this number itself.
 srv_edit_delay_ticks = 10
-
-# How much of a vehicle a driver's own client works out for itself. Both ends must agree, and this
-# is the value the client defaults to.
-predict_vehicles = "full"
