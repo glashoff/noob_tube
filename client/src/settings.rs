@@ -67,7 +67,7 @@ impl Setting {
     /// a slider that has to be dragged across the screen to do anything.
     pub fn range(self) -> (f32, f32, f32) {
         match self {
-            Setting::GrassReach => (0.0, 48.0, 2.0),
+            Setting::GrassReach => (0.0, 64.0, 2.0),
         }
     }
 
@@ -115,8 +115,9 @@ impl Setting {
             Setting::GrassReach => {
                 // Plain ASCII, because the dialog's font has no dash of that kind and draws a
                 // box for one. Everything on this page goes through the same font.
-                "How far grass is drawn. It costs the square of this (twice the distance is four \
-                 times the blades), so it is the first thing to turn down. Off is off."
+                "How far grass is drawn. It thins out with distance, so this costs rather less \
+                 than the square of it, but it is still the most expensive thing on the page. Off \
+                 is off."
             }
         }
     }

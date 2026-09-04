@@ -36,13 +36,28 @@ use noob_tube_shared::vehicle::{Driving, VehicleKind};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Where maps live.
+/// Where maps live when nothing says otherwise.
 ///
 /// Anchored to the source tree rather than to the working directory, for the same reason the
 /// client's asset root is: a cargo build runs from wherever it likes, and a map written beside the
-/// binary lands in `target/debug`, which `cargo clean` deletes. Shipping a server means making this
-/// a setting, which is a packaging question and is not one yet.
+/// binary lands in `target/debug`, which `cargo clean` deletes.
 pub const MAPS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../maps");
+
+/// The environment variable a deployed server sets to say where its maps are.
+pub const MAPS_ENV: &str = "NOOB_TUBE_MAPS";
+
+/// Where maps live, for this process.
+///
+/// [`MAPS`] is baked in at build time, which is right for a checkout and wrong everywhere else: a
+/// binary copied to a machine that has no source tree would look for maps under the *build* host's
+/// home directory, find nothing, and write any map it saved into a path nobody will look in. So the
+/// deploy sets [`MAPS_ENV`] and the compiled-in path stays the developer default.
+pub fn maps_dir() -> PathBuf {
+    match std::env::var_os(MAPS_ENV) {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => PathBuf::from(MAPS),
+    }
+}
 
 /// What the server knows about maps, beside the one being played.
 ///

@@ -64,7 +64,7 @@ fn main() {
         .insert_resource(Ground::of(terrain::default_terrain()))
         // What maps there are, read once at startup. The built-in map is what a server starts on
         // and it has no file behind it, so `current` is None until somebody saves or loads.
-        .insert_resource(maps::Maps::discover(maps::MAPS))
+        .insert_resource(maps::Maps::discover(maps::maps_dir()))
         .add_plugins(PhysicsPlugin)
         // The same geometry the client collides against, built from the same numbers. If the two
         // disagreed, every step near the difference would produce a correction the player sees.

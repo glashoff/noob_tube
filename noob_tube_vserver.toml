@@ -1,0 +1,62 @@
+# The config the public server runs on. `deploy.sh` copies this file to the v-server as
+# `noob_tube.toml`, and the unit points `NOOB_TUBE_CONFIG` at it.
+#
+# It is the same format as `noob_tube.example.toml` and the same fields — a client reads this one
+# too, over the metadata endpoint, but takes only the tick rate from it. What is different here is
+# what a real link makes pointless: the conditioner is off, because the latency is now the actual
+# internet rather than a simulation of one, and the server-only knobs are set for a machine
+# strangers connect to rather than for an experiment.
+#
+# Client-only fields are left out entirely. They would be read and ignored, and a value here that
+# nobody obeys is a lie waiting to be believed.
+
+# --- The link ------------------------------------------------------------------------------------
+
+# Must match every client, and does: the client fetches this file from the metadata endpoint below
+# and adopts this number before it builds its app. 64 Hz is what CS:GO's official servers run.
+tick_hz = 64.0
+
+# The conditioner, off. Real players bring their own latency, jitter and loss; adding more on top
+# would be measuring the sum of two links and calling it one.
+ping_ms = 0
+jitter_ms = 0
+loss = 0.0
+
+# --- Sockets -------------------------------------------------------------------------------------
+
+# UDP, the game itself. The server binds 0.0.0.0 on this port.
+port = 5000
+
+# TCP, beside it: where this file is served so a client can adopt the tick rate before connecting.
+# A client that cannot reach it keeps its own rate, and a disagreement then shows up as a refused
+# connection rather than as a broken game, so the port has to be open for the port above to be
+# useful in practice.
+meta_port = 5001
+
+# --- What the server sends -----------------------------------------------------------------------
+
+# Replication updates per second, deliberately below the tick rate: sending every tick costs
+# bandwidth per player and leaves interpolation nothing to interpolate across.
+send_hz = 32.0
+
+# --- Serving strangers ----------------------------------------------------------------------------
+
+# Rewind targets to what the shooter saw. Over the internet this is not a nicety: without it a
+# player must lead a running target by most of its own width at every range, because the aim comes
+# from a screen that is a round trip plus the interpolation delay old.
+lag_compensation = true
+
+# How far back that rewind may reach, in ticks. It has to cover the worst connection this server
+# means to serve — round trip plus interpolation delay — and a shot that asks for more is logged
+# and falls back to the present rather than testing against a position nobody was in. 45 ticks is
+# about 700 ms at 64 Hz, which covers a bad transatlantic link, and costs a few hundred bytes per
+# player.
+lag_comp_history_ticks = 45
+
+# How late a terrain edit lands, in ticks, so that every client applies it on the same tick the
+# server does.
+edit_delay_ticks = 10
+
+# How much of a vehicle a driver's own client works out for itself. Both ends must agree, and this
+# is the value the client defaults to.
+predict_vehicles = "full"

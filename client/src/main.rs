@@ -32,7 +32,7 @@ use core::time::Duration;
 use lightyear::prelude::*;
 use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::PLACEHOLDER_PRIVATE_KEY;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 
 fn main() {
     let net = configure();
@@ -188,7 +188,7 @@ fn configure() -> NetConfig {
         return net;
     }
 
-    let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), net.meta_port);
+    let addr = server_address(net.meta_port);
     match noob_tube_shared::metadata::fetch(addr) {
         Some(server) => {
             let ours = net.tick_hz;
@@ -270,8 +270,37 @@ fn world_inspector() -> impl Plugin {
     |_: &mut App| {}
 }
 
+/// Which machine the server is on, for a given port.
+///
+/// Localhost unless `NOOB_TUBE_SERVER` says otherwise, which is the shape the rest of the settings
+/// have: the file is for what you keep, the environment for the one thing you are changing right
+/// now. It is not a [`NetConfig`] field because that resource is `Copy` and read by both binaries
+/// — a host name is neither a number nor anything the server has an opinion about. `deploy.sh`
+/// prints the line to run with it.
+///
+/// A name is resolved, and only IPv4 answers count: the server binds `0.0.0.0`, so an AAAA record
+/// leading the list would produce a connection that times out with nothing to say about why.
+fn server_address(port: u16) -> SocketAddr {
+    let Ok(host) = std::env::var("NOOB_TUBE_SERVER") else {
+        return SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
+    };
+    match (host.as_str(), port).to_socket_addrs() {
+        Ok(mut found) => match found.find(SocketAddr::is_ipv4) {
+            Some(addr) => addr,
+            None => {
+                println!("{host} has no IPv4 address; falling back to localhost");
+                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
+            }
+        },
+        Err(error) => {
+            println!("cannot resolve {host}: {error}; falling back to localhost");
+            SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
+        }
+    }
+}
+
 fn connect(net: Res<NetConfig>, mut commands: Commands) {
-    let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), net.port);
+    let server_addr = server_address(net.port);
     // Port 0 lets the OS pick, so several clients can run on one machine.
     let local_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
 
