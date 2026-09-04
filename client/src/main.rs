@@ -16,6 +16,7 @@ mod props;
 mod recording;
 mod remote_players;
 mod placing;
+mod platform;
 mod sculpting;
 mod settings;
 mod shot_effects;
@@ -32,19 +33,25 @@ use core::time::Duration;
 use lightyear::prelude::*;
 use noob_tube_shared::tuning::NetConfig;
 use noob_tube_shared::PLACEHOLDER_PRIVATE_KEY;
-use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{Ipv4Addr, SocketAddr};
+#[cfg(not(target_family = "wasm"))]
+use std::net::ToSocketAddrs;
 
 fn main() {
     // `noob_tube_client server` is the dedicated server, run out of this binary. It exists because
     // a local round otherwise means keeping two builds in step by hand, and the moment shared code
     // changes and only one of them is rebuilt, the two disagree about the protocol. Handled before
     // anything else: `configure` reads the client's own settings, which a server has no use for.
+    //
+    // Not in a browser, where there are no arguments to read and no socket to listen on — and
+    // where the server's dependencies do not build at all. See this crate's `Cargo.toml`.
+    #[cfg(not(target_family = "wasm"))]
     if std::env::args().nth(1).as_deref() == Some("server") {
         noob_tube_server::run();
         return;
     }
 
-    let net = configure();
+    let (net, dial) = configure();
 
     App::new()
         .add_plugins(windowing())
@@ -56,6 +63,7 @@ fn main() {
         // server has no say in this: it acts on whatever tick an input arrives labelled with.
         .insert_resource(net.input_timeline())
         .insert_resource(net)
+        .insert_resource(dial)
         .add_plugins((
             noob_tube_shared::physics::PhysicsPlugin,
             // Draws the predicted player between fixed ticks, and carries visual correction.
@@ -112,7 +120,14 @@ fn main() {
 /// Absolute, and that is the limitation: a binary copied to another machine looks for the path it
 /// was built at. Shipping one means making this relative and putting the assets beside it, which is
 /// a packaging question and is not one yet.
+#[cfg(not(target_family = "wasm"))]
 pub const ASSETS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../assets");
+
+/// In a browser it is a URL, relative to the page — the packaging question above, answered by the
+/// one platform that forces it. There is no path to be absolute about: every asset is a request to
+/// whichever origin served the bundle.
+#[cfg(target_family = "wasm")]
+pub const ASSETS: &str = "assets";
 
 /// Which graphics adapter to draw with, and why it is not the fast one.
 ///
@@ -144,15 +159,45 @@ fn draw_with_the_integrated_gpu() -> RenderPlugin {
     }
 }
 
+/// How much the client says about itself, and how to ask it for more.
+///
+/// `NOOB_TUBE_LOG_FILTER` — `?log_filter=` in a browser — is a `tracing` filter, and giving one
+/// raises the ceiling to `trace` so that the filter, rather than a level set elsewhere, decides
+/// what comes out. It exists because the interesting failures in a dependency are logged at debug:
+/// a WebTransport connection that never opens says nothing at all at the default level, on either
+/// platform, and there is no way to attach a debugger to a browser tab from a test.
+///
+/// ```text
+/// NOOB_TUBE_LOG_FILTER=info,aeronet=debug,lightyear=debug cargo run -p noob_tube_client
+/// http://localhost:8000/?log&log_filter=info,aeronet=debug
+/// ```
+fn how_loud() -> bevy::log::LogPlugin {
+    let Some(filter) = platform::setting("NOOB_TUBE_LOG_FILTER") else {
+        return bevy::log::LogPlugin::default();
+    };
+    bevy::log::LogPlugin {
+        filter,
+        level: bevy::log::Level::TRACE,
+        ..default()
+    }
+}
+
 fn windowing() -> PluginGroupBuilder {
     let plugins = DefaultPlugins
         .set(AssetPlugin {
             file_path: ASSETS.into(),
+            // Bevy looks for a `.meta` file beside every asset it loads. On a disk that is a
+            // failed `stat`; over HTTP it is a second request and a 404 for each one, which
+            // doubles the traffic of a load and fills the console with failures that are not.
+            // Nothing here ships a `.meta` file, so there is nothing to look for.
+            #[cfg(target_family = "wasm")]
+            meta_check: bevy::asset::AssetMetaCheck::Never,
             ..default()
         })
-        .set(draw_with_the_integrated_gpu());
+        .set(draw_with_the_integrated_gpu())
+        .set(how_loud());
 
-    if std::env::var("NOOB_TUBE_HEADLESS").is_ok_and(|value| value != "0") {
+    if platform::switched_on("NOOB_TUBE_HEADLESS") {
         return plugins
             .set(WindowPlugin {
                 primary_window: None,
@@ -171,10 +216,30 @@ fn windowing() -> PluginGroupBuilder {
     plugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "Noob Tube".into(),
-            ..default()
+            ..where_it_is_drawn()
         }),
         ..default()
     })
+}
+
+/// The window fields only a browser has an opinion about.
+///
+/// It draws on the canvas the page already made, rather than one appended to the body:
+/// `index.html` owns the layout, and a canvas that arrives from underneath cannot be styled by the
+/// page that is supposed to be sizing it. `fit_canvas_to_parent` is what makes the window follow
+/// it. Changing the selector means changing the page too.
+#[cfg(target_family = "wasm")]
+fn where_it_is_drawn() -> Window {
+    Window {
+        canvas: Some("#game".into()),
+        fit_canvas_to_parent: true,
+        ..default()
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn where_it_is_drawn() -> Window {
+    Window::default()
 }
 
 /// Reads our own settings, then asks the server for the ones it owns.
@@ -194,26 +259,85 @@ fn windowing() -> PluginGroupBuilder {
 /// `println!` rather than `info!`, and this is the one place it is right: all of this happens
 /// before `App::new`, so `LogPlugin` has not installed a tracing subscriber and every `info!` here
 /// would go nowhere at all.
-fn configure() -> NetConfig {
+fn configure() -> (NetConfig, Dial) {
     let mut net = NetConfig::load();
-    if net.meta_port == 0 {
-        return net;
-    }
+    let mut dial = Dial {
+        // Replaced below by what the server says, when it says anything.
+        target: format!("https://{}:{}", server_host(), net.port),
+        // What to name in the token if the server will not say: the address we resolved for
+        // ourselves, which is what this did before the server published one.
+        token_addr: fallback_token_addr(net.port),
+        cert_digest: String::new(),
+    };
 
-    let addr = server_address(net.meta_port);
-    match noob_tube_shared::metadata::fetch(addr) {
-        Some(server) => match net.adopt_from_server(&server) {
-            moved if moved.is_empty() => println!("server at {addr} agrees with our settings"),
-            moved => println!("server at {addr} says {}", moved.join(", ")),
-        },
-        None => println!(
-            "no metadata from {addr}: our own settings stand, {} Hz and all. A tick rate the \
+    let (said, asked) = ask_the_server(&net);
+    match said {
+        Some(server) => {
+            dial.token_addr = server.token_addr;
+            dial.cert_digest = server.cert_digest;
+            // The port comes from the server too, and it has to. `port` is deliberately not one of
+            // the settings a client adopts — it is how a client *finds* a server, so taking it from
+            // one would be circular. But a browser has no file to read it from and no environment
+            // to be told it in: it knows the origin that served the page and nothing else. The one
+            // number that cannot be wrong is the port the server is actually listening on, which is
+            // the one it just published.
+            dial.target = format!("https://{}:{}", server_host(), server.token_addr.port());
+            match net.adopt_from_server(&server.net) {
+                moved if moved.is_empty() => {
+                    platform::say(&format!("{asked} agrees with our settings"))
+                }
+                moved => platform::say(&format!("{asked} says {}", moved.join(", "))),
+            }
+        }
+        None => platform::say(&format!(
+            "no metadata from {asked}: our own settings stand, {} Hz and all. A tick rate the \
              server does not share refuses the connection; a simulated link it does not share is \
-             not caught by anything.",
+             not caught by anything. Nor is there a certificate to pin, so a server holding a \
+             self-signed one will refuse the connection outright.",
             net.tick_hz,
-        ),
+        )),
     }
-    net
+    (net, dial)
+}
+
+/// Asks the server what it is running, and says where it asked.
+///
+/// Two platforms, two questions, one answer type. On a desktop this is the socket the server
+/// listens on beside the game — see [`noob_tube_shared::metadata`]. In a browser there is no socket
+/// to open and nothing may block, so the page has already asked over HTTP and left the answer where
+/// [`platform::preloaded_config`] finds it; `meta_port` means nothing there, because the config
+/// came from the origin that served the bundle rather than from a port.
+///
+/// The second half of the pair is only for the log line, and it is a string rather than an address
+/// for the same reason: "the page" is where a browser asked.
+#[cfg(not(target_family = "wasm"))]
+fn ask_the_server(net: &NetConfig) -> (Option<noob_tube_shared::metadata::ServerInfo>, String) {
+    if net.meta_port == 0 {
+        return (None, "a switched-off metadata endpoint".to_string());
+    }
+    let addr = server_address(net.meta_port);
+    (noob_tube_shared::metadata::fetch(addr), format!("the server at {addr}"))
+}
+
+#[cfg(target_family = "wasm")]
+fn ask_the_server(_net: &NetConfig) -> (Option<noob_tube_shared::metadata::ServerInfo>, String) {
+    (platform::preloaded_config(), "the page".to_string())
+}
+
+/// What a connect token names when the server has not said.
+///
+/// It will not do on the web — a browser has no resolver, and this answers with loopback there —
+/// but neither will anything else: without the metadata there is no certificate digest either, and
+/// the connection is refused before the token is ever read. It is here so that a desktop client
+/// talking to a server with no metadata endpoint behaves as it did before there was one.
+#[cfg(not(target_family = "wasm"))]
+fn fallback_token_addr(port: u16) -> SocketAddr {
+    server_address(port)
+}
+
+#[cfg(target_family = "wasm")]
+fn fallback_token_addr(port: u16) -> SocketAddr {
+    SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
 }
 
 /// Live ECS inspection over BRP, compiled in only with `--features remote`.
@@ -276,7 +400,29 @@ fn world_inspector() -> impl Plugin {
     |_: &mut App| {}
 }
 
-/// Which machine the server is on, for a given port.
+/// Where and how to dial the server, settled before the app exists.
+///
+/// Three separate answers to "which server", and they are separate because a browser cannot derive
+/// any of them from the others (web.md §2):
+///
+/// - [`target`](Self::target) is a URL, and the name in it is what TLS is checked against. A
+///   resolved address would not do: a certificate names hosts.
+/// - [`token_addr`](Self::token_addr) is an address, because netcode compares it against the one
+///   the server bound. The server publishes it, since resolving a name needs a resolver and a
+///   browser has none.
+/// - [`cert_digest`](Self::cert_digest) is what a self-signed certificate is pinned by, and empty
+///   for a publicly trusted one. See the server's `certificate` module.
+#[derive(Resource, Clone, Debug)]
+struct Dial {
+    /// The WebTransport URL, `https://host:port`.
+    target: String,
+    /// What this client's connect token names.
+    token_addr: SocketAddr,
+    /// Hex SHA-256 of the certificate to pin, or empty to validate the ordinary way.
+    cert_digest: String,
+}
+
+/// Which machine the server is on, by name.
 ///
 /// Localhost unless `NOOB_TUBE_SERVER` says otherwise, which is the shape the rest of the settings
 /// have: the file is for what you keep, the environment for the one thing you are changing right
@@ -284,10 +430,22 @@ fn world_inspector() -> impl Plugin {
 /// — a host name is neither a number nor anything the server has an opinion about. `deploy.sh`
 /// prints the line to run with it.
 ///
+/// The name, not an address, because this is what goes into the WebTransport URL and a certificate
+/// is issued to names.
+fn server_host() -> String {
+    platform::setting("NOOB_TUBE_SERVER").unwrap_or_else(platform::default_host)
+}
+
+/// The same machine, resolved, for a given port.
+///
+/// Native only: resolving a name needs a resolver, and a browser exposes none. Everything that
+/// needed an address there is published by the server instead — see [`Dial`].
+///
 /// A name is resolved, and only IPv4 answers count: the server binds `0.0.0.0`, so an AAAA record
 /// leading the list would produce a connection that times out with nothing to say about why.
+#[cfg(not(target_family = "wasm"))]
 fn server_address(port: u16) -> SocketAddr {
-    let Ok(host) = std::env::var("NOOB_TUBE_SERVER") else {
+    let Some(host) = platform::setting("NOOB_TUBE_SERVER") else {
         return SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
     };
     match (host.as_str(), port).to_socket_addrs() {
@@ -305,13 +463,9 @@ fn server_address(port: u16) -> SocketAddr {
     }
 }
 
-fn connect(net: Res<NetConfig>, mut commands: Commands) {
-    let server_addr = server_address(net.port);
-    // Port 0 lets the OS pick, so several clients can run on one machine.
-    let local_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
-
+fn connect(net: Res<NetConfig>, dial: Res<Dial>, mut commands: Commands) {
     let auth = Authentication::Manual {
-        server_addr,
+        server_addr: dial.token_addr,
         client_id: rand_client_id(),
         private_key: PLACEHOLDER_PRIVATE_KEY,
         protocol_id: net.protocol_id(),
@@ -354,25 +508,31 @@ fn connect(net: Res<NetConfig>, mut commands: Commands) {
                 },
             )
             .expect("failed to build the netcode client"),
-            UdpIo::default(),
-            LocalAddr(local_addr),
-            PeerAddr(server_addr),
+            client::WebTransportClientIo {
+                certificate_digest: dial.cert_digest.clone(),
+                target: Some(dial.target.clone()),
+            },
+            // Not what the URL is built from — `target` above is — but what the rest of the app
+            // and an inspector read to say who this link talks to.
+            PeerAddr(dial.token_addr),
         ))
         .id();
 
     commands.trigger(client::Connect { entity: client });
-    info!("connecting to {server_addr}, {}", net.describe(noob_tube_shared::tuning::Side::Client));
+    info!(
+        "connecting to {} as {}, {}",
+        dial.target,
+        dial.token_addr,
+        net.describe(noob_tube_shared::tuning::Side::Client),
+    );
 }
 
 fn on_connected(trigger: On<Add, Connected>) {
     info!("connected: {}", trigger.entity);
 }
 
-/// Distinct id per process so two clients on one machine do not collide.
+/// Distinct id per process so two clients on one machine do not collide. See
+/// [`platform::unique_id`], which is where the two ways of getting one are written down.
 fn rand_client_id() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
+    platform::unique_id()
 }

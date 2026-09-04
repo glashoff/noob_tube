@@ -89,6 +89,8 @@ impl Plugin for LocalPlayerPlugin {
                 (
                     note_drawn_view,
                     grab_cursor,
+                    #[cfg(target_family = "wasm")]
+                    follow_the_pointer_lock,
                     draw_or_stow_the_weapon,
                     fly,
                     look,
@@ -290,6 +292,62 @@ fn spawn_player(mut commands: Commands) {
 fn grab_cursor(window: Single<(&Window, &mut CursorOptions), With<PrimaryWindow>>) {
     let (window, mut cursor) = window.into_inner();
     if !window.focused {
+        cursor.grab_mode = CursorGrabMode::None;
+        cursor.visible = true;
+    }
+}
+
+/// How long a lock the browser has not granted is waited for before the game stops believing in it.
+///
+/// Long enough that a granted one — which arrives within a frame or two — is never cut short, short
+/// enough that a refused one puts the menu back while the player still has their hand on the mouse.
+#[cfg(target_family = "wasm")]
+const LOCK_GRACE: f32 = 1.0;
+
+/// Update, in a browser: follows the browser when it will not give the pointer, or takes it back.
+///
+/// `grab_mode` is what this client *asked* for, and on a desktop that is the same thing as what it
+/// got. In a browser it is not: a lock requested without a recent click is refused, so is one
+/// requested inside the cooldown that follows Escape, and Escape itself ends a lock without asking
+/// anybody. None of that reaches the field, so every check that reads `grab_mode` — and there are
+/// half a dozen, across this module and the menu — would go on believing the game has the mouse
+/// while the cursor sits free on the desktop. Look would move, clicks would land elsewhere.
+///
+/// Rather than teach all of them a second question, this asks it once and writes the answer back
+/// into the field they already read. Losing a lock is acted on at once, because the player pressed
+/// Escape and is waiting for the menu; never being granted one waits [`LOCK_GRACE`], because a
+/// request takes a frame or two to be answered and a refusal cannot be told from a slow yes.
+#[cfg(target_family = "wasm")]
+fn follow_the_pointer_lock(
+    time: Res<Time>,
+    cursor: Option<Single<&mut CursorOptions, With<PrimaryWindow>>>,
+    mut held: Local<bool>,
+    mut asked_at: Local<Option<f32>>,
+) {
+    let Some(cursor) = cursor else {
+        return;
+    };
+    let mut cursor = cursor.into_inner();
+    if cursor.grab_mode == CursorGrabMode::None {
+        *held = false;
+        *asked_at = None;
+        return;
+    }
+    if crate::platform::pointer_locked() {
+        *held = true;
+        *asked_at = None;
+        return;
+    }
+    // Asked for, and not in hand. Either it was and has just been taken away, or it never arrived.
+    let give_up = if *held {
+        true
+    } else {
+        let since = *asked_at.get_or_insert(time.elapsed_secs());
+        time.elapsed_secs() - since >= LOCK_GRACE
+    };
+    if give_up {
+        *held = false;
+        *asked_at = None;
         cursor.grab_mode = CursorGrabMode::None;
         cursor.visible = true;
     }

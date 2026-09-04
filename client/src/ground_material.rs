@@ -10,11 +10,11 @@
 //! bands are uploaded from the same `Layer` values the Rust side reads, so the two copies can only
 //! disagree about the arithmetic between them, never about where a layer starts.
 
-use bevy::asset::{AssetLoadFailedEvent, uuid_handle};
+use bevy::asset::{RenderAssetUsages, uuid_handle};
 use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension};
 use bevy::shader::ShaderRef;
 use noob_tube_shared::terrain::{Ground, Layer, MAX_LAYERS, waterline};
 
@@ -30,30 +30,55 @@ impl Plugin for GroundMaterialPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<GroundMaterial>::default())
             .init_resource::<GroundTextures>()
+            // Chained, and the order is the whole of it: the mip levels are built into each
+            // layer's own image, and the stack copies those images as they then are. Stacking
+            // first would put four one-level textures into an array that says it has eleven.
+            .add_systems(Update, (build_the_mipmaps, stack_the_layers).chain())
+            // Beside that chain rather than in it: this writes one scalar into the uniform and has
+            // nothing to do with the images the chain is putting in order.
             .add_systems(
                 Update,
-                (
-                    build_the_mipmaps,
-                    detail_has_arrived,
-                    detail_is_absent,
-                    the_waterline_moved.run_if(resource_exists_and_changed::<Ground>),
-                ),
+                the_waterline_moved.run_if(resource_exists_and_changed::<Ground>),
             );
     }
 }
 
-/// The images the ground is using, so the passes that finish them know which are their business.
+/// The images the ground is using, and the two array textures made out of them.
 ///
-/// The packed ones carry the layer slot they belong to, because their *arrival* is what the shader
-/// has to be told about: an image that has not loaded is not absent, it is Bevy's white 1x1
-/// placeholder, and white is a valid packed texel meaning a normal tipped flat on its side. See
-/// [`detail_has_arrived`].
+/// **The shader reads array textures, not one binding per layer**, and that is not tidiness. A
+/// fragment stage may use sixteen sampled textures on WebGPU — the figure Chrome reports on every
+/// adapter, whatever the hardware underneath — and Bevy's PBR pass has spent most of them before
+/// this material is reached. Four colour maps and four packed maps of our own took the total to
+/// eighteen: the pipeline was refused, the opaque pass failed, and the browser client quit with a
+/// validation error. Two arrays cost two.
+///
+/// So the per-layer images loaded here are raw material rather than what is bound. They are
+/// gathered, given their mip levels, and copied into one array texture each — see
+/// [`stack_the_layers`], which is also where the reason they cannot be bound one at a time is
+/// written down.
 #[derive(Resource, Default)]
 pub struct GroundTextures {
-    /// Colour maps, which need mip levels and nothing else.
-    pub colour: Vec<Handle<Image>>,
-    /// Packed detail maps, each with the layer it dresses.
-    pub packed: Vec<(usize, Handle<Image>)>,
+    /// One entry per layer slot, in slot order.
+    pub layers: Vec<LayerImages>,
+    /// The colour array and the detail array, once there are any. Held so that the next map drops
+    /// them rather than leaving two textures on the GPU nothing points at.
+    stacked: Option<[Handle<Image>; 2]>,
+    /// Whether the attempt has been made. A stack that could not be built — layers of different
+    /// sizes, say — must not be retried on every frame for the life of the map.
+    settled: bool,
+}
+
+/// What one layer brought with it: a colour map, and the packed detail beside it.
+///
+/// `None` means the layer never asked for one — an untextured layer, drawn in its own average
+/// colour. A handle that is present but whose file is missing is a different thing again, and the
+/// difference is only known once the asset server has tried: see [`stack_the_layers`].
+#[derive(Default)]
+pub struct LayerImages {
+    /// The colour map, or `None` for a layer with no texture at all.
+    pub colour: Option<Handle<Image>>,
+    /// The packed detail map beside it, if `tools/bake_ground_maps` has made one.
+    pub packed: Option<Handle<Image>>,
 }
 
 /// The rules, laid out the way a uniform wants them.
@@ -70,21 +95,22 @@ pub struct GroundRules {
     /// A wrong one shows up as ground that changes brightness when its texture arrives, and as
     /// washed-out patches in the middle of every lattice triangle.
     colour: [Vec4; MAX_LAYERS],
-    /// Slope band in degrees from flat: from, to, blend, and `w` = 1 where a texture is bound.
+    /// Slope band in degrees from flat: from, to, blend, and `w` = 1 once the colour array holds
+    /// this layer's map.
     ///
-    /// The flag is needed because a *missing* texture is not distinguishable in the shader: Bevy
-    /// binds a white 1×1 image in place of one, and white is also what a texture that happens to
-    /// be white looks like. Without the flag a layer with no texture would come out white rather
-    /// than in its own colour.
+    /// The flag is needed because a *missing* texture is not distinguishable in the shader: an
+    /// unfilled binding is a white placeholder, and white is also what a texture that happens to be
+    /// white looks like. Without it a layer whose map has not arrived — or never will, because it
+    /// has none — would come out white rather than in its own colour. [`stack_the_layers`] writes
+    /// it, for the same reason the detail flag beside it cannot be decided here.
     slope: [Vec4; MAX_LAYERS],
     /// Height band in metres of world y: from, to, blend, and `w` = metres one texture tile spans.
     height: [Vec4; MAX_LAYERS],
     /// Hollow band in metres below the surroundings: from, to, blend.
     ///
-    /// `w` = 1 once the layer's packed detail texture has finished loading. Unlike the colour
-    /// flag beside it, this one cannot be decided here: whether a `_Packed.png` exists is a
-    /// question about the disk, and a layer that has no detail maps must come out exactly as it
-    /// did before they existed rather than as noise. [`detail_has_arrived`] writes it.
+    /// `w` = 1 once the detail array holds this layer's packed map. Whether a `_Packed.png` exists
+    /// at all is a question about the disk, and a layer that has none must come out exactly as it
+    /// did before they existed rather than as noise. [`stack_the_layers`] writes it.
     dip: [Vec4; MAX_LAYERS],
     /// Shore band in metres above the waterline: from, to, blend. `w` is spare.
     shore: [Vec4; MAX_LAYERS],
@@ -112,9 +138,8 @@ impl GroundRules {
         for (slot, layer) in layers.iter().take(MAX_LAYERS).enumerate() {
             let [r, g, b] = layer.colour;
             rules.colour[slot] = Vec4::new(r, g, b, layer.roughness);
-            let textured = f32::from(!layer.texture.is_empty());
-            rules.slope[slot] =
-                Vec4::new(layer.slope.from, layer.slope.to, layer.slope.blend, textured);
+            // The `w` stays zero until the colour array really holds this layer — see the field.
+            rules.slope[slot] = Vec4::new(layer.slope.from, layer.slope.to, layer.slope.blend, 0.0);
             rules.height[slot] =
                 Vec4::new(layer.height.from, layer.height.to, layer.height.blend, layer.tile_scale);
             // The `w` stays zero until the packed texture is really loaded — see the field.
@@ -126,45 +151,38 @@ impl GroundRules {
     }
 }
 
-/// The extension itself: one uniform, eight textures, four samplers, and one fragment shader.
+/// The extension itself: one uniform, two array textures, one sampler, and one fragment shader.
 ///
-/// Separate fields rather than arrays, because WGSL cannot index a list of textures with a loop
-/// variable — so the shader unrolls, and the binding layout follows it. `None` binds Bevy's own
-/// white placeholder, which is why the uniform carries a flag per texture saying whether a layer
-/// really has one.
+/// **Two textures rather than eight, because sixteen is the ceiling.** A WebGPU fragment stage may
+/// sample sixteen textures, and Chrome reports that number on every adapter regardless of the
+/// hardware behind it — Bevy already asks for the adapter's own maximum and is given sixteen on a
+/// desktop GPU. Bevy's PBR pass spends most of them on shadow maps, the environment map and the
+/// tonemapping LUT; a binding per layer took the total to eighteen and the pipeline was refused
+/// outright. See [`GroundTextures`].
 ///
-/// **The packed textures declare no sampler of their own, and that is deliberate twice over.** A
-/// layer's two images want the identical descriptor — the same repeat, the same anisotropy, and
-/// they are sampled at the same uv in the same call — so the shader reads both through
-/// `sampler_i`. And samplers are a limit that is reached: wgpu's floor is sixteen per shader
-/// stage, Bevy's PBR fragment stage already spends most of them on shadows, environment maps and
-/// the tonemapping LUT, and four more here for nothing would be a pipeline that fails to build on
-/// exactly the hardware this is meant to run on.
+/// One array holds every layer's colour map and the other every layer's packed detail, indexed by
+/// the layer slot — which is also why the shader's four unrolled branches could collapse into a
+/// loop: a texture *array* can be indexed by a value the shader computes, where a list of separate
+/// bindings cannot.
+///
+/// **One sampler for both arrays, and that too is deliberate.** A layer's two images want the
+/// identical descriptor — the same repeat, the same anisotropy, read at the same uv in the same
+/// call — so the detail array declares none of its own. Samplers have a ceiling of sixteen as well,
+/// and this material now spends one.
+///
+/// `None` binds Bevy's own white array placeholder, which is what holds the bindings open while the
+/// images are still loading. Nothing reads it: the uniform's per-layer flags stay zero until
+/// [`stack_the_layers`] has really put something there.
 #[derive(Asset, AsBindGroup, Reflect, Clone, Debug)]
 pub struct GroundLayers {
     // 100 and up is the range Bevy leaves free for an extension; the base material owns 0..99.
     #[uniform(100)]
     pub rules: GroundRules,
-    #[texture(101)]
+    #[texture(101, dimension = "2d_array")]
     #[sampler(102)]
-    pub texture_0: Option<Handle<Image>>,
-    #[texture(103)]
-    #[sampler(104)]
-    pub texture_1: Option<Handle<Image>>,
-    #[texture(105)]
-    #[sampler(106)]
-    pub texture_2: Option<Handle<Image>>,
-    #[texture(107)]
-    #[sampler(108)]
-    pub texture_3: Option<Handle<Image>>,
-    #[texture(109)]
-    pub packed_0: Option<Handle<Image>>,
-    #[texture(110)]
-    pub packed_1: Option<Handle<Image>>,
-    #[texture(111)]
-    pub packed_2: Option<Handle<Image>>,
-    #[texture(112)]
-    pub packed_3: Option<Handle<Image>>,
+    pub colours: Option<Handle<Image>>,
+    #[texture(103, dimension = "2d_array")]
+    pub details: Option<Handle<Image>>,
 }
 
 /// Loads one of a layer's maps, with the two settings that matter.
@@ -173,6 +191,8 @@ pub struct GroundLayers {
 /// across five hundred metres of ground is one four-metre square in the middle with its edge pixels
 /// smeared to the horizon. It has to be set at load time, because the sampler belongs to the image
 /// rather than to the material that uses it.
+///
+/// **Loaded into main memory and not on to the GPU.** See the `asset_usage` line below.
 ///
 /// **`srgb` says whether the file is a picture or a table.** A colour map is a picture and carries
 /// the sRGB transfer function; a packed map is three unrelated quantities stored as bytes — two
@@ -184,6 +204,10 @@ fn load_map(assets: &AssetServer, path: String, srgb: bool) -> Handle<Image> {
         .load_builder()
         .with_settings(move |settings: &mut ImageLoaderSettings| {
             settings.is_srgb = srgb;
+            // Never uploaded on its own. These are the raw material `stack_the_layers` copies
+            // into the two array textures that *are* bound, and a per-layer image on the GPU
+            // beside its own copy inside an array would be the memory paid twice.
+            settings.asset_usage = RenderAssetUsages::MAIN_WORLD;
             settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
                 address_mode_u: ImageAddressMode::Repeat,
                 address_mode_v: ImageAddressMode::Repeat,
@@ -253,8 +277,12 @@ fn build_the_mipmaps(
         let AssetEvent::LoadedWithDependencies { id } = event else {
             continue;
         };
-        let ours = ground.colour.iter().any(|handle| handle.id() == *id)
-            || ground.packed.iter().any(|(_, handle)| handle.id() == *id);
+        let ours = ground.layers.iter().any(|layer| {
+            [&layer.colour, &layer.packed]
+                .into_iter()
+                .flatten()
+                .any(|handle| handle.id() == *id)
+        });
         if !ours {
             continue;
         }
@@ -268,82 +296,159 @@ fn build_the_mipmaps(
     }
 }
 
-/// Update: gives up on a layer's packed detail map, so that the ground can be drawn without one.
+/// Update: copies each layer's maps into the two array textures the shader actually reads.
 ///
-/// This is not a nicety, it is what keeps a missing `_Packed.png` from taking the whole ground with
-/// it. `AsBindGroup` will not build a bind group while any of its images is still unresolved, and a
-/// handle whose file does not exist stays unresolved for ever — so the material is never prepared,
-/// the tiles draw nothing at all, and the only sign of it is one `Path not found` in the log. The
-/// ground vanishing is not a plausible punishment for not having run a bake tool.
+/// **Why an array at all** is [`GroundLayers`]: sixteen sampled textures per fragment stage is what
+/// WebGPU offers, Bevy's PBR pass has spent most of them, and a binding per layer put the total at
+/// eighteen — a pipeline that is refused rather than a pipeline that is slow.
 ///
-/// Dropping the handle is what lets the material through: `None` binds Bevy's white placeholder,
-/// which is a perfectly good image to hold a binding open with as long as nothing reads it — and
-/// nothing does, because the flag [`detail_has_arrived`] would have set stays zero.
-fn detail_is_absent(
-    ground: Res<GroundTextures>,
-    mut failures: MessageReader<AssetLoadFailedEvent<Image>>,
+/// **Why it happens here, once, rather than at load time** is that an array texture is a single
+/// object. It cannot be filled in layer by layer as images arrive: it is created with its size, its
+/// format and its level count, and everything that goes into it has to agree about all three. So
+/// this waits until every image a map asked for has settled — arrived, or failed and never coming —
+/// and then copies them all at once. Until then the ground is drawn in the layers' average colours,
+/// which is what it was already drawn in for the second before a texture arrived.
+///
+/// **A layer with nothing to put in it still takes a slot.** An untextured layer, or one whose file
+/// is missing, is filled with white. That is never read — the uniform's flag for it stays zero —
+/// and the alternative, a shorter array with a slot map beside it, is a second index to keep in
+/// step for the sake of four megabytes in a case that is already the fallback.
+fn stack_the_layers(
+    assets: Res<AssetServer>,
+    mut ground: ResMut<GroundTextures>,
+    mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<GroundMaterial>>,
 ) {
-    for failure in failures.read() {
-        for (slot, _) in ground.packed.iter().filter(|(_, it)| it.id() == failure.id) {
-            let Some(mut material) = materials.get_mut(&GROUND_MATERIAL) else {
+    use bevy::asset::LoadState;
+
+    if ground.settled || ground.layers.is_empty() {
+        return;
+    }
+    // Every image has to have settled first, and "failed" counts: a `_Packed.png` that was never
+    // baked would otherwise hold the whole map's textures back for ever.
+    let mut arrived = Vec::new();
+    for layer in &ground.layers {
+        for handle in [&layer.colour, &layer.packed] {
+            let Some(handle) = handle else {
+                arrived.push(None);
                 continue;
             };
-            let detail = &mut material.extension;
-            match slot {
-                0 => detail.packed_0 = None,
-                1 => detail.packed_1 = None,
-                2 => detail.packed_2 = None,
-                _ => detail.packed_3 = None,
+            match assets.load_state(handle) {
+                LoadState::Loaded => arrived.push(Some(handle.clone())),
+                LoadState::Failed(_) => arrived.push(None),
+                // Still on its way. Nothing is built this frame.
+                _ => return,
             }
-            debug!("layer {slot} has no detail maps: {}", failure.path);
         }
     }
+
+    let colour: Vec<_> = arrived.iter().step_by(2).cloned().collect();
+    let packed: Vec<_> = arrived.iter().skip(1).step_by(2).cloned().collect();
+    let (Some(colours), Some(details)) = (stack(&images, &colour), stack(&images, &packed)) else {
+        // Nothing usable to stack — every layer untextured, or the maps disagree about their size.
+        // `stack` has said which; this only makes sure it is not said again sixty times a second.
+        ground.settled = true;
+        return;
+    };
+    let colours = images.add(colours);
+    let details = images.add(details);
+
+    let Some(mut material) = materials.get_mut(&GROUND_MATERIAL) else {
+        return;
+    };
+    for (slot, (colour, packed)) in colour.iter().zip(&packed).enumerate() {
+        material.extension.rules.slope[slot].w = f32::from(colour.is_some());
+        material.extension.rules.dip[slot].w = f32::from(packed.is_some());
+    }
+    material.extension.colours = Some(colours.clone());
+    material.extension.details = Some(details.clone());
+    ground.stacked = Some([colours, details]);
+    ground.settled = true;
+    debug!("stacked {} ground layers into two array textures", colour.len());
 }
 
-/// Update: lets the shader read a layer's packed detail map, once there is one to read.
+/// One array texture out of one image per layer, or `None` if there is nothing to make one from.
 ///
-/// The flag cannot be set where the rest of the uniform is written. A texture that has not loaded
-/// is not missing — Bevy binds a white 1×1 image in its place — and white is a perfectly valid
-/// packed texel: a tangent normal of (1, 1), which is no unit vector at all, over roughness 1.
-/// Reading that would not look like an absent detail map, it would look like the ground had been
-/// replaced by something wrong, for the second or two before the real image arrived and for good
-/// on any layer whose `_Packed.png` was never baked.
+/// The shape is taken from the first image that is really there, and every other has to match it —
+/// same size, same format, same number of mip levels. A layer that does not (a pack at another
+/// resolution, a `_Packed.png` from an older bake) is refused rather than stretched: an array
+/// texture has one size, and quietly padding one layer into it would misread every texel of it.
 ///
-/// So the question the shader is answered is not "does this layer have detail maps" but "has one
-/// arrived", which is a fact this event carries and no filesystem check could give: `dress` runs
-/// before the asset server has opened anything, and a load that fails raises `Failed` instead of
-/// this and correctly leaves the flag alone.
-fn detail_has_arrived(
-    ground: Res<GroundTextures>,
-    mut events: MessageReader<AssetEvent<Image>>,
-    mut materials: ResMut<Assets<GroundMaterial>>,
-) {
-    for event in events.read() {
-        let AssetEvent::LoadedWithDependencies { id } = event else {
-            continue;
-        };
-        for (slot, _) in ground.packed.iter().filter(|(_, it)| it.id() == *id) {
-            let Some(mut material) = materials.get_mut(&GROUND_MATERIAL) else {
-                continue;
-            };
-            material.extension.rules.dip[*slot].w = 1.0;
-            debug!("layer {slot} has its detail maps");
+/// Slots with no image are filled with white. Nothing samples them; see the caller.
+fn stack(images: &Assets<Image>, sources: &[Option<Handle<Image>>]) -> Option<Image> {
+    let first = sources
+        .iter()
+        .flatten()
+        .find_map(|handle| images.get(handle))
+        .filter(|image| image.data.is_some())?;
+    let size = first.texture_descriptor.size;
+    let format = first.texture_descriptor.format;
+    let levels = first.texture_descriptor.mip_level_count;
+    let bytes = first.data.as_ref().map_or(0, Vec::len);
+
+    let mut data = Vec::with_capacity(bytes * sources.len());
+    for (slot, handle) in sources.iter().enumerate() {
+        let image = handle.as_ref().and_then(|handle| images.get(handle));
+        match image {
+            Some(image) if image.data.is_some() => {
+                let descriptor = &image.texture_descriptor;
+                if descriptor.size != size
+                    || descriptor.format != format
+                    || descriptor.mip_level_count != levels
+                {
+                    warn!(
+                        "ground layer {slot} is {:?} at {} mip levels where the first layer is \
+                         {:?} at {levels}; its texture is left off",
+                        descriptor.size, descriptor.mip_level_count, size,
+                    );
+                    data.extend(std::iter::repeat_n(u8::MAX, bytes));
+                    continue;
+                }
+                data.extend_from_slice(image.data.as_ref().expect("checked just above"));
+            }
+            // No image, or one whose data has been dropped. White, and never read.
+            _ => data.extend(std::iter::repeat_n(u8::MAX, bytes)),
         }
     }
+
+    // `new_uninit` rather than `new`, which debug-asserts that the data is exactly one mip level
+    // of one layer — this is every level of every layer, laid out the way `TextureDataOrder`'s
+    // default wants it: each layer's whole chain, one layer after the next.
+    let mut stacked = Image::new_uninit(
+        Extent3d {
+            width: size.width,
+            height: size.height,
+            depth_or_array_layers: sources.len() as u32,
+        },
+        TextureDimension::D2,
+        format,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    stacked.texture_descriptor.mip_level_count = levels;
+    // The sampler belongs to the image rather than to the material, so the array has to carry the
+    // one the per-layer images were loaded with — repeat, and the anisotropy the ground needs
+    // because it is seen edge-on for most of the screen. See `load_map`.
+    stacked.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        anisotropy_clamp: 8,
+        ..ImageSamplerDescriptor::linear()
+    });
+    stacked.data = Some(data);
+    Some(stacked)
 }
 
 /// Update: moves the beach when somebody moves the sea.
 ///
 /// The shore band is measured from the waterline rather than from a world y, so the one number it
 /// is measured against has to reach the shader every time it changes — and it changes without the
-/// map doing so. `dress_the_ground` cannot carry it: that runs on a new *map*, deliberately, since
-/// re-dressing the ground is sixty-four meshes and a fifth of a second, and an author dragging the
-/// water level would pay it on every frame of the drag.
+/// map doing so. `dress` cannot carry it: that runs on a new *map*, deliberately, since re-dressing
+/// the ground is sixty-four meshes and a fifth of a second, and an author dragging the water level
+/// would pay it on every frame of the drag.
 ///
 /// So this writes the one float instead. A material fetched mutably re-uploads its uniform, which
-/// is the whole cost — no mesh is touched, and the water's own surface is rebuilt by
-/// [`water`](crate::water) on the same change.
+/// is the whole cost — no mesh is touched, no array texture is restacked, and the water's own
+/// surface is rebuilt by [`water`](crate::water) on the same change.
 ///
 /// **Read through `get` before `get_mut`.** Asking an `Assets` for a mutable handle marks the asset
 /// changed whether or not anything is written to it, so a system that reached straight for one
@@ -463,19 +568,19 @@ pub fn dress(
     layers: &[Layer],
     water_y: Option<f32>,
 ) -> Handle<GroundMaterial> {
-    let mut texture = [const { None }; MAX_LAYERS];
-    let mut detail = [const { None }; MAX_LAYERS];
-    for (slot, layer) in layers.iter().take(MAX_LAYERS).enumerate() {
-        (texture[slot], detail[slot]) = load_layer(assets, &layer.texture);
-    }
-    ours.colour = texture.iter().flatten().cloned().collect();
-    ours.packed = detail
+    // A new map starts the whole business again: different layers, different files, and two array
+    // textures built out of the old ones that nothing will read. Dropping the handles here is what
+    // frees them.
+    *ours = GroundTextures::default();
+    ours.layers = layers
         .iter()
-        .enumerate()
-        .filter_map(|(slot, handle)| handle.clone().map(|handle| (slot, handle)))
+        .take(MAX_LAYERS)
+        .map(|layer| {
+            let (colour, packed) = load_layer(assets, &layer.texture);
+            LayerImages { colour, packed }
+        })
         .collect();
-    let [texture_0, texture_1, texture_2, texture_3] = texture;
-    let [packed_0, packed_1, packed_2, packed_3] = detail;
+
     // The insert can only fail on a handle whose asset has been dropped mid-frame, which this one
     // cannot be: it is a constant, and the tiles that hold it are spawned in the same call.
     let written = materials.insert(
@@ -490,14 +595,11 @@ pub fn dress(
             },
             extension: GroundLayers {
                 rules: GroundRules::of(layers, water_y),
-                texture_0,
-                texture_1,
-                texture_2,
-                texture_3,
-                packed_0,
-                packed_1,
-                packed_2,
-                packed_3,
+                // Filled in by `stack_the_layers` once every image has settled. Until then the
+                // bindings hold Bevy's white array placeholder and the uniform's flags keep the
+                // shader off it.
+                colours: None,
+                details: None,
             },
         },
     );
@@ -590,6 +692,37 @@ mod tests {
         }
     }
 
+    /// Every layer's maps are the same shape as every other layer's.
+    ///
+    /// This is what an array texture demands and what nothing else did. Before the eight bindings
+    /// became two arrays, a pack at another resolution was a layer that looked wrong; now it is a
+    /// layer that cannot go into the array at all, and `stack` leaves it white. The check belongs
+    /// here rather than only in that warning, because the moment to find out is when somebody
+    /// swaps a pack — not when somebody notices the ground has gone pale.
+    #[test]
+    fn every_layer_is_the_same_size_as_every_other_layer() {
+        let mut shape: Option<((u32, u32), String)> = None;
+        for layer in default_layers() {
+            if layer.texture.is_empty() {
+                continue;
+            }
+            for suffix in ["Color", "Packed"] {
+                let path = format!("../assets/textures/{}_{suffix}.png", layer.texture);
+                let found = image::open(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+                match &shape {
+                    None => shape = Some((found.dimensions(), path)),
+                    Some((size, first)) => assert_eq!(
+                        found.dimensions(),
+                        *size,
+                        "{path} is {:?} but {first} is {size:?}; one array texture cannot hold \
+                         both, and the odd one out is dropped",
+                        found.dimensions(),
+                    ),
+                }
+            }
+        }
+    }
+
     /// Every band reaches the uniform in the units the shader reads them in.
     ///
     /// The one thing that can silently go wrong in the crossing: a degree written as a cosine, a
@@ -618,7 +751,11 @@ mod tests {
             assert_eq!(rules.shore[slot].x, layer.shore.from);
             assert_eq!(rules.shore[slot].y, layer.shore.to);
             assert_eq!(rules.shore[slot].z, layer.shore.blend);
-            assert_eq!(rules.slope[slot].w, 1.0, "a layer with a texture was marked as having none");
+            // Both flags start at zero, whatever the layer says it has. What they mean is not
+            // "this layer wants a texture" but "the array really holds one for it", which nothing
+            // here can know: see `stack_the_layers`.
+            assert_eq!(rules.slope[slot].w, 0.0, "a layer claimed a texture before one had arrived");
+            assert_eq!(rules.dip[slot].w, 0.0, "a layer claimed detail before it had arrived");
         }
 
         // And the dry map, which is the case the shader has no branch for: it is told a waterline

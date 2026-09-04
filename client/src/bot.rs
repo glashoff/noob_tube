@@ -122,7 +122,7 @@ impl Plugin for BotPlugin {
 /// none of this — no resource, no system, and above all nothing writing [`ScriptedInput`], which
 /// would take the keyboard away from whoever is playing.
 fn wanted() -> bool {
-    std::env::var("NOOB_TUBE_BOT").is_ok_and(|value| value != "0")
+    crate::platform::switched_on("NOOB_TUBE_BOT")
 }
 
 /// This client's own player: where it is, who it is, and whether it is in a seat.

@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <title>Noob Tube</title>
+    <style>
+      /* The canvas is the game and the page is nothing else, so the page gets out of its way.
+         `display: block` because a canvas is inline by default, which leaves a few pixels of line
+         box under it and a scrollbar with them. */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #10131a;
+        color: #c8cedb;
+        font: 14px/1.5 system-ui, sans-serif;
+      }
+      #game {
+        display: block;
+        width: 100%;
+        height: 100%;
+        /* The canvas takes the keyboard, so it must be focusable and must not draw a focus ring
+           around the whole picture when it has it. */
+        outline: none;
+      }
+      /* Only ever shown with `?log` in the address — see the script below. Fixed, on top, and
+         scrollable, because what it is for is being read and copied out of a machine that has no
+         developer tools open. */
+      #log {
+        position: fixed;
+        inset: auto 0 0 0;
+        max-height: 40%;
+        overflow: auto;
+        margin: 0;
+        padding: 0.5rem 0.75rem;
+        background: #0b0d12ee;
+        border-top: 1px solid #2a3040;
+        font: 12px/1.4 ui-monospace, monospace;
+        white-space: pre-wrap;
+      }
+      #loading {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 2rem;
+        /* Behind nothing: the canvas is transparent until the first frame is drawn, so this has to
+           sit on top and be taken away rather than be covered up. */
+        background: #10131a;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game" tabindex="0"></canvas>
+    <div id="loading">starting…</div>
+
+    <script type="module">
+      // The bootstrap, and the order in it is the whole point — see web.md §2. Everything the two
+      // ends have to agree on has to be settled before the client builds its app, and in a browser
+      // nothing may block: `main` has to return to the event loop, there is no synchronous fetch
+      // and there is no raw TCP. So the fetch happens here, before the module is instantiated, and
+      // the answer is left on `window` for the client to read synchronously.
+      import init from "./noob_tube_client.js";
+
+      // `?log` mirrors the console into the page. It is for a machine with no developer tools in
+      // front of it — a phone, a headless browser in a test, somebody being asked what went wrong
+      // — and it is off otherwise, because a game does not need a log pane over the bottom of it.
+      if (new URLSearchParams(location.search).has("log")) {
+        const pane = document.createElement("pre");
+        pane.id = "log";
+        document.body.append(pane);
+        const lines = [];
+        const write = (kind, args) => {
+          // `%c` and its arguments are how the tracing bridge colours a line. Nothing here wants
+          // the colours, and printed literally they are half the width of every message.
+          const said = args.map(String).join(" ").replace(/%c/g, "");
+          lines.push(`${kind} ${said}`);
+          pane.append(`${kind} ${said}\n`);
+          pane.scrollTop = pane.scrollHeight;
+        };
+        for (const kind of ["log", "info", "warn", "error"]) {
+          const was = console[kind].bind(console);
+          console[kind] = (...args) => {
+            was(...args);
+            write(kind, args);
+          };
+        }
+        addEventListener("error", (event) => write("uncaught", [event.message]));
+        addEventListener("unhandledrejection", (event) => write("unhandled", [event.reason]));
+
+        // And posted back to whoever served the page, a second at a time. That is what makes a
+        // browser with nobody in front of it — a headless one in a test, a phone on somebody
+        // else's desk — say what it is doing without a debugger attached to it. `web/serve.py`
+        // prints them; anything else answers 404 and this quietly stops mattering.
+        let sent = 0;
+        setInterval(() => {
+          if (lines.length === sent) {
+            return;
+          }
+          const batch = lines.slice(sent).join("\n");
+          sent = lines.length;
+          fetch("log", { method: "POST", body: batch, keepalive: true }).catch(() => {});
+        }, 1000);
+      }
+
+      const status = document.getElementById("loading");
+
+      // What this browser has to be able to do, asked before anything else is started. Both are
+      // hard requirements and neither degrades: without WebGPU there is nothing to draw with, and
+      // without WebTransport there is no way to reach a server (web.md §1 and §3).
+      //
+      // Asked here rather than left to fail on its own, because what it looks like otherwise is a
+      // wasm-bindgen stack trace out of the middle of the renderer — a panic with the cause four
+      // frames down and the remedy nowhere at all. Firefox on Linux is the browser this is written
+      // for: it has had WebTransport since 2023 and WebGPU is still coming.
+      const missing = [];
+      if (!navigator.gpu) {
+        missing.push("WebGPU");
+      } else {
+        // Having the object is not having a device. A browser with WebGPU switched on but no
+        // adapter it can use answers null here, and that is the same "cannot run" for a player.
+        try {
+          if (!(await navigator.gpu.requestAdapter())) {
+            missing.push("a WebGPU adapter");
+          }
+        } catch (trouble) {
+          missing.push(`a WebGPU adapter (${trouble})`);
+        }
+      }
+      if (!window.WebTransport) {
+        missing.push("WebTransport");
+      }
+      if (missing.length > 0) {
+        status.textContent =
+          `Noob Tube needs ${missing.join(" and ")}, and this browser has none. ` +
+          `Chrome, Edge and Safari 26 all work; Firefox on Linux is the one that does not, yet.`;
+        console.error(`missing: ${missing.join(", ")}`);
+        throw new Error(`this browser is missing ${missing.join(" and ")}`);
+      }
+
+      try {
+        // Same origin, proxied to the server's metadata port. Not cached: it carries the
+        // certificate digest, and a stale one is a connection that will not open.
+        const answer = await fetch("net-config", { cache: "no-store" });
+        if (!answer.ok) {
+          throw new Error(`${answer.status} ${answer.statusText}`);
+        }
+        // Text rather than JSON: the same `serde_json` that reads the native client's socket
+        // answer reads this one, so there is one parser and one set of field names.
+        window.NOOB_TUBE_CONFIG = await answer.text();
+      } catch (trouble) {
+        // Not fatal, and deliberately so: a client with no answer keeps its own settings and says
+        // what that costs. It will not get far against a server holding a self-signed certificate,
+        // because the digest to pin came from here — and it says that too.
+        console.warn(`no config from ${location.origin}: ${trouble}`);
+      }
+
+      status.textContent = "loading the game…";
+      try {
+        await init();
+      } catch (trouble) {
+        // winit ends its startup by throwing, to keep the wasm stack alive under the browser's
+        // event loop. That one is expected; anything else is not.
+        if (!`${trouble}`.includes("Using exceptions for control flow")) {
+          status.textContent = `the game did not start: ${trouble}`;
+          throw trouble;
+        }
+      }
+      status.remove();
+      document.getElementById("game").focus();
+    </script>
+  </body>
+</html>

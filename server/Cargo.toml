@@ -13,6 +13,16 @@ lightyear = { workspace = true }
 # Map manifests. The heights are binary because they have to be; everything else is JSON
 # because it changes constantly while the design is young — see terrain.md §1.
 serde_json = { workspace = true }
+# Reading the certificate a deployment is given. `wtransport` can load a PEM pair itself, but only
+# through an `async fn` that wants a tokio runtime, and this happens in `main` before there is an
+# App let alone a runtime. Parsing it here is a dozen lines and no runtime at all; the crate is
+# already in the tree, because that is what wtransport parses with too.
+rustls-pemfile = "2.2"
+# The certificate types themselves. Lightyear re-exports `Identity` and nothing else, and building
+# one out of PEM files means naming the three types it is made of. Same version aeronet's
+# WebTransport server already resolves to, so there is one `wtransport` in the tree and one
+# `Identity` type — two would be a mismatch the compiler reports somewhere far from here.
+wtransport = "0.6"
 
 [features]
 remote = ["noob_tube_shared/remote"]

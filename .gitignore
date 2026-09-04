@@ -77,3 +77,7 @@ __pycache__/
 # server, and the built-in one — the map a server starts on when this directory is empty — lives in
 # `terrain.rs` instead.
 /maps/
+
+# The browser client, as `web/build.sh` leaves it: generated bindings, a copy of the page,
+# and a link to the assets. Everything in it comes from something that is checked in.
+/web/dist/

@@ -64,25 +64,24 @@ struct GroundRules {
 // material has 0..99.
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> rules: GroundRules;
 
-// One pair per layer. Unrolled rather than an array, because WGSL cannot index a list of textures
-// with a loop variable — and four `if`s are honest about what the hardware does anyway.
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var texture_0: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var sampler_0: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103) var texture_1: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(104) var sampler_1: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(105) var texture_2: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(106) var sampler_2: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(107) var texture_3: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(108) var sampler_3: sampler;
+// One array texture for every layer's colour map, one for every layer's packed detail, indexed by
+// the layer slot.
+//
+// **Arrays rather than a binding per layer, because sixteen is the ceiling.** A WebGPU fragment
+// stage may sample sixteen textures — the figure Chrome reports whatever the hardware underneath —
+// and Bevy's PBR pass has spent most of them before this file is reached. Eight of our own took the
+// total to eighteen: the pipeline was refused outright, the opaque pass failed with it, and the
+// browser client quit. Two cost two.
+//
+// It is also what lets the fragment entry point below be a loop rather than four copies of itself.
+// A list of separate bindings cannot be indexed by anything the shader works out; an array can.
+@group(#{MATERIAL_BIND_GROUP}) @binding(101) var colours: texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(102) var ground_sampler: sampler;
 
-// The packed detail maps: rg = tangent normal xy, b = roughness, a = height. No samplers of their
-// own — a layer's two textures are read at the same uv with the same repeat and the same
-// anisotropy, so `sampler_i` serves both, and four samplers not spent here are four this pipeline
-// still has left against wgpu's floor of sixteen per stage.
-@group(#{MATERIAL_BIND_GROUP}) @binding(109) var packed_0: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(110) var packed_1: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(111) var packed_2: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(112) var packed_3: texture_2d<f32>;
+// The packed detail maps: rg = tangent normal xy, b = roughness, a = height. No sampler of its own
+// — a layer's two textures are read at the same uv with the same repeat and the same anisotropy, so
+// one sampler serves both, and samplers have a ceiling of sixteen as well.
+@group(#{MATERIAL_BIND_GROUP}) @binding(103) var details: texture_2d_array<f32>;
 
 /// How sharply the triplanar blend favours the plane a surface faces.
 ///
@@ -177,8 +176,9 @@ fn lattice(uv: vec2<f32>) -> Cell {
 }
 
 fn planar(
-    tex: texture_2d<f32>,
+    tex: texture_2d_array<f32>,
     samp: sampler,
+    layer: i32,
     uv: vec2<f32>,
     ddx: vec2<f32>,
     ddy: vec2<f32>,
@@ -189,9 +189,9 @@ fn planar(
     let corners = at.corners;
     // The gradients are the caller's and are the same for all three: the offsets are translations,
     // so every sample covers the same footprint and wants the same mip level.
-    let a = textureSampleGrad(tex, samp, uv + hash2(corners[0]), ddx, ddy).rgb;
-    let b = textureSampleGrad(tex, samp, uv + hash2(corners[1]), ddx, ddy).rgb;
-    let c = textureSampleGrad(tex, samp, uv + hash2(corners[2]), ddx, ddy).rgb;
+    let a = textureSampleGrad(tex, samp, uv + hash2(corners[0]), layer, ddx, ddy).rgb;
+    let b = textureSampleGrad(tex, samp, uv + hash2(corners[1]), layer, ddx, ddy).rgb;
+    let c = textureSampleGrad(tex, samp, uv + hash2(corners[2]), layer, ddx, ddy).rgb;
     let mixed = weights.x * a + weights.y * b + weights.z * c;
     // Clamped at zero: putting the contrast back amplifies the deviation by up to √3, which on the
     // darkest texels of a dark texture reaches past black.
@@ -205,8 +205,9 @@ fn planar(
 /// plane's uv, which is what `textureSampleGrad` wants and what a plain `textureSample` would have
 /// worked out for itself if it were allowed to run here.
 fn triplanar(
-    tex: texture_2d<f32>,
+    tex: texture_2d_array<f32>,
     samp: sampler,
+    layer: i32,
     world: vec3<f32>,
     dx: vec3<f32>,
     dy: vec3<f32>,
@@ -217,13 +218,13 @@ fn triplanar(
     let k = 1.0 / max(tile_metres, 0.01);
     var total = vec3<f32>(0.0);
     if weights.y > NEGLIGIBLE {
-        total += weights.y * planar(tex, samp, world.xz * k, dx.xz * k, dy.xz * k, mean);
+        total += weights.y * planar(tex, samp, layer, world.xz * k, dx.xz * k, dy.xz * k, mean);
     }
     if weights.x > NEGLIGIBLE {
-        total += weights.x * planar(tex, samp, world.zy * k, dx.zy * k, dy.zy * k, mean);
+        total += weights.x * planar(tex, samp, layer, world.zy * k, dx.zy * k, dy.zy * k, mean);
     }
     if weights.z > NEGLIGIBLE {
-        total += weights.z * planar(tex, samp, world.xy * k, dx.xy * k, dy.xy * k, mean);
+        total += weights.z * planar(tex, samp, layer, world.xy * k, dx.xy * k, dy.xy * k, mean);
     }
     return total;
 }
@@ -237,16 +238,17 @@ fn triplanar(
 /// slightly, which is the same thing the mip chain does one level up and is what a blend of three
 /// overlapping patches of gravel should look like.
 fn planar_detail(
-    tex: texture_2d<f32>,
+    tex: texture_2d_array<f32>,
     samp: sampler,
+    layer: i32,
     uv: vec2<f32>,
     ddx: vec2<f32>,
     ddy: vec2<f32>,
 ) -> vec4<f32> {
     let at = lattice(uv);
-    let a = textureSampleGrad(tex, samp, uv + hash2(at.corners[0]), ddx, ddy);
-    let b = textureSampleGrad(tex, samp, uv + hash2(at.corners[1]), ddx, ddy);
-    let c = textureSampleGrad(tex, samp, uv + hash2(at.corners[2]), ddx, ddy);
+    let a = textureSampleGrad(tex, samp, uv + hash2(at.corners[0]), layer, ddx, ddy);
+    let b = textureSampleGrad(tex, samp, uv + hash2(at.corners[1]), layer, ddx, ddy);
+    let c = textureSampleGrad(tex, samp, uv + hash2(at.corners[2]), layer, ddx, ddy);
     return at.weights.x * a + at.weights.y * b + at.weights.z * c;
 }
 
@@ -282,8 +284,9 @@ struct Detail {
 /// on rather than replacing it. Without it a steep face reads its detail as though the face were
 /// flat, and the ravine walls light like vertical ground.
 fn triplanar_detail(
-    tex: texture_2d<f32>,
+    tex: texture_2d_array<f32>,
     samp: sampler,
+    layer: i32,
     world: vec3<f32>,
     dx: vec3<f32>,
     dy: vec3<f32>,
@@ -299,21 +302,21 @@ fn triplanar_detail(
     // The same three branches, in the same order and on the same thresholds, as the colour beside
     // it: a plane that contributes too little to be worth a colour fetch is not worth a normal.
     if weights.y > NEGLIGIBLE {
-        let p = planar_detail(tex, samp, world.xz * k, dx.xz * k, dy.xz * k);
+        let p = planar_detail(tex, samp, layer, world.xz * k, dx.xz * k, dy.xz * k);
         let t = tangent(p.xy);
         let w = vec3<f32>(t.xy + n.xz, abs(t.z) * n.y);
         out.normal += weights.y * w.xzy;
         out.roughness += weights.y * p.z;
     }
     if weights.x > NEGLIGIBLE {
-        let p = planar_detail(tex, samp, world.zy * k, dx.zy * k, dy.zy * k);
+        let p = planar_detail(tex, samp, layer, world.zy * k, dx.zy * k, dy.zy * k);
         let t = tangent(p.xy);
         let w = vec3<f32>(t.xy + n.zy, abs(t.z) * n.x);
         out.normal += weights.x * w.zyx;
         out.roughness += weights.x * p.z;
     }
     if weights.z > NEGLIGIBLE {
-        let p = planar_detail(tex, samp, world.xy * k, dx.xy * k, dy.xy * k);
+        let p = planar_detail(tex, samp, layer, world.xy * k, dx.xy * k, dy.xy * k);
         let t = tangent(p.xy);
         let w = vec3<f32>(t.xy + n.xy, abs(t.z) * n.z);
         out.normal += weights.z * w.xyz;
@@ -367,114 +370,49 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         let s = rules.slope[i];
         let h = rules.height[i];
         let d = rules.dip[i];
-        let w = rules.shore[i];
+        let sh = rules.shore[i];
         weight[i] = band(slope, s.x, s.y, s.z)
             * band(world.y, h.x, h.y, h.z)
             * band(dip, d.x, d.y, d.z)
-            * band(above_water, w.x, w.y, w.z);
+            * band(above_water, sh.x, sh.y, sh.z);
     }
     let total = weight.x + weight.y + weight.z + weight.w;
 
     var colour = vec3<f32>(0.0);
     var roughness = 0.0;
     var shading = vec3<f32>(0.0);
-    // Unrolled because the texture bindings cannot be indexed. A layer at zero weight is skipped
+    // One pass per layer, and it can be a loop because the maps are array textures: the slot is an
+    // index the shader works out, where a separate binding per layer could only be named. It used
+    // to be four copies of this body with the numbers written in. A layer at zero weight is skipped
     // entirely, which on most of the map is three of the four.
-    if weight.x > NEGLIGIBLE {
-        var c = rules.colour[0].rgb;
-        if rules.slope[0].w > 0.5 {
+    for (var i = 0u; i < rules.count; i = i + 1u) {
+        let w = weight[i];
+        if w <= NEGLIGIBLE {
+            continue;
+        }
+        let slot = i32(i);
+        var c = rules.colour[i].rgb;
+        if rules.slope[i].w > 0.5 {
             c = triplanar(
-                texture_0, sampler_0, world, dx, dy, planes, rules.height[0].w,
-                rules.colour[0].rgb,
+                colours, ground_sampler, slot, world, dx, dy, planes, rules.height[i].w,
+                rules.colour[i].rgb,
             );
         }
         // Roughness from the map when there is one, and the layer's own number when there is
         // not: the same relation `Layer::colour` has to a colour map, where the constant is what
         // the ground wears until something better has loaded and is measured from it afterwards.
         var n = normal;
-        var r = rules.colour[0].w;
-        if rules.dip[0].w > 0.5 {
+        var r = rules.colour[i].w;
+        if rules.dip[i].w > 0.5 {
             let d = triplanar_detail(
-                packed_0, sampler_0, world, dx, dy, planes, rules.height[0].w, normal,
+                details, ground_sampler, slot, world, dx, dy, planes, rules.height[i].w, normal,
             );
             n = d.normal;
             r = d.roughness;
         }
-        colour += weight.x * c;
-        roughness += weight.x * r;
-        shading += weight.x * n;
-    }
-    if weight.y > NEGLIGIBLE {
-        var c = rules.colour[1].rgb;
-        if rules.slope[1].w > 0.5 {
-            c = triplanar(
-                texture_1, sampler_1, world, dx, dy, planes, rules.height[1].w,
-                rules.colour[1].rgb,
-            );
-        }
-        // Roughness from the map when there is one, and the layer's own number when there is
-        // not: the same relation `Layer::colour` has to a colour map, where the constant is what
-        // the ground wears until something better has loaded and is measured from it afterwards.
-        var n = normal;
-        var r = rules.colour[1].w;
-        if rules.dip[1].w > 0.5 {
-            let d = triplanar_detail(
-                packed_1, sampler_1, world, dx, dy, planes, rules.height[1].w, normal,
-            );
-            n = d.normal;
-            r = d.roughness;
-        }
-        colour += weight.y * c;
-        roughness += weight.y * r;
-        shading += weight.y * n;
-    }
-    if weight.z > NEGLIGIBLE {
-        var c = rules.colour[2].rgb;
-        if rules.slope[2].w > 0.5 {
-            c = triplanar(
-                texture_2, sampler_2, world, dx, dy, planes, rules.height[2].w,
-                rules.colour[2].rgb,
-            );
-        }
-        // Roughness from the map when there is one, and the layer's own number when there is
-        // not: the same relation `Layer::colour` has to a colour map, where the constant is what
-        // the ground wears until something better has loaded and is measured from it afterwards.
-        var n = normal;
-        var r = rules.colour[2].w;
-        if rules.dip[2].w > 0.5 {
-            let d = triplanar_detail(
-                packed_2, sampler_2, world, dx, dy, planes, rules.height[2].w, normal,
-            );
-            n = d.normal;
-            r = d.roughness;
-        }
-        colour += weight.z * c;
-        roughness += weight.z * r;
-        shading += weight.z * n;
-    }
-    if weight.w > NEGLIGIBLE {
-        var c = rules.colour[3].rgb;
-        if rules.slope[3].w > 0.5 {
-            c = triplanar(
-                texture_3, sampler_3, world, dx, dy, planes, rules.height[3].w,
-                rules.colour[3].rgb,
-            );
-        }
-        // Roughness from the map when there is one, and the layer's own number when there is
-        // not: the same relation `Layer::colour` has to a colour map, where the constant is what
-        // the ground wears until something better has loaded and is measured from it afterwards.
-        var n = normal;
-        var r = rules.colour[3].w;
-        if rules.dip[3].w > 0.5 {
-            let d = triplanar_detail(
-                packed_3, sampler_3, world, dx, dy, planes, rules.height[3].w, normal,
-            );
-            n = d.normal;
-            r = d.roughness;
-        }
-        colour += weight.w * c;
-        roughness += weight.w * r;
-        shading += weight.w * n;
+        colour += w * c;
+        roughness += w * r;
+        shading += w * n;
     }
 
     // A point outside every band is possible and must not come out black: a gap should look like a

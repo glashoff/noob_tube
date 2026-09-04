@@ -6,9 +6,6 @@ license.workspace = true
 
 [dependencies]
 noob_tube_shared = { workspace = true }
-# `noob_tube_client server` runs the dedicated server out of this binary, so that one build
-# produces both sides of a local round and they cannot drift apart between two compiles.
-noob_tube_server = { workspace = true }
 avian3d = { workspace = true }
 # `jpeg` is not in Bevy's defaults, and a glTF whose textures are JPEG loads its geometry and then
 # fails on the images — visibly, as an untextured model, with one line in the log. Vehicle assets
@@ -28,6 +25,36 @@ bevy-inspector-egui = { version = "0.37", optional = true }
 # Adds BRP methods for screenshots and synthetic input, which is what lets an agent drive the
 # running game the way the harness does.
 bevy_brp_extras = { version = "0.22.5", optional = true }
+
+# The renderer, and it has to be said explicitly: Bevy's default features contain neither `webgpu`
+# nor `webgl2`, so a wasm build with neither draws nothing at all. WebGPU rather than WebGL2 —
+# web.md §3 has the browser table and the one gap it leaves, which is Firefox on Linux.
+# `noob_tube_client server` runs the dedicated server out of this binary, so that one build
+# produces both sides of a local round and they cannot drift apart between two compiles.
+#
+# Native only. The server listens over WebTransport and mints its own certificate, which is
+# `wtransport` and `rustls-pemfile` — neither builds for wasm, and a page has nothing to listen
+# with anyway. `main` gates the argument on the same condition.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+noob_tube_server = { workspace = true }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+bevy = { workspace = true, features = ["default", "jpeg", "webgpu"] }
+# The browser's side of `platform.rs`: the query parameters that stand in for environment
+# variables, the storage the settings live in, and the clock. Versions pinned to what Bevy and
+# lightyear already pull in — `wasm-bindgen` in particular has to match the CLI that generates the
+# bindings, so two of them in one build is a link error rather than a warning.
+js-sys = "0.3.104"
+wasm-bindgen = "0.2.127"
+web-sys = { version = "0.3.104", features = [
+    "Window",
+    "Location",
+    "UrlSearchParams",
+    "Storage",
+    "Document",
+    "Element",
+    "console",
+] }
 
 [dev-dependencies]
 # Only a test needs to read a PNG on its own: the one that checks the layer colours in
