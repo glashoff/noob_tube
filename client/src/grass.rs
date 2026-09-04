@@ -32,7 +32,7 @@ use bevy::light::NotShadowCaster;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use noob_tube_shared::sculpt::GroundPatched;
-use noob_tube_shared::terrain::{Ground, Installed, Terrain, slope_degrees};
+use noob_tube_shared::terrain::{Ground, Installed, Terrain, slope_degrees, waterline};
 use noob_tube_shared::types::Authored;
 
 use crate::settings::Settings;
@@ -499,7 +499,10 @@ fn density_at(terrain: &Terrain, x: f32, z: f32) -> f32 {
     let iz = ((z - grid.origin_z) / grid.spacing).round().clamp(0.0, (grid.nz - 1) as f32) as u32;
     let dip = terrain.dip_at(ix, iz);
     let slope = slope_degrees(normal.y);
-    terrain.layers.iter().map(|layer| layer.weight(slope, y, dip) * layer.grass).sum()
+    // And how far this stands above the sea, which is what keeps the lawn off the beach and out of
+    // the water without the grass knowing that either of them exists.
+    let above = y - waterline(terrain.water_y);
+    terrain.layers.iter().map(|layer| layer.weight(slope, y, dip, above) * layer.grass).sum()
 }
 
 /// Where one tuft stands, and what the ring it is in wants it made of.

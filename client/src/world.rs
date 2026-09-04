@@ -355,7 +355,8 @@ fn dress_the_ground(
     // The map's own rules, not this file's idea of them. A new map brings its own look and this
     // runs again when one arrives, so the material is written under one handle rather than added:
     // the tiles that are about to be spawned point at it either way.
-    let material = crate::ground_material::dress(materials, assets, ours, &terrain.layers);
+    let material =
+        crate::ground_material::dress(materials, assets, ours, &terrain.layers, terrain.water_y);
     let (wide, deep) = terrain.grid.tiles();
     for tz in 0..deep {
         for tx in 0..wide {

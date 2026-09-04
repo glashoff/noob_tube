@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use noob_tube_shared::level::default_markers;
 use noob_tube_shared::terrain::{
     DEFAULT_MAX_Y, DEFAULT_MIN_Y, DEFAULT_SPACING, Grid, Manifest, Marker, Terrain, VERSION,
-    default_layers, sanitise_name, slope_degrees, surface_of,
+    default_layers, sanitise_name, slope_degrees, surface_of, waterline,
 };
 
 /// Samples per axis when nobody says otherwise, and the reason the cap is 2049 and not 2048.
@@ -698,6 +698,10 @@ const AMBIENT: f32 = 0.28;
 fn draw(terrain: &Terrain, path: &Path) -> Result<(), String> {
     let grid = terrain.grid;
     let layers = default_layers();
+    // What the shore rule is measured against. An imported map has no water yet, so this is the
+    // waterline that is nowhere and the preview comes out with no beach on it — which is honestly
+    // what the map looks like until somebody sets one.
+    let sea = waterline(terrain.water_y);
     let mut pixels = vec![0u8; grid.samples() * 3];
 
     for iz in 0..grid.nz {
@@ -712,7 +716,7 @@ fn draw(terrain: &Terrain, path: &Path) -> Result<(), String> {
             let length = (dx * dx + up * up + dz * dz).sqrt();
             let normal = [dx / length, up / length, dz / length];
 
-            let colour = surface_of(&layers, normal[1], y, terrain.dip_at(ix, iz))
+            let colour = surface_of(&layers, normal[1], y, terrain.dip_at(ix, iz), y - sea)
                 .map_or(NOTHING, |index| layers[index].colour);
             let sun = (normal[0] * SUN[0] + normal[1] * SUN[1] + normal[2] * SUN[2]).max(0.0);
             let lit = AMBIENT + (1.0 - AMBIENT) * sun;

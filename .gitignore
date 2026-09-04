@@ -26,15 +26,17 @@
 /assets/models/*
 !/assets/models/warthog.glb
 
-# Ground textures: three ambientCG packs under CC0, the same three webgame's own map names, so the
-# two games' ground reads as the same place. CC0 is a public-domain dedication, so these travel
-# without conditions — the entry in CREDITS.md is decency, not a requirement. Colour maps only: the
-# normal maps are six megabytes each and there is nothing to hang them on until the ground mesh
-# carries tangents.
+# Ground textures: four ambientCG packs under CC0. Three of them are webgame's own map names, so
+# the two games' ground reads as the same place; the fourth is the sand the shore rule needed and
+# that game has no equivalent of, since it paints its beaches. CC0 is a public-domain dedication, so
+# these travel without conditions — the entry in CREDITS.md is decency, not a requirement. Colour
+# maps only: the normal maps are six megabytes each and there is nothing to hang them on until the
+# ground mesh carries tangents.
 !/assets/textures/
 /assets/textures/*
 !/assets/textures/Grass001_1K-PNG_Color.png
 !/assets/textures/Ground048_1K-PNG_Color.png
+!/assets/textures/Ground098_1K-PNG_Color.png
 !/assets/textures/Rock020_1K-PNG_Color.png
 
 # And the detail beside each of them: normal xy, roughness and height folded into one RGBA image by
@@ -44,6 +46,7 @@
 # right is not a close call. Same CC0 as the colour maps they were cut from.
 !/assets/textures/Grass001_1K-PNG_Packed.png
 !/assets/textures/Ground048_1K-PNG_Packed.png
+!/assets/textures/Ground098_1K-PNG_Packed.png
 !/assets/textures/Rock020_1K-PNG_Packed.png
 
 # Shaders are the one thing under assets/ that is not an asset. They are this project's own source

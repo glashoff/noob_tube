@@ -70,6 +70,19 @@ pub const DEFAULT_SPACING: f32 = 1.0;
 pub const DEFAULT_MIN_Y: f32 = -64.0;
 pub const DEFAULT_MAX_Y: f32 = 64.0;
 
+/// Where the built-in map's water sits.
+///
+/// Twelve metres down, which fills the bowl in the north-east to about half its depth and puts a
+/// little water in the deep end of the longer ravine. It is chosen against `HOME_FLAT` more than
+/// against anything else: everything anybody spawns on stands at y = 0, so the sea has to be far
+/// enough below that no crossing of the shore rule reaches it — three metres of blend around the
+/// waterline against twelve of clearance is not a close call.
+///
+/// **A map with water is the only place the shore rule can be seen**, and a rule that cannot be
+/// seen is one nobody can check by looking. The bowl was already here so that "down" was reachable
+/// without walking to a ravine; a lake in it costs one number and makes a beach out of the walk.
+pub const DEFAULT_WATER_Y: f32 = -12.0;
+
 /// How far around the origin the ground is left exactly flat, and where the shaping reaches full
 /// strength.
 ///
@@ -233,6 +246,7 @@ pub fn default_terrain() -> Terrain {
             terrain.heights[index] = grid.quantise(y);
         }
     }
+    terrain.water_y = Some(DEFAULT_WATER_Y);
     terrain
 }
 
@@ -1299,6 +1313,23 @@ pub struct Layer {
     /// Defaulted, so a manifest written before this existed still reads.
     #[serde(default = "anything")]
     pub dip: Band,
+    /// How far above the water, in **metres of world y over the map's own waterline**. Negative is
+    /// under it.
+    ///
+    /// The fourth axis, and the only one that is not a property of the *terrain* at all: the same
+    /// hollow at the same height is a lake bed or a meadow depending on one number somebody set in
+    /// the editor. [`Layer::height`] cannot say this — it is absolute, which is what a snow line
+    /// wants and what a shore line must not have, because an author who moves the water and finds
+    /// the beach left behind at the old level has found a bug.
+    ///
+    /// A map with no water reads [`NO_WATERLINE`] here, so every point on it is far above a
+    /// waterline that is nowhere: the beach selects nothing and the layers above it cover
+    /// everything. That is what terrain.md §1 means by a dry map *losing* one of its four layers
+    /// rather than needing a second rule set.
+    ///
+    /// Defaulted, so a manifest written before this existed still reads.
+    #[serde(default = "anything")]
+    pub shore: Band,
     /// Tufts of grass a square metre of this layer grows, where it shows in full.
     ///
     /// **Grass is derived, and stored nowhere.** The rule above already answers the question a
@@ -1324,6 +1355,27 @@ fn one() -> f32 {
 
 fn anything() -> Band {
     Band::ANY
+}
+
+/// Where the waterline sits on a map that has none.
+///
+/// A hundred kilometres down, so that every point on any map is far above it and [`Layer::shore`]
+/// selects the layers that are not a beach — which is how a dry map loses its shore rule rather
+/// than needing a second set of them.
+///
+/// **Far rather than infinite**, and that is the whole of why this is a number and not an `Option`
+/// the shader would have to branch on: the difference is fed to a [`Band`], and a point infinitely
+/// above the water is outside *every* band there is — including [`Band::ANY`], whose ends are
+/// ±10⁹. It would take the grass away with the sand and leave the ground magenta. A hundred
+/// kilometres is past anything a map can be and still comfortably inside that.
+pub const NO_WATERLINE: f32 = -1.0e5;
+
+/// The height the shore rule measures against, which for a dry map is [`NO_WATERLINE`].
+///
+/// One line, and it exists so that the client's uniform and this file's own arithmetic cannot
+/// spell the dry case differently — the shader is handed the *waterline*, not the `Option`.
+pub fn waterline(water_y: Option<f32>) -> f32 {
+    water_y.unwrap_or(NO_WATERLINE)
 }
 
 /// A range with a soft edge: full weight inside, fading to nothing across `blend` at each end.
@@ -1362,14 +1414,21 @@ impl Band {
 }
 
 impl Layer {
-    /// How much of this layer shows on a surface at this angle, this height and this depth of
-    /// hollow.
+    /// How much of this layer shows on a surface at this angle, this height, this depth of hollow
+    /// and this far above the water.
     ///
-    /// The CPU half of the derivation. Nothing in the game reads it yet — footstep sounds and
-    /// impact decals are what terrain.md §10 says will — but it is what the shader is tested
-    /// against, and a rule with no way to ask it from Rust is a rule nobody can test.
-    pub fn weight(&self, slope_degrees: f32, y: f32, dip: f32) -> f32 {
-        self.slope.weight(slope_degrees) * self.height.weight(y) * self.dip.weight(dip)
+    /// The CPU half of the derivation. The grass reads it — see `noob_tube_client::grass` — and
+    /// footstep sounds and impact decals are what terrain.md §10 says will; it is also what the
+    /// shader is tested against, and a rule with no way to ask it from Rust is a rule nobody can
+    /// test.
+    ///
+    /// `above_water` is `y` less the map's [`waterline`], and is passed rather than worked out
+    /// here because the caller is the only one that knows which map this point is on.
+    pub fn weight(&self, slope_degrees: f32, y: f32, dip: f32, above_water: f32) -> f32 {
+        self.slope.weight(slope_degrees)
+            * self.height.weight(y)
+            * self.dip.weight(dip)
+            * self.shore.weight(above_water)
     }
 }
 
@@ -1389,12 +1448,18 @@ pub fn slope_degrees(normal_y: f32) -> f32 {
 ///
 /// The question the CPU side of terrain.md §10 actually wants answered — *what am I standing on* —
 /// rather than the weights, which are the shader's business.
-pub fn surface_of(layers: &[Layer], normal_y: f32, y: f32, dip: f32) -> Option<usize> {
+pub fn surface_of(
+    layers: &[Layer],
+    normal_y: f32,
+    y: f32,
+    dip: f32,
+    above_water: f32,
+) -> Option<usize> {
     let slope = slope_degrees(normal_y);
     layers
         .iter()
         .enumerate()
-        .map(|(index, layer)| (index, layer.weight(slope, y, dip)))
+        .map(|(index, layer)| (index, layer.weight(slope, y, dip, above_water)))
         .filter(|(_, weight)| *weight > 0.0)
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(index, _)| index)
@@ -1405,15 +1470,22 @@ pub const MAX_LAYERS: usize = 4;
 
 /// The look a map gets when it does not describe one.
 ///
-/// The three `webgame` puts on its own hills map, by name and at its tile scale, because the two
-/// games are meant to feel like the same place: **Grass001** on open ground, **Ground048** in the
-/// hollows it drains into, **Rock020** where it is too steep to hold anything. All three are
-/// ambientCG packs under CC0 — see `assets/CREDITS.md`.
+/// Three of them are what `webgame` puts on its own hills map, by name and at its tile scale,
+/// because the two games are meant to feel like the same place: **Grass001** on open ground,
+/// **Ground048** in the hollows it drains into, **Rock020** where it is too steep to hold anything.
+/// **Ground098** is the fourth, and is the beach. All four are ambientCG packs under CC0 — see
+/// `assets/CREDITS.md`.
 ///
-/// **Two questions, asked in that order, and each one splits the set in half.** Is it steep? Then
-/// rock, and neither of the other two. Otherwise: does it sit below what surrounds it? Then dirt,
-/// else grass. Every pair that shares an edge shares its blend as well, so the weights sum to one
-/// through each crossing rather than merely near it.
+/// **Three questions, and each one splits the set in half.** Is it steep? Then rock, and none of
+/// the other three. Otherwise: is it under the water, or close enough above it to be washed? Then
+/// sand. Otherwise: does it sit below what surrounds it? Then dirt, else grass. Every pair that
+/// shares an edge shares its blend as well, so the weights sum to one through each crossing rather
+/// than merely near it.
+///
+/// **Rock is the one layer with no shore rule at all**, and that is the ordering doing its work: a
+/// cliff standing out of the water reads as rock rather than as a beach halfway up it, because sand
+/// is asked only about ground gentle enough to lie on. `webgame` buys the same thing by applying
+/// its shore rule before its steep one; here it falls out of the bands, with nothing to sequence.
 ///
 /// The steep edge is 35° with a 16° crossing, which is `webgame`'s `steepDeg` and twice its
 /// `steepBlendDeg` — the same numbers because the same crossing is meant. Grass to 27°, rock from
@@ -1423,10 +1495,11 @@ pub const MAX_LAYERS: usize = 4;
 /// on ground that is plainly a grassy hillside. The band was doing nothing but marking the
 /// gradient of the hill.
 ///
-/// Height carries no rule at all. It is what a shore line and a snow line are made of, and this
-/// map has neither: there is no water yet, so a sand band round y = 0 would put a beach across the
-/// flat ground everybody spawns on, and there is no snow texture for a summit. A rule that cannot
-/// be seen is a rule that cannot be checked, so it waits for the thing that makes it visible.
+/// Height still carries no rule at all, and the beach is why it never will carry this one. A shore
+/// line written as a height band would be a beach nailed to a world y: move the water in the editor
+/// and the sand stays where the water used to be. So the sand is bound to [`Layer::shore`], which
+/// is measured from wherever the author has just put the sea, and `height` is left for the thing it
+/// really is absolute for — a snow line, once there is a texture for a summit.
 ///
 /// A layer's `colour` is what its texture *averages* to in **linear** light, and it does three
 /// jobs: it is what the ground is painted with before the texture has loaded, it is what a
@@ -1441,6 +1514,27 @@ pub fn default_layers() -> Vec<Layer> {
     /// How deep a hollow has to be before it is a hollow, over the span `dip_at` measures.
     const HOLLOW: Band = Band { from: 1.5, to: 1.0e9, blend: 1.5 };
     const NOT_HOLLOW: Band = Band { from: -1.0e9, to: 1.5, blend: 1.5 };
+    /// How far the sand climbs above the water, and how wide the crossing out of it is.
+    ///
+    /// **Everything below the waterline is sand**, which is the easy half: a lake bed is a beach
+    /// with water on it, and the same rule covers both because the rule is about the water rather
+    /// than about the ground.
+    ///
+    /// The metre above it is the half worth choosing. `webgame` centres its shore blend on the
+    /// waterline exactly, and the consequence is that grass already outweighs sand at the water's
+    /// own edge — the beach is all under the surface and what a player walks down to is a lawn
+    /// stopping in the sea. Lifting the edge a metre puts the crossing where a crossing belongs:
+    /// sand is unambiguous at the waterline, mixed a metre up, and gone by two and a half. The
+    /// blend is that game's `shoreBlendY` of 1.5 m doubled, because a blend here is the *whole*
+    /// crossing where its smoothstep takes an edge either side — the same three metres, spelled
+    /// the way this file spells one.
+    ///
+    /// It is a rise, not a distance along the ground, and that is what makes one number enough for
+    /// every shore: a flat bay reaches metres out into a wide beach on the same rule that leaves a
+    /// steep bank with a hand's width of sand.
+    const STRAND: f32 = 1.0;
+    const WASHED: Band = Band { from: -1.0e9, to: STRAND, blend: 3.0 };
+    const DRY: Band = Band { from: STRAND, to: 1.0e9, blend: 3.0 };
 
     vec![
         Layer {
@@ -1451,6 +1545,7 @@ pub fn default_layers() -> Vec<Layer> {
             slope: NOT_STEEP,
             height: Band::ANY,
             dip: NOT_HOLLOW,
+            shore: DRY,
             grass: 8.0,
         },
         Layer {
@@ -1461,6 +1556,9 @@ pub fn default_layers() -> Vec<Layer> {
             slope: NOT_STEEP,
             height: Band::ANY,
             dip: HOLLOW,
+            // Dry, like the grass beside it. A lake bed is the deepest hollow on any map and would
+            // otherwise be the muddiest thing on it — which is a pond in a field, not a shore.
+            shore: DRY,
             // A gully is bare mud in the middle and grassy at its lip, and the lip is most of it:
             // this is what stops the crossing between the two layers being a line where the lawn
             // ends. Thin rather than none, because the ground there is dirt and it should look
@@ -1475,9 +1573,31 @@ pub fn default_layers() -> Vec<Layer> {
             slope: STEEP,
             height: Band::ANY,
             dip: Band::ANY,
+            // And no shore rule: see the note above. Rock spans both sides of the waterline, which
+            // is what makes a cliff into the sea a cliff rather than a beach stood on its end.
+            shore: Band::ANY,
             // Nothing grows on a rock face, and this is the number that says so — the lawn thins
             // out into the crossing to rock rather than stopping at an edge, because the weights
             // it is thinned by are the same ones the texture fades on.
+            grass: 0.0,
+        },
+        Layer {
+            texture: "Ground098_1K-PNG".into(),
+            tile_scale: 4.0,
+            colour: [0.526, 0.346, 0.184],
+            // Wet sand is not shiny — a beach is matt, and what glints on one is the water on top
+            // of it, which this game draws separately. Lower than the dirt beside it all the same:
+            // sand is sorted, so light leaves it more evenly than it leaves a clod of earth.
+            roughness: 0.85,
+            slope: NOT_STEEP,
+            height: Band::ANY,
+            // Every hollow and every ridge: a lake bed *is* a hollow and a sandbar is not, and the
+            // question the beach turns on has already been asked by the band below.
+            dip: Band::ANY,
+            shore: WASHED,
+            // A beach grows nothing. Not because sand cannot hold a plant, but because what grows
+            // on one is marram and reeds — a different thing on a different rule, and drawing the
+            // lawn down to the water would be worse than drawing nothing.
             grass: 0.0,
         },
     ]
@@ -2591,7 +2711,9 @@ mod tests {
                 let north = terrain.height_at(ix, iz - 1);
                 let south = terrain.height_at(ix, iz + 1);
                 let normal = Vec3::new(west - east, 2.0 * grid.spacing, south - north).normalize();
-                if let Some(index) = surface_of(&layers, normal.y, y, terrain.dip_at(ix, iz)) {
+                let above = y - waterline(terrain.water_y);
+                if let Some(index) = surface_of(&layers, normal.y, y, terrain.dip_at(ix, iz), above)
+                {
                     seen[index] += 1;
                 }
             }
@@ -2661,7 +2783,8 @@ mod tests {
                 let normal = Vec3::new(west - east, 2.0 * grid.spacing, south - north).normalize();
                 let dip = terrain.dip_at(ix, iz);
                 let y = terrain.height_over(here.x, here.y);
-                if surface_of(&layers, normal.y, y, dip) == Some(dirt) {
+                let above = y - waterline(terrain.water_y);
+                if surface_of(&layers, normal.y, y, dip, above) == Some(dirt) {
                     found += 1;
                     assert!(
                         dip > 0.0,
@@ -2682,23 +2805,62 @@ mod tests {
     #[test]
     fn the_default_rules_leave_no_gap() {
         let layers = default_layers();
+        // Twenty metres either side of the waterline covers every crossing the shore rule has, and
+        // the dry map's own reading is in the sweep as well: it is the one value of this axis a
+        // player is guaranteed to stand on, since every map starts without water.
+        let mut heights: Vec<f32> = (-40..=40).map(|n| n as f32 * 0.5).collect();
+        heights.push(0.0 - NO_WATERLINE);
         let mut slope = 0.0;
         while slope <= 90.0 {
             let mut y = DEFAULT_MIN_Y;
             while y <= DEFAULT_MAX_Y {
                 let mut dip = -10.0;
                 while dip <= 10.0 {
-                    let total: f32 = layers.iter().map(|l| l.weight(slope, y, dip)).sum();
-                    assert!(
-                        total > 1.0e-3,
-                        "no layer covers a {slope:.0}° surface at y = {y:.0}, dip {dip:.0} m",
-                    );
-                    dip += 0.5;
+                    for &above in &heights {
+                        let total: f32 =
+                            layers.iter().map(|l| l.weight(slope, y, dip, above)).sum();
+                        assert!(
+                            total > 1.0e-3,
+                            "no layer covers a {slope:.0}° surface at y = {y:.0}, \
+                             dip {dip:.0} m, {above:.0} m above the water",
+                        );
+                    }
+                    dip += 1.0;
                 }
-                y += 1.0;
+                y += 4.0;
             }
-            slope += 0.5;
+            slope += 1.0;
         }
+    }
+
+    /// The beach follows the water, and a map with no water has none.
+    ///
+    /// The whole reason the shore is an axis of its own rather than a height band: the same ground
+    /// at the same y is sand or grass depending on a number the author moves in the editor, and it
+    /// has to be sand *under* the water as well as beside it. The dry case is the one that would
+    /// fail silently the other way round — [`NO_WATERLINE`] is a real number being fed to a real
+    /// band, and a value chosen past [`Band::ANY`]'s own ends would take the grass with it and
+    /// leave the ground magenta.
+    #[test]
+    fn the_beach_is_where_the_water_is_and_a_dry_map_has_none() {
+        let layers = default_layers();
+        let sand = 3;
+        // Gentle, level ground that is not a hollow, so nothing but the shore rule decides it.
+        let ashore = |above: f32| surface_of(&layers, 1.0, 0.0, 0.0, above);
+
+        for water in [-30.0, 0.0, 12.5] {
+            let level = |y: f32| ashore(y - water);
+            assert_eq!(level(water - 6.0), Some(sand), "the lake bed is not sand");
+            assert_eq!(level(water), Some(sand), "the waterline itself is not sand");
+            assert_eq!(level(water + 1.0), Some(sand), "the beach stops at the water");
+            assert_ne!(level(water + 8.0), Some(sand), "the beach runs inland");
+        }
+
+        // And a map with no water at all: sand nowhere, and every other layer still covered.
+        let dry = 0.0 - waterline(None);
+        assert_ne!(ashore(dry), Some(sand), "a dry map grew a beach");
+        let total: f32 = layers.iter().map(|l| l.weight(0.0, 0.0, 0.0, dry)).sum();
+        assert!(total > 0.99, "a dry map left a gap in the rules: {total}");
     }
 
     /// Two layers sharing an edge sum to one all the way across it, so the seam never dips.

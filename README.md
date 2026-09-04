@@ -566,7 +566,7 @@ That folds the pack's normal, roughness and displacement maps into one RGBA imag
 them separately would cost three times the texture fetches of colour on a shader that is already
 triplanar and tiles stochastically. Without it a layer still draws — in its own colour, at its own
 constant roughness, lit by the height field's normal alone, which is what the ground looked like
-before any of this. The three packs that ship are baked and committed.
+before any of this. The four packs that ship are baked and committed.
 
 ### Importing a heightmap
 

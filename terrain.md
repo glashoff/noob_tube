@@ -153,8 +153,16 @@ Wanting paths you can drag is therefore a reason to have no splat, not a reason 
 ### Layers
 
 Up to four texture layers, each `{ texture: String, tile_scale: f32 }` plus the rule that selects
-it — a slope range, a height range, or a path kind. A layer names an ordinary material asset, so
-texture loading and packaging are whatever the rest of the game already does.
+it. A layer names an ordinary material asset, so texture loading and packaging are whatever the rest
+of the game already does.
+
+**The rule is a band on each of four axes, multiplied together**: how steep the ground is, how high
+it is, how far it sits below the ground around it, and how far it stands above the waterline. Only
+the first two are properties of the point alone — the third is a question about the neighbourhood,
+and the fourth is a question about the *map*, since the same ground is a lake bed or a meadow
+depending on where the author last put the sea. That is also why a shore rule cannot be a height
+band: a beach written as one is a beach nailed to a world y, left behind the moment the water
+moves. A path kind will be the fifth (§11).
 
 ### Water
 

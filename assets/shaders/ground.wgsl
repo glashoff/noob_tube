@@ -1,10 +1,11 @@
 // The ground's look, derived rather than painted.
 //
-// Which surface shows at a pixel is a function of that pixel's slope, its height, and how far it
-// sits below the ground around it — terrain.md's "Surface appearance is derived, and there is no
-// splat map". The third of those cannot be read off the point itself, so it rides in on the mesh:
-// `ground_mesh` writes it into the second uv set, where the standard vertex shader carries it
-// through for free.
+// Which surface shows at a pixel is a function of that pixel's slope, its height, how far it sits
+// below the ground around it, and how far it stands above the water — terrain.md's "Surface
+// appearance is derived, and there is no splat map". Only the first two can be read off the point
+// itself. The hollow rides in on the mesh: `ground_mesh` writes it into the second uv set, where
+// the standard vertex shader carries it through for free. The waterline comes in the uniform,
+// because it belongs to the map rather than to the point and moves without either changing.
 //
 // The *bands* are not written here: they are uploaded from `Layer` in `shared/src/terrain.rs`, so
 // this file and the Rust that goes with it cannot disagree about where a layer starts. Only the
@@ -45,10 +46,16 @@ struct GroundRules {
     // packed detail texture has loaded — not merely once it has been asked for, because an image
     // still loading is bound as white, and white unpacks to a normal lying on its side.
     dip: array<vec4<f32>, 4>,
+    // Shore band in metres above the waterline: from, to, blend. w is spare.
+    shore: array<vec4<f32>, 4>,
     // How many of the four rows are real. The struct's tail is rounded up to sixteen bytes by both
-    // WGSL and `ShaderType`, so this needs no padding written after it — and a `vec3` pad would
-    // have added twelve bytes *before* itself to reach its own alignment.
+    // WGSL and `ShaderType`, so these two need no padding written after them — and a `vec3` pad
+    // would have added twelve bytes *before* itself to reach its own alignment.
     count: u32,
+    // The world y the shore band is measured from. A map with no water sends a waterline a hundred
+    // kilometres down rather than a flag to branch on, so that every point is far above it and the
+    // beach selects nothing — see `NO_WATERLINE` in `shared/src/terrain.rs`.
+    waterline: f32,
 }
 
 // The group is a shader def rather than a number: Bevy moved the material bind group to 3 in this
@@ -350,14 +357,21 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // three corners `ground_mesh` measured it at.
     let dip = in.uv_b.x;
 
+    // And metres above the sea. The one input here that is not a property of the terrain: the same
+    // ground is a lake bed or a meadow depending on where the author last put the water, and a
+    // beach written as a height band would stay behind the day they moved it.
+    let above_water = world.y - rules.waterline;
+
     var weight = vec4<f32>(0.0);
     for (var i = 0u; i < rules.count; i = i + 1u) {
         let s = rules.slope[i];
         let h = rules.height[i];
         let d = rules.dip[i];
+        let w = rules.shore[i];
         weight[i] = band(slope, s.x, s.y, s.z)
             * band(world.y, h.x, h.y, h.z)
-            * band(dip, d.x, d.y, d.z);
+            * band(dip, d.x, d.y, d.z)
+            * band(above_water, w.x, w.y, w.z);
     }
     let total = weight.x + weight.y + weight.z + weight.w;
 

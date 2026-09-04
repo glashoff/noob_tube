@@ -149,7 +149,7 @@ only in texture size.
 | | |
 |---|---|
 | Source | **ambientCG** by Lennart Demes — https://ambientcg.com |
-| Packs | `Grass001`, `Ground048`, `Rock020`, each `1K-PNG` |
+| Packs | `Grass001`, `Ground048`, `Ground098`, `Rock020`, each `1K-PNG` |
 | Licence | **CC0 1.0 Universal** — https://creativecommons.org/publicdomain/zero/1.0/ |
 | Changes | The colour map of each pack, unchanged and under ambientCG's own file name. Beside it a `_Packed.png` this repository derives: the same pack's normal, roughness and displacement maps folded into one image, four channels, eight bits each. |
 
@@ -159,12 +159,14 @@ The original page for any pack is `https://ambientcg.com/view?id=<pack>` — for
 CC0 is a public domain dedication rather than a licence with conditions: the material may be used,
 modified, redistributed and sold, for any purpose, without permission or attribution. This entry
 exists because saying where something came from is decent practice, not because CC0 asks for it. It
-is also why these three files are let through `.gitignore` where the mounted gun above is not — the
+is also why these files are let through `.gitignore` where the mounted gun above is not — the
 question the `ND` raises does not arise here at all.
 
-**These are the three `webgame` uses on its own hills map**, at the same 4 m tile scale, so that the
-ground of the two games reads as the same place. Which of them shows at a point is decided by slope
-alone — see `default_layers` in `shared/src/terrain.rs`.
+**Three of them are what `webgame` uses on its own hills map**, at the same 4 m tile scale, so that
+the ground of the two games reads as the same place. `Ground098` is the fourth and has no
+counterpart there, because that game paints its beaches into a splat map rather than deriving them.
+Which pack shows at a point is decided by slope, by how deep a hollow it sits in, and by how far it
+is above the water — see `default_layers` in `shared/src/terrain.rs`.
 
 **Two files a pack, out of the eleven each one ships.** The colour map is taken as it is. The
 normal, roughness and displacement maps are not: separately they are nine megabytes and three more

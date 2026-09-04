@@ -16,7 +16,7 @@ use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
-use noob_tube_shared::terrain::{Layer, MAX_LAYERS};
+use noob_tube_shared::terrain::{Ground, Layer, MAX_LAYERS, waterline};
 
 /// The shader, by the path the asset server knows it under.
 const SHADER: &str = "shaders/ground.wgsl";
@@ -30,7 +30,15 @@ impl Plugin for GroundMaterialPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<GroundMaterial>::default())
             .init_resource::<GroundTextures>()
-            .add_systems(Update, (build_the_mipmaps, detail_has_arrived, detail_is_absent));
+            .add_systems(
+                Update,
+                (
+                    build_the_mipmaps,
+                    detail_has_arrived,
+                    detail_is_absent,
+                    the_waterline_moved.run_if(resource_exists_and_changed::<Ground>),
+                ),
+            );
     }
 }
 
@@ -78,18 +86,29 @@ pub struct GroundRules {
     /// question about the disk, and a layer that has no detail maps must come out exactly as it
     /// did before they existed rather than as noise. [`detail_has_arrived`] writes it.
     dip: [Vec4; MAX_LAYERS],
+    /// Shore band in metres above the waterline: from, to, blend. `w` is spare.
+    shore: [Vec4; MAX_LAYERS],
     /// How many of the rows are real. A map with more layers than the cap loses the extras here
     /// rather than in the shader, where the loop bound is this number.
-    ///
-    /// Last, and with no padding after it: both `ShaderType` and WGSL round a struct's size up to
-    /// its own alignment, which the `Vec4` arrays already put at sixteen bytes.
     count: u32,
+    /// The world y the shore band is measured from — the map's own water level resolved through
+    /// [`waterline`], so that a dry map is a number here rather than a branch in the shader.
+    ///
+    /// **The one field that is not the layers'**, and the one that changes without the map
+    /// changing: an author dragging the waterline expects the beach to come with it, and
+    /// [`the_waterline_moved`] writes this rather than rebuilding a material and sixty-four meshes
+    /// for one float.
+    ///
+    /// Last, together with `count`, and with no padding written after the pair: both `ShaderType`
+    /// and WGSL round a struct's size up to its own alignment, which the `Vec4` arrays already put
+    /// at sixteen bytes — and two four-byte scalars fit inside that tail with room to spare.
+    waterline: f32,
 }
 
 impl GroundRules {
-    /// The uniform a map's layers describe.
-    pub fn of(layers: &[Layer]) -> Self {
-        let mut rules = Self::default();
+    /// The uniform a map's layers describe, measured against the map's own waterline.
+    pub fn of(layers: &[Layer], water_y: Option<f32>) -> Self {
+        let mut rules = Self { waterline: waterline(water_y), ..Self::default() };
         for (slot, layer) in layers.iter().take(MAX_LAYERS).enumerate() {
             let [r, g, b] = layer.colour;
             rules.colour[slot] = Vec4::new(r, g, b, layer.roughness);
@@ -100,6 +119,7 @@ impl GroundRules {
                 Vec4::new(layer.height.from, layer.height.to, layer.height.blend, layer.tile_scale);
             // The `w` stays zero until the packed texture is really loaded — see the field.
             rules.dip[slot] = Vec4::new(layer.dip.from, layer.dip.to, layer.dip.blend, 0.0);
+            rules.shore[slot] = Vec4::new(layer.shore.from, layer.shore.to, layer.shore.blend, 0.0);
             rules.count += 1;
         }
         rules
@@ -313,6 +333,33 @@ fn detail_has_arrived(
     }
 }
 
+/// Update: moves the beach when somebody moves the sea.
+///
+/// The shore band is measured from the waterline rather than from a world y, so the one number it
+/// is measured against has to reach the shader every time it changes — and it changes without the
+/// map doing so. `dress_the_ground` cannot carry it: that runs on a new *map*, deliberately, since
+/// re-dressing the ground is sixty-four meshes and a fifth of a second, and an author dragging the
+/// water level would pay it on every frame of the drag.
+///
+/// So this writes the one float instead. A material fetched mutably re-uploads its uniform, which
+/// is the whole cost — no mesh is touched, and the water's own surface is rebuilt by
+/// [`water`](crate::water) on the same change.
+///
+/// **Read through `get` before `get_mut`.** Asking an `Assets` for a mutable handle marks the asset
+/// changed whether or not anything is written to it, so a system that reached straight for one
+/// would re-upload the uniform on every stroke of a held brush — `Ground` is marked changed by
+/// those too. The comparison has to happen on the immutable side to mean anything.
+fn the_waterline_moved(ground: Res<Ground>, mut materials: ResMut<Assets<GroundMaterial>>) {
+    let now = waterline(ground.0.water_y);
+    if materials.get(&GROUND_MATERIAL).is_none_or(|it| it.extension.rules.waterline == now) {
+        return;
+    }
+    if let Some(mut material) = materials.get_mut(&GROUND_MATERIAL) {
+        material.extension.rules.waterline = now;
+        debug!("the waterline moved to {now} m");
+    }
+}
+
 /// Halves an RGBA8 image down to 1×1, appending each level to its data. Returns the level count.
 ///
 /// **A packed map is averaged straight, a colour map through the transfer function.** The two
@@ -414,6 +461,7 @@ pub fn dress(
     assets: &AssetServer,
     ours: &mut GroundTextures,
     layers: &[Layer],
+    water_y: Option<f32>,
 ) -> Handle<GroundMaterial> {
     let mut texture = [const { None }; MAX_LAYERS];
     let mut detail = [const { None }; MAX_LAYERS];
@@ -441,7 +489,7 @@ pub fn dress(
                 ..default()
             },
             extension: GroundLayers {
-                rules: GroundRules::of(layers),
+                rules: GroundRules::of(layers, water_y),
                 texture_0,
                 texture_1,
                 texture_2,
@@ -463,7 +511,7 @@ pub fn dress(
 mod tests {
     use super::*;
     use image::GenericImageView;
-    use noob_tube_shared::terrain::default_layers;
+    use noob_tube_shared::terrain::{NO_WATERLINE, default_layers};
 
     /// The colour written for each layer is the colour its texture actually averages to.
     ///
@@ -551,8 +599,9 @@ mod tests {
     #[test]
     fn the_rules_reach_the_uniform_as_they_were_written() {
         let layers = default_layers();
-        let rules = GroundRules::of(&layers);
+        let rules = GroundRules::of(&layers, Some(-12.0));
         assert_eq!(rules.count as usize, layers.len());
+        assert_eq!(rules.waterline, -12.0, "the waterline did not cross");
         for (slot, layer) in layers.iter().enumerate() {
             assert_eq!(rules.colour[slot].xyz(), Vec3::from_array(layer.colour));
             assert_eq!(rules.colour[slot].w, layer.roughness);
@@ -566,8 +615,16 @@ mod tests {
             assert_eq!(rules.dip[slot].x, layer.dip.from);
             assert_eq!(rules.dip[slot].y, layer.dip.to);
             assert_eq!(rules.dip[slot].z, layer.dip.blend);
+            assert_eq!(rules.shore[slot].x, layer.shore.from);
+            assert_eq!(rules.shore[slot].y, layer.shore.to);
+            assert_eq!(rules.shore[slot].z, layer.shore.blend);
             assert_eq!(rules.slope[slot].w, 1.0, "a layer with a texture was marked as having none");
         }
+
+        // And the dry map, which is the case the shader has no branch for: it is told a waterline
+        // rather than that there is none, and the number has to be the one the CPU side would use
+        // or the two halves of terrain.md §10 disagree about where the beach is.
+        assert_eq!(GroundRules::of(&layers, None).waterline, NO_WATERLINE);
     }
 
     /// A map with more layers than the shader has room for loses the extras here, where it can be
@@ -578,7 +635,7 @@ mod tests {
         while layers.len() <= MAX_LAYERS {
             layers.push(layers[0].clone());
         }
-        let rules = GroundRules::of(&layers);
+        let rules = GroundRules::of(&layers, None);
         assert_eq!(rules.count as usize, MAX_LAYERS);
     }
 }
