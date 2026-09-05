@@ -1,0 +1,7 @@
+# Copy to `deploy_settings`, which is not checked in, and fill in your machine.
+#
+# `deploy.sh` sources it before it does anything. The environment wins over what is set here, so
+# a one-off deploy elsewhere needs no edit: NOOB_TUBE_DEPLOY_HOST=root@other ./deploy.sh
+
+# Where the server goes: anything ssh understands as a destination.
+NOOB_TUBE_DEPLOY_HOST=root@example.com

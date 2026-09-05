@@ -23,7 +23,24 @@ set -euo pipefail
 
 # --- What and where --------------------------------------------------------------------------
 
-HOST="${NOOB_TUBE_DEPLOY_HOST:-root@fkirchhoff.com}"
+# The machine this deploys to is not in the repository. `deploy_settings` beside this script is
+# yours and is not checked in; `deploy_settings.example` says what belongs in it. The environment
+# still wins over the file, so a one-off deploy elsewhere is
+# `NOOB_TUBE_DEPLOY_HOST=root@other ./deploy.sh` without touching anything.
+SETTINGS="$(dirname "$0")/deploy_settings"
+host_from_env="${NOOB_TUBE_DEPLOY_HOST:-}"
+if [[ -f $SETTINGS ]]; then
+    # shellcheck source=/dev/null
+    source "$SETTINGS"
+fi
+
+HOST="${host_from_env:-${NOOB_TUBE_DEPLOY_HOST:-}}"
+if [[ -z $HOST ]]; then
+    echo "deploy.sh: no target to deploy to." >&2
+    echo "  Set NOOB_TUBE_DEPLOY_HOST to an ssh destination such as root@example.com, either in" >&2
+    echo "  the environment or in $SETTINGS. See deploy_settings.example." >&2
+    exit 1
+fi
 PREFIX=/srv/noob_tube          # everything the server owns on the far side lives under here
 RUN_USER=noobtube              # and it runs as this, which is not root and cannot log in
 SERVICE=noob-tube

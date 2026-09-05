@@ -73,6 +73,10 @@ __pycache__/
 # Local network settings; copy noob_tube.example.toml to get started.
 /noob_tube.toml
 
+# Which machine `deploy.sh` deploys to. A repository does not know that, and putting a hostname in
+# one publishes it; copy deploy_settings.example to get started.
+/deploy_settings
+
 # Maps players make while playing. Content rather than source: a map is written by a running
 # server, and the built-in one — the map a server starts on when this directory is empty — lives in
 # `terrain.rs` instead.
