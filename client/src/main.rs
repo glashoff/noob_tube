@@ -39,22 +39,30 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::net::ToSocketAddrs;
 
 fn main() {
-    // `noob_tube_client server` is the dedicated server, run out of this binary. It exists because
-    // a local round otherwise means keeping two builds in step by hand, and the moment shared code
-    // changes and only one of them is rebuilt, the two disagree about the protocol. Handled before
-    // anything else: `configure` reads the client's own settings, which a server has no use for.
+    // `noob_tube_client server` hosts: this process runs the server as well, on its own thread, and
+    // this client connects to it. It exists because a local round otherwise means keeping two
+    // builds in step by hand, and the moment shared code changes and only one of them is rebuilt,
+    // the two disagree about the protocol. One process is one build, one log, and one window to
+    // close when the round is over.
+    //
+    // Settled first, because everything below is built around what that server says — see
+    // [`configure`]. Started last, once the client's `LogPlugin` is in place; see
+    // `Prepared::start_beside_the_client`.
     //
     // Not in a browser, where there are no arguments to read and no socket to listen on — and
     // where the server's dependencies do not build at all. See this crate's `Cargo.toml`.
     #[cfg(not(target_family = "wasm"))]
-    if std::env::args().nth(1).as_deref() == Some("server") {
-        noob_tube_server::run();
-        return;
-    }
+    let hosting = (std::env::args().nth(1).as_deref() == Some("server"))
+        .then(noob_tube_server::prepare);
+    #[cfg(not(target_family = "wasm"))]
+    let hosted = hosting.as_ref().map(noob_tube_server::Prepared::info);
+    #[cfg(target_family = "wasm")]
+    let hosted = None;
 
-    let (net, dial) = configure();
+    let (net, dial) = configure(hosted);
 
-    App::new()
+    let mut app = App::new();
+    app
         .add_plugins(windowing())
         .insert_resource(Time::<Fixed>::from_hz(net.tick_hz))
         // How far in the past other players are drawn. Inserted before the plugin group, which
@@ -98,8 +106,17 @@ fn main() {
         .add_systems(Startup, connect)
         .add_observer(on_connected)
         .add_plugins(remote_inspection())
-        .add_plugins(world_inspector())
-        .run();
+        .add_plugins(world_inspector());
+
+    // The server last, so that the subscriber the plugins above installed is the one it logs
+    // through, and so it is listening well before `connect` runs — the window and the renderer
+    // still have to come up between here and the first Startup system.
+    #[cfg(not(target_family = "wasm"))]
+    if let Some(hosting) = hosting {
+        hosting.start_beside_the_client();
+    }
+
+    app.run();
 }
 
 /// The plugin group, with or without a window on someone's desktop.
@@ -258,21 +275,33 @@ fn where_it_is_drawn() -> Window {
 /// tick rate still fails safely, as a refused connection rather than a desync; a link conditioner
 /// nobody agreed on fails as a set of numbers that mean nothing, which is quieter and worse.
 ///
+/// A hosted server — `noob_tube_client server` — is passed in rather than asked: it is in this
+/// process and has already settled all three answers. Nothing downstream knows the difference.
+///
 /// `println!` rather than `info!`, and this is the one place it is right: all of this happens
 /// before `App::new`, so `LogPlugin` has not installed a tracing subscriber and every `info!` here
 /// would go nowhere at all.
-fn configure() -> (NetConfig, Dial) {
+fn configure(hosted: Option<noob_tube_shared::metadata::ServerInfo>) -> (NetConfig, Dial) {
     let mut net = NetConfig::load();
+    // Our own server is on this machine whatever `NOOB_TUBE_SERVER` says. That variable names the
+    // server to *find*, and there is nothing to find when we are the one running it — a client that
+    // dialled the address in it would host a round and then join somebody else's.
+    let host = if hosted.is_some() { platform::default_host() } else { server_host() };
     let mut dial = Dial {
         // Replaced below by what the server says, when it says anything.
-        target: format!("https://{}:{}", server_host(), net.port),
+        target: format!("https://{host}:{}", net.port),
         // What to name in the token if the server will not say: the address we resolved for
         // ourselves, which is what this did before the server published one.
         token_addr: fallback_token_addr(net.port),
         cert_digest: String::new(),
     };
 
-    let (said, asked) = ask_the_server(&net);
+    // A hosted server has already answered, in the same process and without a socket. Everything
+    // after this point cannot tell the difference, and should not: it is the same three answers.
+    let (said, asked) = match hosted {
+        Some(info) => (Some(info), "the server in this process".to_string()),
+        None => ask_the_server(&net),
+    };
     match said {
         Some(server) => {
             dial.token_addr = server.token_addr;
@@ -283,7 +312,7 @@ fn configure() -> (NetConfig, Dial) {
             // to be told it in: it knows the origin that served the page and nothing else. The one
             // number that cannot be wrong is the port the server is actually listening on, which is
             // the one it just published.
-            dial.target = format!("https://{}:{}", server_host(), server.token_addr.port());
+            dial.target = format!("https://{host}:{}", server.token_addr.port());
             match net.adopt_from_server(&server.net) {
                 moved if moved.is_empty() => {
                     platform::say(&format!("{asked} agrees with our settings"))

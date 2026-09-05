@@ -40,8 +40,19 @@ use noob_tube_shared::types::Authored;
 use noob_tube_shared::PLACEHOLDER_PRIVATE_KEY;
 use std::net::{Ipv4Addr, SocketAddr};
 
-/// Build the server `App` and run it until it exits.
+/// Build the server `App` and run it until it exits. What the dedicated binary does.
 pub fn run() {
+    prepare().build(Logging::Ours).run();
+}
+
+/// Reads the settings, works out the address and mints the certificate — everything a server
+/// settles before there is an `App`.
+///
+/// Split out from [`run`] for the client that hosts its own server: `noob_tube_client server` runs
+/// both in one process, and the client has to be built around what this server will say — the tick
+/// rate goes into its plugin group, the certificate digest into its transport — which means all of
+/// it has to be known before either `App` exists. See [`Prepared`].
+pub fn prepare() -> Prepared {
     // Read once, at startup, before anything can ask for it.
     let net = NetConfig::load();
 
@@ -57,130 +68,198 @@ pub fn run() {
         }
     };
 
-    App::new()
-        // Sleeping between frames rather than spinning: see `NetConfig::frame_duration`, which is
-        // where the measurement and the choice of interval are written down.
-        .add_plugins(MinimalPlugins.set(bevy::app::ScheduleRunnerPlugin::run_loop(
-            net.frame_duration(),
-        )))
-        // lightyear registers states; MinimalPlugins does not include StatesPlugin.
-        .add_plugins(bevy::state::app::StatesPlugin)
-        .add_plugins(bevy::log::LogPlugin::default())
-        .add_plugins(server::ServerPlugins {
-            tick_duration: net.tick_duration(),
-        })
-        // The protocol must be registered after the plugin group and before any Server entity.
-        .add_plugins(ProtocolPlugin { net })
-        .insert_resource(Time::<Fixed>::from_hz(net.tick_hz))
-        // How often replication updates go out. Without this lightyear sends every frame, and
-        // interpolation then has nothing to interpolate across — see `SEND_RATE`.
-        .insert_resource(ReplicationMetadata::new(net.send_interval()))
-        .insert_resource(net)
-        .insert_resource(certificate)
-        .insert_resource(bound)
-        // The map. The server owns it — it is the authority, and until step six of terrain.md
-        // there is one map and it is the built-in one. Every client is sent a copy of exactly
-        // this on join; none of them may read one for itself.
-        .insert_resource(Ground::of(terrain::default_terrain()))
-        // What maps there are, read once at startup. The built-in map is what a server starts on
-        // and it has no file behind it, so `current` is None until somebody saves or loads.
-        .insert_resource(maps::Maps::discover(maps::maps_dir()))
-        .add_plugins(PhysicsPlugin)
-        // The same geometry the client collides against, built from the same numbers. If the two
-        // disagreed, every step near the difference would produce a correction the player sees.
-        .add_systems(
-            Startup,
-            (start_listening, level::spawn_level, spawn_props),
-        )
-        // The ground, whenever the map appears or changes. PreUpdate rather than Startup so that
-        // the server and a client build it through the same path — see `level::build_the_ground`,
-        // which is where the reason it cannot be Startup on a client is written down.
-        // Map requests first, so a map that changes this frame is the one this frame's ticks run
-        // against, and the ground is built from it in the same pass.
-        .init_resource::<PendingEdits>()
-        .init_resource::<sculpting::Budgets>()
-        .init_resource::<markers::Placements>()
-        .init_resource::<water::WaterEdits>()
-        .add_message::<GroundPatched>()
-        // Map requests first, so a map that changes this frame is the one this frame's ticks run
-        // against, and the ground is built from it in the same pass. Then strokes, which are
-        // checked against whichever map that left in play; then the edits whose tick has come; then
-        // the tiles they moved.
-        .add_systems(
-            PreUpdate,
-            (
-                maps::serve_map_requests,
-                sculpting::serve_strokes,
-                markers::serve_marker_edits,
-                water::serve_water_edits,
-                level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
-                level::build_the_props.run_if(resource_exists_and_changed::<Ground>),
-                restock_the_fleet.run_if(resource_exists_and_changed::<Ground>),
-                restock_the_crates.run_if(resource_exists_and_changed::<Ground>),
-                sculpt::apply_due_edits.run_if(resource_exists::<Ground>),
-                sculpt::lift_with_the_ground::<()>.run_if(resource_exists::<Ground>),
-                sculpt::lift_bodies_with_the_ground::<()>.run_if(resource_exists::<Ground>),
-                level::rebuild_patched_ground.run_if(resource_exists::<Ground>),
+    Prepared { net, bound, certificate }
+}
+
+/// A server that is settled but not yet running.
+///
+/// Two steps rather than one, and only a hosting client needs both. It asks for [`info`](Self::info)
+/// while it builds itself, and starts the server with
+/// [`start_beside_the_client`](Self::start_beside_the_client) once it has — which is the right way
+/// round for the log, since the client's `LogPlugin` installs the one tracing subscriber this
+/// process has and anything the server said before that would go nowhere.
+pub struct Prepared {
+    net: NetConfig,
+    bound: BoundAddr,
+    certificate: certificate::ServerCertificate,
+}
+
+impl Prepared {
+    /// What a client needs to dial this server.
+    ///
+    /// The same three answers the metadata endpoint gives everybody else — see
+    /// [`noob_tube_shared::metadata`] — handed over directly rather than fetched over a socket,
+    /// because this client is in the same process and there is nothing to discover. The endpoint
+    /// still goes up when the server starts: a hosted round is one others can join.
+    pub fn info(&self) -> noob_tube_shared::metadata::ServerInfo {
+        noob_tube_shared::metadata::ServerInfo {
+            net: self.net,
+            token_addr: self.bound.0,
+            cert_digest: self.certificate.digest.clone(),
+        }
+    }
+
+    /// Runs the server on its own thread, for as long as the process lives.
+    ///
+    /// Its own thread because the client owns the main one: winit will not run an event loop
+    /// anywhere else, and this `App` has no window and does not care where it ticks. Nothing is
+    /// joined — when the client's window closes the process ends, and the server with it.
+    pub fn start_beside_the_client(self) {
+        std::thread::Builder::new()
+            .name("noob_tube_server".to_string())
+            .spawn(move || self.build(Logging::TheClients).run())
+            .expect("the server thread could not be started");
+    }
+
+    /// The whole server `App`, built and ready to be run wherever the caller wants it.
+    fn build(self, logging: Logging) -> App {
+        let Prepared { net, bound, certificate } = self;
+
+        let mut app = App::new();
+        app
+            // Sleeping between frames rather than spinning: see `NetConfig::frame_duration`, which is
+            // where the measurement and the choice of interval are written down.
+            .add_plugins(MinimalPlugins.set(bevy::app::ScheduleRunnerPlugin::run_loop(
+                net.frame_duration(),
+            )))
+            // lightyear registers states; MinimalPlugins does not include StatesPlugin.
+            .add_plugins(bevy::state::app::StatesPlugin)
+            .add_plugins(the_log(logging))
+            .add_plugins(server::ServerPlugins {
+                tick_duration: net.tick_duration(),
+            })
+            // The protocol must be registered after the plugin group and before any Server entity.
+            .add_plugins(ProtocolPlugin { net })
+            .insert_resource(Time::<Fixed>::from_hz(net.tick_hz))
+            // How often replication updates go out. Without this lightyear sends every frame, and
+            // interpolation then has nothing to interpolate across — see `SEND_RATE`.
+            .insert_resource(ReplicationMetadata::new(net.send_interval()))
+            .insert_resource(net)
+            .insert_resource(certificate)
+            .insert_resource(bound)
+            // The map. The server owns it — it is the authority, and until step six of terrain.md
+            // there is one map and it is the built-in one. Every client is sent a copy of exactly
+            // this on join; none of them may read one for itself.
+            .insert_resource(Ground::of(terrain::default_terrain()))
+            // What maps there are, read once at startup. The built-in map is what a server starts on
+            // and it has no file behind it, so `current` is None until somebody saves or loads.
+            .insert_resource(maps::Maps::discover(maps::maps_dir()))
+            .add_plugins(PhysicsPlugin)
+            // The same geometry the client collides against, built from the same numbers. If the two
+            // disagreed, every step near the difference would produce a correction the player sees.
+            .add_systems(
+                Startup,
+                (start_listening, level::spawn_level, spawn_props),
             )
-                .chain()
-                .after(MessageSystems::Receive),
-        )
-        .add_systems(
-            FixedUpdate,
-            // Before the step, which consumes the trigger by starting the cooldown, and which
-            // moves everyone. A shot has to be resolved against the positions its shooter was
-            // looking at, not the ones a tick of movement later.
-            // The props move with the players, and both after the shots are resolved: a shot is
-            // tested against the world as its shooter left it, not one tick of everything later.
-            // Suspension alongside the rest: it only applies forces, which the solver in
-            // `FixedPostUpdate` then consumes.
-            (
-                // Getting in and out first: it decides who is walking this tick and who is driving,
-                // and both of the steps below depend on that answer.
+            // The ground, whenever the map appears or changes. PreUpdate rather than Startup so that
+            // the server and a client build it through the same path — see `level::build_the_ground`,
+            // which is where the reason it cannot be Startup on a client is written down.
+            // Map requests first, so a map that changes this frame is the one this frame's ticks run
+            // against, and the ground is built from it in the same pass.
+            .init_resource::<PendingEdits>()
+            .init_resource::<sculpting::Budgets>()
+            .init_resource::<markers::Placements>()
+            .init_resource::<water::WaterEdits>()
+            .add_message::<GroundPatched>()
+            // Map requests first, so a map that changes this frame is the one this frame's ticks run
+            // against, and the ground is built from it in the same pass. Then strokes, which are
+            // checked against whichever map that left in play; then the edits whose tick has come; then
+            // the tiles they moved.
+            .add_systems(
+                PreUpdate,
                 (
-                    use_vehicles,
-                    the_world_follows_the_drivers,
-                    take_the_wheel,
-                    ease_the_driverless,
+                    maps::serve_map_requests,
+                    sculpting::serve_strokes,
+                    markers::serve_marker_edits,
+                    water::serve_water_edits,
+                    level::build_the_ground.run_if(resource_exists_and_changed::<Ground>),
+                    level::build_the_props.run_if(resource_exists_and_changed::<Ground>),
+                    restock_the_fleet.run_if(resource_exists_and_changed::<Ground>),
+                    restock_the_crates.run_if(resource_exists_and_changed::<Ground>),
+                    sculpt::apply_due_edits.run_if(resource_exists::<Ground>),
+                    sculpt::lift_with_the_ground::<()>.run_if(resource_exists::<Ground>),
+                    sculpt::lift_bodies_with_the_ground::<()>.run_if(resource_exists::<Ground>),
+                    level::rebuild_patched_ground.run_if(resource_exists::<Ground>),
+                )
+                    .chain()
+                    .after(MessageSystems::Receive),
+            )
+            .add_systems(
+                FixedUpdate,
+                // Before the step, which consumes the trigger by starting the cooldown, and which
+                // moves everyone. A shot has to be resolved against the positions its shooter was
+                // looking at, not the ones a tick of movement later.
+                // The props move with the players, and both after the shots are resolved: a shot is
+                // tested against the world as its shooter left it, not one tick of everything later.
+                // Suspension alongside the rest: it only applies forces, which the solver in
+                // `FixedPostUpdate` then consumes.
+                (
+                    // Getting in and out first: it decides who is walking this tick and who is driving,
+                    // and both of the steps below depend on that answer.
+                    (
+                        use_vehicles,
+                        the_world_follows_the_drivers,
+                        take_the_wheel,
+                        ease_the_driverless,
+                    )
+                        .chain(),
+                    resolve_shots,
+                    (
+                        simulation::step_players::<()>,
+                        simulation::look_around::<()>,
+                        move_props,
+                        vehicle::drive_vehicles::<()>,
+                        vehicle::right_flipped_vehicles::<()>,
+                        vehicle::lift_stuck_vehicles::<()>.run_if(resource_exists::<Ground>),
+                    ),
                 )
                     .chain(),
-                resolve_shots,
-                (
-                    simulation::step_players::<()>,
-                    simulation::look_around::<()>,
-                    move_props,
-                    vehicle::drive_vehicles::<()>,
-                    vehicle::right_flipped_vehicles::<()>,
-                    vehicle::lift_stuck_vehicles::<()>.run_if(resource_exists::<Ground>),
-                ),
             )
-                .chain(),
-        )
-        // After the step, and in its own schedule so there is no doubt about the order: the
-        // history has to hold the position at the *end* of a tick, because that is the one
-        // replication sends and therefore the one a client interpolates towards.
-        // Explicitly after the solver, because Avian runs in this schedule too. Without the
-        // ordering the two are ambiguous, and a *dynamic* target — a loose crate, a vehicle —
-        // would have its history filled with the pose from before the step on some runs and after
-        // it on others. A kinematic crate hid that: nothing moves it except a system of ours.
-        .add_systems(
-            FixedPostUpdate,
-            // A driver is wherever their vehicle is, and the vehicle only reaches this tick's pose
-            // in the solver — so this has to come after it, and before the histories are written.
-            (carry_drivers, record_positions)
-                .chain()
-                .after(PhysicsSystems::StepSimulation),
-        )
-        // Once per frame, not once per tick: several ticks can resolve between two frames, and
-        // there is no reason to touch the network that often for something cosmetic.
-        .add_systems(PostUpdate, broadcast_shots)
-        .init_resource::<PendingShots>()
-        .add_observer(on_client_connected)
-        .add_observer(on_peer_connected)
-        .add_observer(send_the_map)
-        .add_observer(on_player_gone)
-        .add_plugins(remote_inspection())
-        .run();
+            // After the step, and in its own schedule so there is no doubt about the order: the
+            // history has to hold the position at the *end* of a tick, because that is the one
+            // replication sends and therefore the one a client interpolates towards.
+            // Explicitly after the solver, because Avian runs in this schedule too. Without the
+            // ordering the two are ambiguous, and a *dynamic* target — a loose crate, a vehicle —
+            // would have its history filled with the pose from before the step on some runs and after
+            // it on others. A kinematic crate hid that: nothing moves it except a system of ours.
+            .add_systems(
+                FixedPostUpdate,
+                // A driver is wherever their vehicle is, and the vehicle only reaches this tick's pose
+                // in the solver — so this has to come after it, and before the histories are written.
+                (carry_drivers, record_positions)
+                    .chain()
+                    .after(PhysicsSystems::StepSimulation),
+            )
+            // Once per frame, not once per tick: several ticks can resolve between two frames, and
+            // there is no reason to touch the network that often for something cosmetic.
+            .add_systems(PostUpdate, broadcast_shots)
+            .init_resource::<PendingShots>()
+            .add_observer(on_client_connected)
+            .add_observer(on_peer_connected)
+            .add_observer(send_the_map)
+            .add_observer(on_player_gone)
+            .add_plugins(remote_inspection());
+        app
+    }
+}
+
+/// Who installs the tracing subscriber, of which a process has exactly one.
+enum Logging {
+    /// The server's own: the dedicated binary, where nothing else has installed one.
+    Ours,
+    /// The client's, in a process running both. `LogPlugin` a second time is a subscriber that
+    /// cannot be installed — the server's lines still come out, through the client's, because a
+    /// subscriber is global and `info!` here finds whichever one is in place.
+    TheClients,
+}
+
+/// `LogPlugin`, or nothing at all, as a plugin either way.
+fn the_log(logging: Logging) -> impl Plugin {
+    move |app: &mut App| {
+        if matches!(logging, Logging::Ours) {
+            app.add_plugins(bevy::log::LogPlugin::default());
+        }
+    }
 }
 
 /// Which spawn point a player returns to. Server-side, never replicated.

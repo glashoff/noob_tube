@@ -19,8 +19,9 @@ export LD_LIBRARY_PATH="$target/deps:$rustlib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PAT
 
 case "${1:-client}" in
     client) shift || true; exec "$target/noob_tube_client" "$@" ;;
-    # The dedicated binary. `./run.sh client server` runs the same server out of the client build
-    # instead, which is the one to use while both sides are being changed together.
+    # The dedicated binary, on its own. `./run.sh client server` hosts instead — the same server on
+    # a thread beside a client in one process, which is the one to use while both sides are being
+    # changed together.
     server) shift || true; exec "$target/noob_tube_server" "$@" ;;
     *) echo "usage: $0 {client|server} [args...]" >&2; exit 2 ;;
 esac
