@@ -17,7 +17,7 @@
 // perturbation and a foam mask, not displacement. The mesh's own vertices stay flat at the water
 // level, so a shore that a stroke has just moved is still a shore this frame.
 //
-// Ported from `../webgame`, `client/src/waterMaterial.ts`, which is where the numbers were found.
+// Ported from `webgame`, `client/src/waterMaterial.ts`, which is where the numbers were found.
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,

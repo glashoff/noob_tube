@@ -25,7 +25,7 @@ is smaller than it looks.
 
 ### Prior art
 
-A predecessor project, [`webgame`](../webgame), implements this same system in TypeScript against
+A predecessor project, [`webgame`](https://github.com/glashoff/WebGame), implements this same system in TypeScript against
 three.js and Rapier; its `terrain.md` is a long document that records what its implementation
 actually settled, as opposed to what it first proposed. Findings taken from it are marked where
 they appear, because a measured result from a working implementation is worth more than an

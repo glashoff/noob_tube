@@ -9,7 +9,7 @@
 //! opacity, the foam at the shoreline — and the shoreline itself, which lands exactly where the
 //! ground crosses the water level rather than on the nearest grid cell.
 //!
-//! The look is the one the predecessor project settled on (`../webgame`, `client/src/waterMaterial.ts`),
+//! The look is the one the predecessor project settled on (`webgame`, `client/src/waterMaterial.ts`),
 //! ported rather than reinvented: its numbers are the result of somebody looking at a lake for a
 //! week, and there is nothing about this engine that would make different ones better.
 //!

@@ -9,7 +9,7 @@
 //!
 //! **Blades, not textured cross-quads.** The usual cheap grass is two crossed quads wearing an
 //! alpha-tested foliage texture, and it is wrong here for the reason the predecessor project
-//! (`../webgame`, `client/src/grass.ts`) gives: this repository has no foliage texture — every pack
+//! (`webgame`, `client/src/grass.ts`) gives: this repository has no foliage texture — every pack
 //! in `assets/textures` is ground or wall — and alpha is exactly the channel a texture-reducing
 //! tool is entitled to throw away. Real geometry needs no asset and no alpha test. It costs
 //! triangles instead, which the density and the draw distance control.

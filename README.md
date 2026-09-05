@@ -7,7 +7,7 @@ Named after the underslung grenade launcher — the weapon that lets players wit
 collect kills anyway.
 
 This project reuses the player model and movement tuning of
-[`webgame`](../webgame), a browser-based shooter written in TypeScript. Everything else is built
+[`webgame`](https://github.com/glashoff/WebGame), a browser-based shooter written in TypeScript. Everything else is built
 from scratch in Rust.
 
 ---

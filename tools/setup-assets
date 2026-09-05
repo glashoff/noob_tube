@@ -72,7 +72,8 @@ converted="$source_dir/anims"
 
 [ -d "$source_dir" ] || fail "No such directory: $source_dir
 
-Pass the directory holding the Mixamo packs, or check out webgame beside this repository.
+Pass the directory holding the Mixamo packs, or check out https://github.com/glashoff/WebGame
+beside this repository as `webgame`.
 Both packs are free from https://www.mixamo.com with an Adobe account:
   · character \"Swat\"              -> Shooter Pack/Swat.fbx
   · \"Rifle 8-Way Locomotion Pack\" -> Rifle 8-Way Locomotion Pack/*.fbx  (FBX Binary)
