@@ -109,9 +109,11 @@ the storage path; on WebGL2 the shader declares a fixed `array<vec4<f32>, 64>` a
 so no PBR pipeline can be built and the client quits.
 
 Reported upstream as [bevyengine/bevy#21309](https://github.com/bevyengine/bevy/issues/21309) in
-October 2025. The fix lives on two branches of a fork — one off `main` for the pull request, one off
-the `v0.19.1` tag which is what the pin points at — and a reproduction that builds both in a browser
-is at [`bevy-webgl2-visibility-range-repro`](https://github.com/glashoff/bevy-webgl2-visibility-range-repro).
+October 2025, and offered as [bevyengine/bevy#25687](https://github.com/bevyengine/bevy/pull/25687)
+in September 2026 — that pull request is what to watch. The fix lives on two branches of a fork:
+one off `main`, which is the pull request, and one off the `v0.19.1` tag, which is what the pin
+points at. A reproduction that builds both in a browser is at
+[`bevy-webgl2-visibility-range-repro`](https://github.com/glashoff/bevy-webgl2-visibility-range-repro).
 
 **Delete the whole block** the day a Bevy release carries the fix. Until then it is pinned by
 revision and never by branch, so that what this tree builds against cannot change underneath it.

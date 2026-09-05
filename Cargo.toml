@@ -89,7 +89,7 @@ debug = false
 # WebGL2 — the shader takes the uniform branch and declares a fixed `array<vec4<f32>, 64>`, so
 # 1024 bytes are required and every PBR pipeline fails validation, which takes the whole client
 # down. Reported upstream as bevyengine/bevy#21309 in October 2025 and untouched since; this
-# revision is that fix on top of the v0.19.1 tag, offered back as a pull request.
+# revision is that fix on top of the v0.19.1 tag, offered back as bevyengine/bevy#25687.
 #
 # **Every Bevy crate, and it has to be every one.** The crates in Bevy's repository depend on each
 # other by `path`, so patching one drags its siblings out of the repository too — while the crates
